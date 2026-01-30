@@ -1,4 +1,4 @@
-using AgriForecast.Application.Helper;
+using AgriForecast.Application.common;
 using AgriForecast.Application.Mapper;
 using MediatR;
 using Microsoft.Extensions.DependencyInjection;

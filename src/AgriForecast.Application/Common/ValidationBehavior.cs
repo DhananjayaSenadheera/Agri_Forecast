@@ -1,7 +1,7 @@
 using FluentValidation;
 using MediatR;
 
-namespace AgriForecast.Application.Helper;
+namespace AgriForecast.Application.common;
 
 public class ValidationBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
 {

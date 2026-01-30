@@ -1,4 +1,4 @@
-namespace AgriForecast.Application.Helper;
+namespace AgriForecast.Application.common;
 
 public class Result<T>
 {
