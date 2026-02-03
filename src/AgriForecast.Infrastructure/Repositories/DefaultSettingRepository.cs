@@ -14,7 +14,8 @@ public class DefaultSettingRepository : IDefaultSettingRepository
     
     public async Task<DefaultSetting> GetDefaultSetting()
     {
-        return await _genericRepository.GetoneAsync();
+        var result = await _genericRepository.GetoneAsync();
+        return result ;
     }
 
     public void UpdateDefaultSetting(DefaultSetting defaultSetting)
