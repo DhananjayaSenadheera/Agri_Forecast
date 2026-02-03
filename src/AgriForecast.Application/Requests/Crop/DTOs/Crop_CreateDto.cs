@@ -2,5 +2,5 @@ namespace AgriForecast.Application.Requests.Crop.DTOs;
 
 public class Crop_CreateDto
 {
-    public string Name { get; private set; } = string.Empty;
+    public string Name { get;  set; }
 }

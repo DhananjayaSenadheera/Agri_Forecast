@@ -33,7 +33,7 @@ public class CropCreateCommandHandler : IRequestHandler<CropCreateCommand, Resul
             return Result<bool>.Failure("Crop details cannot be null.");
         }
         
-        var cropcode = _codeSetting.GetCropCode().ToString();
+        var cropcode = await _codeSetting.GetCropCode();
         if (cropcode is null)
         {
             _logger.LogInformation("Failed to create crop: Crop code is null.");
@@ -43,7 +43,6 @@ public class CropCreateCommandHandler : IRequestHandler<CropCreateCommand, Resul
         var crop = _mapper.Map<Domain.Entities.Crop>(dto);
         crop.CropCode = cropcode;
         await _cropRepository.Addasync(crop);
-        _codeSetting.UpdateCropCode();
         await _unitOfWork.CommitAsync();
         _logger.LogInformation("Crop created successfully with Crop Code: {CropCode}", crop.CropCode);
         return Result<bool>.Success(true);

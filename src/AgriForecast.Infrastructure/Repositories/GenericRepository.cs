@@ -30,7 +30,7 @@ public class GenericRepository<T>(AgriForecastDbContext dbContext) : IGenericRep
     public async Task<T> GetoneAsync()
     {
        var result = await _dbSet.AsNoTracking().FirstOrDefaultAsync();
-         return result;
+        return result;
     }
 
     public async Task<T> GetByIdAsync(Guid id)

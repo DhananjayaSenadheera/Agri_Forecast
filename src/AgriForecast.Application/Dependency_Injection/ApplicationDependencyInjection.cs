@@ -12,6 +12,7 @@ public static class ApplicationDependencyInjection
         services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(ApplicationDependencyInjection).Assembly));
         services.AddAutoMapper(typeof(ProfileMapper));
         services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
+        services.AddTransient<CodeSettings>();
         return services;
     }
 }
