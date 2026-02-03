@@ -1,0 +1,51 @@
+using AgriForecast.Application.common;
+using AgriForecast.Domain.Interfaces;
+using AutoMapper;
+using MediatR;
+using Microsoft.Extensions.Logging;
+
+namespace AgriForecast.Application.Requests.Crop.Commands.Create;
+
+public class CropCreateCommandHandler : IRequestHandler<CropCreateCommand, Result<bool>>
+{
+    private readonly CodeSettings _codeSetting;
+    private readonly IMapper _mapper;
+    private ILogger<CropCreateCommandHandler> _logger;
+    private readonly IUnitofWorkRepository _unitOfWork;
+    private readonly ICropRepository _cropRepository;
+    
+    public CropCreateCommandHandler( CodeSettings codeSetting, 
+        IMapper mapper, IUnitofWorkRepository unitOfWork, ILogger<CropCreateCommandHandler> logger, ICropRepository cropRepository)
+    {
+        _codeSetting = codeSetting;
+        _mapper = mapper;
+        _unitOfWork = unitOfWork;
+        _logger = logger;
+        _cropRepository = cropRepository;
+    }
+    public async Task<Result<bool>> Handle(CropCreateCommand request, CancellationToken cancellationToken)
+    {
+        
+        var dto = request.CreateDto;
+        if (dto is null)
+        {
+            _logger.LogInformation("Failed to create crop: Crop details are null.");
+            return Result<bool>.Failure("Crop details cannot be null.");
+        }
+        
+        var cropcode = _codeSetting.GetCropCode().ToString();
+        if (cropcode is null)
+        {
+            _logger.LogInformation("Failed to create crop: Crop code is null.");
+            return Result<bool>.Failure("Crop code cannot be null."); 
+        }
+        
+        var crop = _mapper.Map<Domain.Entities.Crop>(dto);
+        crop.CropCode = cropcode;
+        await _cropRepository.Addasync(crop);
+        _codeSetting.UpdateCropCode();
+        await _unitOfWork.CommitAsync();
+        _logger.LogInformation("Crop created successfully with Crop Code: {CropCode}", crop.CropCode);
+        return Result<bool>.Success(true);
+    }
+}
