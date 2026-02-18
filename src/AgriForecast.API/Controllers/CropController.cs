@@ -1,4 +1,5 @@
 using AgriForecast.Application.Requests.Crop.Commands.Create;
+using AgriForecast.Application.Requests.Crop.Commands.Delete;
 using AgriForecast.Application.Requests.Crop.Commands.Update;
 using AgriForecast.Application.Requests.Crop.Quaries.GetAll;
 using AgriForecast.Application.Requests.Crop.Quaries.GetOneById;
@@ -49,6 +50,14 @@ public class CropController(IMediator mediator) : ControllerBase
         var result = await mediator.Send(new CropGetAllQuery());
         if (result.IsSuccess)           
             return Ok(result.Data);
+            //return Task.FromResult<IActionResult>(StatusCode(statusCode: StatusCodes.Status204NoContent));
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+    [HttpDelete("delete/{id}")]
+    public async Task<IActionResult> DeleteCrop(Guid id)
+    {
+        var result = await mediator.Send(new CropDeleteCommand(id));
+        if (result.IsSuccess)            return Ok(result.Data);
             //return Task.FromResult<IActionResult>(StatusCode(statusCode: StatusCodes.Status204NoContent));
         return BadRequest(ToErrorResponse(result.Error));
     }

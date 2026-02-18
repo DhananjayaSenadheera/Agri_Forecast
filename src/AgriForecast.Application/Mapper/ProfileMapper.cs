@@ -26,5 +26,7 @@ public class ProfileMapper : Profile
             .ForMember(desc => desc.UpdatedAt, opt => opt.MapFrom(src => src.UpdatedAt))
             .ForMember(desc => desc.Id, opt => opt.MapFrom(src => src.Id));
         
+        CreateMap<Crop_DeleteDto, Crop>()
+            .ForMember(desc => desc.Id, opt => opt.MapFrom(src => src.Id));
     }
 }
