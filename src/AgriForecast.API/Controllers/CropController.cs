@@ -1,5 +1,6 @@
 using AgriForecast.Application.Requests.Crop.Commands.Create;
 using AgriForecast.Application.Requests.Crop.Commands.Update;
+using AgriForecast.Application.Requests.Crop.Quaries.GetAll;
 using AgriForecast.Application.Requests.Crop.Quaries.GetOneById;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
@@ -37,6 +38,16 @@ public class CropController(IMediator mediator) : ControllerBase
     {
         var result = await mediator.Send(new CropGetByIdQuery(id));
         if (result.IsSuccess)
+            return Ok(result.Data);
+            //return Task.FromResult<IActionResult>(StatusCode(statusCode: StatusCodes.Status204NoContent));
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+    
+    [HttpGet("get/all")]
+    public async Task<IActionResult> GetAllCrops()
+    {
+        var result = await mediator.Send(new CropGetAllQuery());
+        if (result.IsSuccess)           
             return Ok(result.Data);
             //return Task.FromResult<IActionResult>(StatusCode(statusCode: StatusCodes.Status204NoContent));
         return BadRequest(ToErrorResponse(result.Error));
