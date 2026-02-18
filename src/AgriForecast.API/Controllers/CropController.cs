@@ -12,6 +12,14 @@ namespace AgriForecast.API.Controllers;
 [Route("api/crops")]
 public class CropController(IMediator mediator) : ControllerBase
 {
+    private static object ToErrorResponse(string error) => new
+    {
+        errors = new[]
+        {
+            new { property = "Crop", message = error }
+        }
+    };
+    
     [HttpPost("create")]
     public async Task<IActionResult> CreateCrop([FromBody] CropCreateCommand command)
     {
@@ -62,11 +70,5 @@ public class CropController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
     
-    private static object ToErrorResponse(string error) => new
-    {
-        errors = new[]
-        {
-            new { property = "Crop", message = error }
-        }
-    };
+   
 }

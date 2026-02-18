@@ -22,7 +22,7 @@ public class CodeSettings: Result<string>
         _defaultSettingRepository.UpdateDefaultSetting(defaultSetting);
         return cropCode;
     }
-    
+
     public async Task<string?> GetEcoCode()
     {
         var defaultSetting = await _defaultSettingRepository.GetDefaultSetting();
@@ -33,4 +33,5 @@ public class CodeSettings: Result<string>
         _defaultSettingRepository.UpdateDefaultSetting(defaultSetting);
         return ecoCode;
     }
+    
 }

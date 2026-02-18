@@ -6,14 +6,9 @@ public class EconomicCenter
     
     public string EcoCode { get; set; }
     public string Name { get; private set; } = string.Empty;
+    public string Location { get; set; }
+    public string Description { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
-    private EconomicCenter() { }
-    public EconomicCenter(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-            throw new ArgumentException("Economic center name cannot be empty", nameof(name));
-
-        Name = name.Trim();
-    }
+    
 }
