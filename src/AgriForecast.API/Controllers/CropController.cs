@@ -1,4 +1,5 @@
 using AgriForecast.Application.Requests.Crop.Commands.Create;
+using AgriForecast.Application.Requests.Crop.Commands.Update;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 
@@ -13,8 +14,20 @@ public class CropController(IMediator mediator) : ControllerBase
     {
         var result = await mediator.Send(command);
         if (result.IsSuccess)
-            return StatusCode(statusCode: StatusCodes.Status201Created);
+            return Ok(result.Data);
+            //return StatusCode(statusCode: StatusCodes.Status201Created);
 
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+    
+    [HttpPut("update")]
+    public async Task<IActionResult> Update([FromBody] CropUpdateCommand command)
+    {
+        var result = await mediator.Send(command);
+        if (result.IsSuccess)
+            return Ok(result.Data);
+            //return Task.FromResult<IActionResult>(StatusCode(statusCode: StatusCodes.Status204NoContent));
+            
         return BadRequest(ToErrorResponse(result.Error));
     }
     
