@@ -19,5 +19,12 @@ public class ProfileMapper : Profile
             .ForMember(desc => desc.Id, opt => opt.MapFrom(src => src.Id))
             .ForMember(desc => desc.Name, opt => opt.MapFrom(src => src.Name))
             .ForMember(desc => desc.UpdatedAt, opt => opt.MapFrom(src => DateTime.UtcNow));
+        
+        CreateMap<Crop ,Crop_GetDto>()
+            .ForMember(desc => desc.Name, opt => opt.MapFrom(src => src.Name))
+            .ForMember(desc => desc.CreatedAt, opt => opt.MapFrom(src => src.CreatedAt))
+            .ForMember(desc => desc.UpdatedAt, opt => opt.MapFrom(src => src.UpdatedAt))
+            .ForMember(desc => desc.Id, opt => opt.MapFrom(src => src.Id));
+        
     }
 }
