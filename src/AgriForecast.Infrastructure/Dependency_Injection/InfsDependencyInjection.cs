@@ -17,7 +17,7 @@ public static class InfsDependencyInjection
         services.AddScoped<IUnitofWorkRepository, UnitOfWorkRepository>();
         services.AddScoped<IDefaultSettingRepository, DefaultSettingRepository>();
         services.AddScoped<ICropRepository, CropRepository>();
-        
+        services.AddScoped<IEconimicCenterRepository, EconimicCenterRepository>();
         return services;
     }
 }
