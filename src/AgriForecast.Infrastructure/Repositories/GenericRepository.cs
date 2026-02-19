@@ -39,6 +39,12 @@ public class GenericRepository<T>(AgriForecastDbContext dbContext) : IGenericRep
         return result;
     }
 
+    public async Task<T> GetByIdAsync(int id)
+    {
+        var result = await _dbSet.FindAsync(id);
+        return result;
+    }
+
     public async Task<T> GetByCodeAsync(string ecoCode)
     {
         var result = await _dbSet.FindAsync(ecoCode);
@@ -55,5 +61,11 @@ public class GenericRepository<T>(AgriForecastDbContext dbContext) : IGenericRep
     {
         var result = await _dbSet.AsNoTracking().ToListAsync();
         return result;
+    }
+
+    public async Task<object> GetManyAsyncInclude(Func<object, bool> func)
+    {
+        var result = await _dbSet.AsNoTracking().ToListAsync();
+        return result.Where(func);
     }
 }
