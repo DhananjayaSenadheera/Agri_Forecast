@@ -1,6 +1,8 @@
 using AgriForecast.Application.Requests.EcconomicCenter.Commands.Create;
 using AgriForecast.Application.Requests.EcconomicCenter.Commands.Delete;
 using AgriForecast.Application.Requests.EcconomicCenter.Commands.Update;
+using AgriForecast.Application.Requests.EcconomicCenter.Quaries.GetAll;
+using AgriForecast.Application.Requests.EcconomicCenter.Quaries.GetOneById;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 
@@ -47,6 +49,24 @@ public class EcoControler(IMediator mediator) : ControllerBase
         
         return BadRequest(ToErrorResponse(result.Error));
     }
-    
-    
+
+    [HttpGet("get/{id}")]
+    public async Task<IActionResult> GetById(Guid id)
+    {
+        var result = await mediator.Send(new EcoGetByIdQuery(id));
+        if (result.IsSuccess) 
+            return Ok(result.Data);
+        
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
+    [HttpGet("get/all")]
+    public async Task<IActionResult> GetAll()
+    {
+        var result = await mediator.Send(new EcoGetAllQuery());
+        if (result.IsSuccess) 
+            return Ok(result.Data);
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
 }
