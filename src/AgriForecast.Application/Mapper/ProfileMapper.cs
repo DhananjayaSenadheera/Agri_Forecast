@@ -13,16 +13,31 @@ public class ProfileMapper : Profile
         CreateMap<Crop_CreateDto, Crop>()
             .ForMember(desc => desc.Id, opt => opt.MapFrom(src => Guid.NewGuid()))
             .ForMember(desc => desc.Name, opt => opt.MapFrom(src => src.Name))
+            .ForMember(desc => desc.ExternalProductId, opt => opt.MapFrom(src => src.ExternalProductId))
+            .ForMember(desc => desc.Source, opt => opt.MapFrom(src => src.Source))
             .ForMember(desc => desc.CreatedAt, opt => opt.MapFrom(src => DateTime.UtcNow))
             .ForMember(desc => desc.UpdatedAt, opt => opt.MapFrom(src => DateTime.UtcNow));
-        
+
         CreateMap<Crop_UpdateDto, Crop>()
             .ForMember(desc => desc.Id, opt => opt.MapFrom(src => src.Id))
             .ForMember(desc => desc.Name, opt => opt.MapFrom(src => src.Name))
+            // Only overwrite the mapping fields when the update actually supplies them.
+            .ForMember(desc => desc.ExternalProductId, opt =>
+            {
+                opt.PreCondition(src => src.ExternalProductId.HasValue);
+                opt.MapFrom(src => src.ExternalProductId);
+            })
+            .ForMember(desc => desc.Source, opt =>
+            {
+                opt.PreCondition(src => src.Source != null);
+                opt.MapFrom(src => src.Source);
+            })
             .ForMember(desc => desc.UpdatedAt, opt => opt.MapFrom(src => DateTime.UtcNow));
-        
+
         CreateMap<Crop ,Crop_GetDto>()
             .ForMember(desc => desc.Name, opt => opt.MapFrom(src => src.Name))
+            .ForMember(desc => desc.ExternalProductId, opt => opt.MapFrom(src => src.ExternalProductId))
+            .ForMember(desc => desc.Source, opt => opt.MapFrom(src => src.Source))
             .ForMember(desc => desc.CreatedAt, opt => opt.MapFrom(src => src.CreatedAt))
             .ForMember(desc => desc.UpdatedAt, opt => opt.MapFrom(src => src.UpdatedAt))
             .ForMember(desc => desc.Id, opt => opt.MapFrom(src => src.Id));

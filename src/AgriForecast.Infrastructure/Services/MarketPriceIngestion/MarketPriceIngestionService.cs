@@ -15,24 +15,43 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
     private readonly ILogger<MarketPriceIngestionService> _logger;
     private readonly IUnitofWorkRepository _unitofWorkRepository;
     private readonly IMarketPriceRepository _marketPriceRepository;
+    private readonly ICropRepository _cropRepository;
     private const string SourceName = "DAMBULLA_DEC";
 
-    public MarketPriceIngestionService(IDambullaApiClient client, IConfiguration config, ILogger<MarketPriceIngestionService> logger, IUnitofWorkRepository unitofWorkRepository, IMarketPriceRepository marketPriceRepository)
+    public MarketPriceIngestionService(IDambullaApiClient client, IConfiguration config, ILogger<MarketPriceIngestionService> logger, IUnitofWorkRepository unitofWorkRepository, IMarketPriceRepository marketPriceRepository, ICropRepository cropRepository)
     {
         _client = client;
         _config = config;
         _logger = logger;
         _unitofWorkRepository = unitofWorkRepository;
         _marketPriceRepository = marketPriceRepository;
+        _cropRepository = cropRepository;
     }
 
     public async Task IngestAsync(CancellationToken ct)
     {
         var maxProductId = int.Parse(_config["MarketPriceSources:DambullaDec:MaxProductId"] ?? "101");
 
+        // Build ExternalProductId -> CropId lookup once. A crop is considered a match
+        // when it has an external product id and either no source or this source.
+        var crops = await _cropRepository.GetAllAsync();
+        var cropByProduct = crops
+            .Where(c => c.ExternalProductId.HasValue
+                        && (string.IsNullOrEmpty(c.Source) || c.Source == SourceName))
+            .GroupBy(c => c.ExternalProductId!.Value)
+            .ToDictionary(g => g.Key, g => g.First().Id);
+
+        // Backfill: link any existing rows that predate the crop mapping.
+        int backfilled = 0;
+        foreach (var (productId, cropId) in cropByProduct)
+            backfilled += await _marketPriceRepository.BackfillCropIdAsync(SourceName, productId, cropId, ct);
+        if (backfilled > 0)
+            _logger.LogInformation("Backfilled CropId on {Backfilled} existing market price rows.", backfilled);
+
         int inserted = 0;
         int skipped = 0;
         int failedProducts = 0;
+        int unmapped = 0;
 
         for (int productId = 1; productId <= maxProductId; productId++)
         {
@@ -54,12 +73,19 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
                         continue;
                     }
 
+                    Guid? cropId = cropByProduct.TryGetValue(p.ProductId, out var resolved)
+                        ? resolved
+                        : null;
+                    if (cropId is null)
+                        unmapped++;
+
                     toInsert.Add(new MarketPrice
                     {
                         Id = Guid.NewGuid(),
                         Source = SourceName,
                         ExternalProductId = p.ProductId,
                         ExternalProductName = p.Product?.Name ?? "",
+                        CropId = cropId,
                         PriceDate = date,
                         MinPrice = p.MinPrice,
                         MaxPrice = p.MaxPrice,
@@ -118,7 +144,7 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
             }*/
         }
 
-        _logger.LogInformation("Dambulla ingestion completed. Inserted={Inserted}, SkippedExisting={Skipped}", inserted, skipped);
+        _logger.LogInformation("Dambulla ingestion completed. Inserted={Inserted}, SkippedExisting={Skipped}, Backfilled={Backfilled}, UnmappedToCrop={Unmapped}, FailedProducts={FailedProducts}", inserted, skipped, backfilled, unmapped, failedProducts);
     }
     
     
