@@ -38,6 +38,13 @@ public class MarketPriceRepository: IMarketPriceRepository
             .Select(mp => mp.PriceDate)
             .ToListAsync(ct);
         return result.ToHashSet();
-        
+
+    }
+
+    public async Task<int> BackfillCropIdAsync(string source, int externalProductId, Guid cropId, CancellationToken ct = default)
+    {
+        return await _db.MarketPrices
+            .Where(mp => mp.Source == source && mp.ExternalProductId == externalProductId && mp.CropId == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(mp => mp.CropId, cropId), ct);
     }
 }

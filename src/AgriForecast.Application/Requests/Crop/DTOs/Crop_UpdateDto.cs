@@ -4,4 +4,6 @@ public class Crop_UpdateDto
 {
     public Guid Id { get; set; }
     public string? Name { get;  set; }
+    public int? ExternalProductId { get; set; }
+    public string? Source { get; set; }
 }

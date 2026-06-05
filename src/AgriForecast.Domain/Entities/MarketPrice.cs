@@ -4,8 +4,8 @@ public class MarketPrice
 {
     public Guid Id { get; set; }
 
-    public int? CropId { get; set; } // optional until mapping implemented
-    public int? EconomicCenterId { get; set; }
+    public Guid? CropId { get; set; } // resolved from Crop.ExternalProductId during ingestion
+    public Guid? EconomicCenterId { get; set; }
 
     public int ExternalProductId { get; set; }
     public string ExternalProductName { get; set; } = "";
