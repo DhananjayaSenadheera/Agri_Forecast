@@ -47,4 +47,12 @@ public class MarketPriceRepository: IMarketPriceRepository
             .Where(mp => mp.Source == source && mp.ExternalProductId == externalProductId && mp.CropId == null)
             .ExecuteUpdateAsync(s => s.SetProperty(mp => mp.CropId, cropId), ct);
     }
+
+    public async Task<List<MarketPrice>> GetByCropIdAsync(Guid cropId, DateOnly from, CancellationToken ct = default)
+    {
+        return await _db.MarketPrices
+            .Where(mp => mp.CropId == cropId && mp.PriceDate >= from)
+            .OrderBy(mp => mp.PriceDate)
+            .ToListAsync(ct);
+    }
 }

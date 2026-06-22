@@ -18,6 +18,7 @@
 
     <ItemGroup>
       <ProjectReference Include="..\AgriForecast.Domain\AgriForecast.Domain.csproj" />
+      <ProjectReference Include="..\AgriForecast.Application\AgriForecast.Application.csproj" />
     </ItemGroup>
 
 </Project>
