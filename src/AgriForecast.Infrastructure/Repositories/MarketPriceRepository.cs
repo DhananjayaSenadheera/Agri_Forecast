@@ -55,4 +55,23 @@ public class MarketPriceRepository: IMarketPriceRepository
             .OrderBy(mp => mp.PriceDate)
             .ToListAsync(ct);
     }
+
+    public async Task<List<ExternalProduct>> GetDistinctExternalProductsAsync(string source, CancellationToken ct = default)
+    {
+        var rows = await _db.MarketPrices
+            .Where(mp => mp.Source == source)
+            .GroupBy(mp => mp.ExternalProductId)
+            .Select(g => new
+            {
+                ExternalProductId = g.Key,
+                Name = g.OrderByDescending(mp => mp.PriceDate)
+                        .Select(mp => mp.ExternalProductName)
+                        .FirstOrDefault()
+            })
+            .ToListAsync(ct);
+
+        return rows
+            .Select(r => new ExternalProduct(r.ExternalProductId, r.Name ?? string.Empty))
+            .ToList();
+    }
 }
