@@ -4,7 +4,10 @@ using Microsoft.Extensions.DependencyInjection;
 using AgriForecast.Infrastructure.Database;
 using AgriForecast.Infrastructure.ExternalSources.Interfaces;
 using AgriForecast.Infrastructure.Repositories;
+using AgriForecast.Application.Services;
+using AgriForecast.Infrastructure.Services.Forecasting;
 using AgriForecast.Infrastructure.Services.MarketPriceIngestion;
+using AgriForecast.Infrastructure.Services.Recommendation;
 
 namespace AgriForecast.Infrastructure.Dependency_Injection;
 
@@ -22,6 +25,10 @@ public static class InfsDependencyInjection
         services.AddScoped<IEconimicCenterRepository, EconimicCenterRepository>();
         services.AddScoped<IMarketPriceRepository, MarketPriceRepository>();
         services.AddScoped<IMarketPriceIngestionService, MarketPriceIngestionService>();
+        services.AddScoped<ICropPriceRepository, CropPriceRepository>();
+        services.AddScoped<IWeatherRecordRepository, WeatherRecordRepository>();
+        services.AddScoped<IForecastingService, ForecastingService>();
+        services.AddScoped<IRecommendationService, RecommendationService>();
         services.AddHttpClient<IDambullaApiClient, DambullaApiClient>(http =>
         {
             var baseUrl = configuration["MarketPriceSources:DambullaDec:BaseUrl"];

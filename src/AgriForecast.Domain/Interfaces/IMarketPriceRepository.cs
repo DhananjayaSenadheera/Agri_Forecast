@@ -11,5 +11,5 @@ public interface IMarketPriceRepository
 
     // Links existing rows (CropId == null) for a source+product to a crop. Returns rows updated.
     Task<int> BackfillCropIdAsync(string source, int externalProductId, Guid cropId, CancellationToken ct = default);
-    
+    Task<List<MarketPrice>> GetByCropIdAsync(Guid cropId, DateOnly from, CancellationToken ct = default);
 }
