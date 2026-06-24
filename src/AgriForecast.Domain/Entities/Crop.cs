@@ -10,6 +10,18 @@ public class Crop
     public int? ExternalProductId { get; set; }
     public string? Source { get; set; }
 
+    // --- Agronomic metadata (drives harvest-time price forecasting) ---
+
+    // Days from planting to first harvest. The keystone field: it maps a farmer's
+    // planting date to the harvest date whose price we forecast. Null until curated.
+    public int? GrowthPeriodDays { get; set; }
+
+    // Typical Sri Lankan cultivation season: "Yala", "Maha", or "Year-round".
+    public string? PlantingSeason { get; set; }
+
+    // How many days the crop keeps yielding once it matures (harvest spread).
+    public int? HarvestWindowDays { get; set; }
+
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 
