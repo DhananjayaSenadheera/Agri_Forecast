@@ -4,3 +4,4 @@ __pycache__/
 .env
 *.parquet
 .pytest_cache/
+models/
