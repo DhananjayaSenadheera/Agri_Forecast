@@ -25,6 +25,11 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             Eco_Prefix = "ECO",
         });
         
+        modelBuilder.Entity<Crop>(e =>
+        {
+            e.Property(x => x.PlantingSeason).HasMaxLength(20);
+        });
+
         modelBuilder.Entity<WeatherRecord>(e =>
         {
             e.Property(x => x.AvgTemperature).HasPrecision(6, 2);
