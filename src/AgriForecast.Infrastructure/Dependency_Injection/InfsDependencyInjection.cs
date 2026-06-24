@@ -7,6 +7,7 @@ using AgriForecast.Infrastructure.Repositories;
 using AgriForecast.Application.Services;
 using AgriForecast.Infrastructure.Services.Forecasting;
 using AgriForecast.Infrastructure.Services.MarketPriceIngestion;
+using AgriForecast.Infrastructure.Services.WeatherIngestion;
 using AgriForecast.Infrastructure.Services.Recommendation;
 
 namespace AgriForecast.Infrastructure.Dependency_Injection;
@@ -25,6 +26,7 @@ public static class InfsDependencyInjection
         services.AddScoped<IEconimicCenterRepository, EconimicCenterRepository>();
         services.AddScoped<IMarketPriceRepository, MarketPriceRepository>();
         services.AddScoped<IMarketPriceIngestionService, MarketPriceIngestionService>();
+        services.AddScoped<IWeatherIngestionService, WeatherIngestionService>();
         services.AddScoped<ICropPriceRepository, CropPriceRepository>();
         services.AddScoped<IWeatherRecordRepository, WeatherRecordRepository>();
         services.AddScoped<IForecastingService, ForecastingService>();
@@ -39,6 +41,24 @@ public static class InfsDependencyInjection
             http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(30);
         });
+        // Weather provider is swappable via WeatherSource:Provider (default: OpenMeteo - free, keyless).
+        var weatherProvider = configuration["WeatherSource:Provider"] ?? "OpenMeteo";
+        if (weatherProvider.Equals("OpenWeather", StringComparison.OrdinalIgnoreCase))
+        {
+            services.AddHttpClient<IWeatherClient, OpenWeatherClient>(http =>
+            {
+                http.BaseAddress = new Uri(configuration["WeatherSource:OpenWeather:BaseUrl"] ?? "https://api.openweathermap.org/");
+                http.Timeout = TimeSpan.FromSeconds(30);
+            });
+        }
+        else
+        {
+            services.AddHttpClient<IWeatherClient, OpenMeteoClient>(http =>
+            {
+                http.BaseAddress = new Uri(configuration["WeatherSource:OpenMeteo:BaseUrl"] ?? "https://archive-api.open-meteo.com/");
+                http.Timeout = TimeSpan.FromSeconds(60);
+            });
+        }
         return services;
     }
 }

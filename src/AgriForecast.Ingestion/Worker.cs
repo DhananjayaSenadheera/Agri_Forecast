@@ -1,4 +1,5 @@
 using AgriForecast.Infrastructure.Services.MarketPriceIngestion;
+using AgriForecast.Infrastructure.Services.WeatherIngestion;
 
 namespace AgriForecast.Ingestion;
 
@@ -17,19 +18,31 @@ public class Worker : BackgroundService
     {
         while (!stoppingToken.IsCancellationRequested)
         {
-            try
+            using (var scope = _serviceProvider.CreateScope())
             {
-                using var scope = _serviceProvider.CreateScope();
-                var ingestion = scope.ServiceProvider.GetRequiredService<IMarketPriceIngestionService>();
+                try
+                {
+                    var ingestion = scope.ServiceProvider.GetRequiredService<IMarketPriceIngestionService>();
+                    _logger.LogInformation("Market price ingestion started");
+                    await ingestion.IngestAsync(stoppingToken);
+                    _logger.LogInformation("Market price ingestion finished");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "An error occurred during market price ingestion");
+                }
 
-                _logger.LogInformation("Ingestion started");
-                await ingestion.IngestAsync(stoppingToken);
-                _logger.LogInformation("Ingestion finished");
-
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex.Message, "An error occurred during ingestion");
+                try
+                {
+                    var weather = scope.ServiceProvider.GetRequiredService<IWeatherIngestionService>();
+                    _logger.LogInformation("Weather ingestion started");
+                    await weather.IngestAsync(stoppingToken);
+                    _logger.LogInformation("Weather ingestion finished");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "An error occurred during weather ingestion");
+                }
             }
             await Task.Delay(TimeSpan.FromHours(24), stoppingToken);
             
