@@ -1,0 +1,10 @@
+.venv
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+*.parquet
+.env
+# Registry is mounted/baked at runtime, not copied into the image.
+models
+README.md

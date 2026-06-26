@@ -55,6 +55,38 @@ public sealed class HarvestPredictionClient : IHarvestPredictionClient
         }
     }
 
+    public async Task<CropTimelineDto?> GetTimelineAsync(Guid cropId, DateOnly? asOf, int months, CancellationToken ct = default)
+    {
+        // GUIDs on the wire MUST be lowercase - uppercase ids silently miss the
+        // model's per-crop fallback. Guid.ToString() is already lowercase; keep it.
+        // asOf null => Python defaults to today.
+        var payload = new TimelineRequest
+        {
+            CropId = cropId.ToString(),
+            AsOf = asOf?.ToString("yyyy-MM-dd"),
+            Months = months
+        };
+
+        try
+        {
+            using var resp = await _httpClient.PostAsJsonAsync("timeline", payload, JsonOptions, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "ML /timeline returned {StatusCode} for cropId={CropId}.",
+                    (int)resp.StatusCode, payload.CropId);
+                return null;
+            }
+
+            return await resp.Content.ReadFromJsonAsync<CropTimelineDto>(JsonOptions, ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
+        {
+            _logger.LogWarning(ex, "ML /timeline call failed for cropId={CropId}.", payload.CropId);
+            return null;
+        }
+    }
+
     private sealed class PredictRequest
     {
         [JsonPropertyName("cropId")]
@@ -62,5 +94,17 @@ public sealed class HarvestPredictionClient : IHarvestPredictionClient
 
         [JsonPropertyName("plantDate")]
         public string PlantDate { get; set; } = string.Empty;
+    }
+
+    private sealed class TimelineRequest
+    {
+        [JsonPropertyName("cropId")]
+        public string CropId { get; set; } = string.Empty;
+
+        [JsonPropertyName("asOf")]
+        public string? AsOf { get; set; }
+
+        [JsonPropertyName("months")]
+        public int Months { get; set; }
     }
 }

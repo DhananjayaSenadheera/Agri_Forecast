@@ -1,6 +1,7 @@
 using AgriForecast.Application.Requests.Crop.Quaries.GetBest;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetHarvest;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetMonthly;
+using AgriForecast.Application.Requests.Forecast.Quaries.GetTimeline;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 
@@ -31,6 +32,15 @@ public class ForecastController(IMediator mediator) : ControllerBase
     public async Task<IActionResult> GetHarvestForecast(Guid cropId, [FromQuery] DateOnly plantDate)
     {
         var result = await mediator.Send(new GetHarvestForecastQuery { CropId = cropId, PlantDate = plantDate });
+        if (result.IsSuccess)
+            return Ok(result.Data);
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
+    [HttpGet("crop/{cropId}/timeline")]
+    public async Task<IActionResult> GetCropTimeline(Guid cropId, [FromQuery] int months = 12, [FromQuery] DateOnly? asOf = null)
+    {
+        var result = await mediator.Send(new GetCropTimelineQuery { CropId = cropId, Months = months, AsOf = asOf });
         if (result.IsSuccess)
             return Ok(result.Data);
         return BadRequest(ToErrorResponse(result.Error));
