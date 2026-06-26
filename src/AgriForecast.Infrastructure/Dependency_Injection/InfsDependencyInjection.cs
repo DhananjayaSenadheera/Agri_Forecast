@@ -41,6 +41,17 @@ public static class InfsDependencyInjection
             http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(30);
         });
+        // Typed HttpClient over the Python ML service (POST /predict).
+        services.AddHttpClient<IHarvestPredictionClient, HarvestPredictionClient>(http =>
+        {
+            var baseUrl = configuration["MlService:BaseUrl"];
+
+            if (string.IsNullOrWhiteSpace(baseUrl))
+                throw new InvalidOperationException("Missing MlService:BaseUrl");
+
+            http.BaseAddress = new Uri(baseUrl);
+            http.Timeout = TimeSpan.FromSeconds(30);
+        });
         // Weather provider is swappable via WeatherSource:Provider (default: OpenMeteo - free, keyless).
         var weatherProvider = configuration["WeatherSource:Provider"] ?? "OpenMeteo";
         if (weatherProvider.Equals("OpenWeather", StringComparison.OrdinalIgnoreCase))
