@@ -1,5 +1,6 @@
 using AgriForecast.Application.common;
 using AgriForecast.Application.Mapper;
+using FluentValidation;
 using MediatR;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -11,6 +12,7 @@ public static class ApplicationDependencyInjection
     {
         services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(ApplicationDependencyInjection).Assembly));
         services.AddAutoMapper(typeof(ProfileMapper));
+        services.AddValidatorsFromAssembly(typeof(ApplicationDependencyInjection).Assembly);
         services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
         services.AddTransient<CodeSettings>();
         return services;

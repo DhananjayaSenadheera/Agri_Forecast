@@ -56,6 +56,17 @@ public class MarketPriceRepository: IMarketPriceRepository
             .ToListAsync(ct);
     }
 
+    public async Task<List<MarketPrice>> GetRecentByCropIdAsync(Guid cropId, int count, DateOnly asOf, CancellationToken ct = default)
+    {
+        // asOf bound applied BEFORE OrderByDescending/Take so the newest N rows are
+        // taken only from prices observed on or before asOf (no lookahead leakage).
+        return await _db.MarketPrices
+            .Where(mp => mp.CropId == cropId && mp.PriceDate <= asOf)
+            .OrderByDescending(mp => mp.PriceDate)
+            .Take(count)
+            .ToListAsync(ct);
+    }
+
     public async Task<List<ExternalProduct>> GetDistinctExternalProductsAsync(string source, CancellationToken ct = default)
     {
         var rows = await _db.MarketPrices
