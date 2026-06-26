@@ -7,45 +7,70 @@ public class Worker : BackgroundService
 {
     private readonly ILogger<Worker> _logger;
     private readonly IServiceProvider _serviceProvider;
+    private readonly IConfiguration _configuration;
+    private readonly IHostApplicationLifetime _appLifetime;
 
-    public Worker(ILogger<Worker> logger, IServiceProvider serviceProvider)
+    public Worker(
+        ILogger<Worker> logger,
+        IServiceProvider serviceProvider,
+        IConfiguration configuration,
+        IHostApplicationLifetime appLifetime)
     {
         _logger = logger;
         _serviceProvider = serviceProvider;
+        _configuration = configuration;
+        _appLifetime = appLifetime;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Run-once mode: a single pass of both ingestions, then exit cleanly.
+        // Driven by Ingestion:RunOnce (env Ingestion__RunOnce) or the simple RUN_ONCE env var.
+        var runOnce = _configuration.GetValue<bool>("Ingestion:RunOnce")
+                      || _configuration.GetValue<bool>("RUN_ONCE");
+
+        if (runOnce)
+        {
+            _logger.LogInformation("Ingestion running in RunOnce mode: one pass then exit");
+            await RunPassAsync(stoppingToken);
+            _logger.LogInformation("RunOnce pass complete. Stopping application");
+            _appLifetime.StopApplication();
+            return;
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
-            using (var scope = _serviceProvider.CreateScope())
-            {
-                try
-                {
-                    var ingestion = scope.ServiceProvider.GetRequiredService<IMarketPriceIngestionService>();
-                    _logger.LogInformation("Market price ingestion started");
-                    await ingestion.IngestAsync(stoppingToken);
-                    _logger.LogInformation("Market price ingestion finished");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "An error occurred during market price ingestion");
-                }
-
-                try
-                {
-                    var weather = scope.ServiceProvider.GetRequiredService<IWeatherIngestionService>();
-                    _logger.LogInformation("Weather ingestion started");
-                    await weather.IngestAsync(stoppingToken);
-                    _logger.LogInformation("Weather ingestion finished");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "An error occurred during weather ingestion");
-                }
-            }
+            await RunPassAsync(stoppingToken);
             await Task.Delay(TimeSpan.FromHours(24), stoppingToken);
-            
+        }
+    }
+
+    private async Task RunPassAsync(CancellationToken stoppingToken)
+    {
+        using var scope = _serviceProvider.CreateScope();
+
+        try
+        {
+            var ingestion = scope.ServiceProvider.GetRequiredService<IMarketPriceIngestionService>();
+            _logger.LogInformation("Market price ingestion started");
+            await ingestion.IngestAsync(stoppingToken);
+            _logger.LogInformation("Market price ingestion finished");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "An error occurred during market price ingestion");
+        }
+
+        try
+        {
+            var weather = scope.ServiceProvider.GetRequiredService<IWeatherIngestionService>();
+            _logger.LogInformation("Weather ingestion started");
+            await weather.IngestAsync(stoppingToken);
+            _logger.LogInformation("Weather ingestion finished");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "An error occurred during weather ingestion");
         }
     }
 }
