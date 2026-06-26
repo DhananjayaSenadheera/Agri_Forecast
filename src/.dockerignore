@@ -1,0 +1,14 @@
+**/bin/
+**/obj/
+**/.vs/
+**/.vscode/
+**/.idea/
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.user
+**/.git/
+**/.gitignore
+**/Dockerfile
+**/.dockerignore
+AgriForecast.ML/
