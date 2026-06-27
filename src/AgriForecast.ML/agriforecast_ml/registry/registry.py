@@ -44,3 +44,18 @@ def load_promoted():
     payload = joblib.load(vdir / "model.pkl")
     metadata = json.loads((vdir / "metadata.json").read_text())
     return payload, metadata
+
+
+def load_promoted_metadata() -> dict | None:
+    """Read the currently-promoted version's metadata WITHOUT loading the
+    (heavy) model payload. Used by the retrain guardrail to compare a new
+    candidate against the live predictor's recorded CV score. Returns None
+    when nothing is promoted yet (first-ever training run)."""
+    pointer = _MODELS_DIR / "promoted.json"
+    if not pointer.exists():
+        return None
+    version = json.loads(pointer.read_text())["version"]
+    meta_path = _MODELS_DIR / version / "metadata.json"
+    if not meta_path.exists():
+        return None
+    return json.loads(meta_path.read_text())
