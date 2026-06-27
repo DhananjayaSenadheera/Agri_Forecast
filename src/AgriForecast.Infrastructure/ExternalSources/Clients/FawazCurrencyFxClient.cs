@@ -1,22 +1,25 @@
+using System.Globalization;
 using System.Text.Json;
 using AgriForecast.Infrastructure.ExternalSources.DTOs;
 using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Infrastructure.ExternalSources.Interfaces;
 
-// Historical USD/LKR rates via fawazahmed0/currency-api (jsDelivr CDN).
-// Free, keyless, daily history since 2000.
-// URL: https://cdn.jsdelivr.net/gh/fawazahmed0/currency-api@{date}/v1/currencies/usd/lkr.json
-// Response: { "date": "2025-01-01", "lkr": 294.5 }
-public sealed class CdnJsDelivrFxClient : IFxHistoricalClient
+// Historical USD/LKR via fawazahmed0/exchange-api (free, keyless, daily history).
+// Date is the SUBDOMAIN: https://{yyyy-MM-dd}.currency-api.pages.dev/v1/currencies/usd.json
+// Response: { "date": "2025-01-01", "usd": { "lkr": 293.16, ... } }  -> read usd.lkr (nested).
+// NOTE: the older jsDelivr "gh/..@date" / "npm/..@date" tag URLs are deprecated (404 / cold-start
+// hangs), so we hit the Cloudflare Pages host directly with absolute URIs.
+public sealed class FawazCurrencyFxClient : IFxHistoricalClient
 {
     private const decimal MinPlausibleRate = 200m;
     private const decimal MaxPlausibleRate = 700m;
+    private const string UrlTemplate = "https://{0:yyyy-MM-dd}.currency-api.pages.dev/v1/currencies/usd.json";
 
     private readonly HttpClient _http;
-    private readonly ILogger<CdnJsDelivrFxClient> _logger;
+    private readonly ILogger<FawazCurrencyFxClient> _logger;
 
-    public CdnJsDelivrFxClient(HttpClient http, ILogger<CdnJsDelivrFxClient> logger)
+    public FawazCurrencyFxClient(HttpClient http, ILogger<FawazCurrencyFxClient> logger)
     {
         _http = http;
         _logger = logger;
@@ -40,7 +43,7 @@ public sealed class CdnJsDelivrFxClient : IFxHistoricalClient
         return results;
     }
 
-    // Tries the requested date then up to 4 subsequent days in case CDN has no data for that exact date.
+    // Tries the requested date then up to 4 subsequent days in case a date has no published file.
     private async Task<FxRate?> FetchWithFallbackAsync(DateOnly date, CancellationToken ct)
     {
         for (int offset = 0; offset < 5; offset++)
@@ -56,17 +59,19 @@ public sealed class CdnJsDelivrFxClient : IFxHistoricalClient
 
     private async Task<FxRate?> TryFetchAsync(DateOnly date, CancellationToken ct)
     {
-        var path = $"gh/fawazahmed0/currency-api@{date:yyyy-MM-dd}/v1/currencies/usd/lkr.json";
+        var url = string.Format(CultureInfo.InvariantCulture, UrlTemplate, date.ToDateTime(TimeOnly.MinValue));
         try
         {
-            using var resp = await _http.GetAsync(path, ct);
+            using var resp = await _http.GetAsync(url, ct);
             if (!resp.IsSuccessStatusCode)
                 return null;
 
             await using var stream = await resp.Content.ReadAsStreamAsync(ct);
             using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
 
-            if (!doc.RootElement.TryGetProperty("lkr", out var lkr) ||
+            // Rate is nested under the base-currency object: { "usd": { "lkr": <number> } }.
+            if (!doc.RootElement.TryGetProperty("usd", out var usd) ||
+                !usd.TryGetProperty("lkr", out var lkr) ||
                 lkr.ValueKind != JsonValueKind.Number)
                 return null;
 
