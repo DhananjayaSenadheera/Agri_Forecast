@@ -19,7 +19,7 @@ public static class InfsDependencyInjection
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
         services.DatabaseService(configuration);
-        
+
         // Repositories
         services.AddScoped(typeof(IGenericRepository<>), typeof(GenericRepository<>));
         services.AddScoped<IUnitofWorkRepository, UnitOfWorkRepository>();
@@ -86,6 +86,12 @@ public static class InfsDependencyInjection
         {
             http.BaseAddress = new Uri(configuration["EconomicSource:OpenErApi:BaseUrl"] ?? "https://open.er-api.com/");
             http.Timeout = TimeSpan.FromSeconds(30);
+        });
+        // Historical FX backfill — fawazahmed0/currency-api via jsDelivr CDN (free, keyless, daily since 2000).
+        services.AddHttpClient<IFxHistoricalClient, CdnJsDelivrFxClient>(http =>
+        {
+            http.BaseAddress = new Uri(configuration["EconomicSource:JsDelivrCdn:BaseUrl"] ?? "https://cdn.jsdelivr.net/");
+            http.Timeout = TimeSpan.FromSeconds(15);
         });
 
         return services;
