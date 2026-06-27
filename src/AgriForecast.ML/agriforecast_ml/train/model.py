@@ -137,10 +137,73 @@ def train_and_register(verbose=True):
                "log_target": True, "quantiles": QUANTILES,
                "fallback": fallback, "beats_baseline": beats_baseline}
 
-    # Always promote SOMETHING so serving has an active version: the model if it
-    # earns it, otherwise this same version but flagged to serve the fallback.
-    version = registry.save_model(payload, metadata, promote=True)
+    # --- Retrain guardrail: never regress the live predictor ------------------
+    # A retrain must NOT make serving worse. We always register the new version
+    # for history, but we only move promoted.json when the new candidate is
+    # STRICTLY better than what is currently live -- measured by the CV MAE of
+    # whichever predictor each version actually serves (ML model vs crop-mean
+    # fallback). If it is not better, the previously-promoted version stays
+    # active (no-op promotion / rollback).
+    promote, reason = _promotion_decision(model_mae, cropmean_mae, beats_baseline)
+    metadata["promotion_decision"] = reason
+
     if verbose:
-        active = "ML model" if beats_baseline else "crop-mean fallback"
-        print(f"\nRegistered {version} (active predictor: {active}).")
+        print("\n=== Promotion guardrail ===")
+        print(f"  {reason}")
+        print(f"  -> {'PROMOTE new version (live predictor improves)' if promote else 'KEEP currently-promoted version (no regression)'}")
+
+    version = registry.save_model(payload, metadata, promote=promote)
+    if verbose:
+        if promote:
+            active = "ML model" if beats_baseline else "crop-mean fallback"
+            print(f"\nRegistered {version} and PROMOTED it (active predictor: {active}).")
+        else:
+            live = registry.load_promoted_metadata() or {}
+            print(f"\nRegistered {version} for history only; promoted pointer "
+                  f"stays at {live.get('version')} (no regression).")
     return version, metadata
+
+
+def _served_mae(meta: dict) -> float | None:
+    """CV MAE of the predictor a registered version ACTUALLY serves: the ML
+    model's MAE if it beat the baseline, otherwise the crop-mean fallback MAE.
+    None if the metadata predates this field (treated as 'unknown' -> beatable)."""
+    cv = meta.get("cv") or {}
+    if meta.get("beats_baseline"):
+        return cv.get("model_MAE")
+    return cv.get("cropmean_MAE")
+
+
+def _promotion_decision(model_mae: float, cropmean_mae: float, beats_baseline: bool):
+    """Decide whether the freshly-trained candidate should become the live
+    predictor. Returns (promote: bool, human_reason: str).
+
+    Rules:
+      * If nothing is promoted yet, promote (serving needs an active version).
+      * The candidate's EFFECTIVE MAE is its model_MAE when it beat the baseline,
+        else its crop-mean fallback MAE (what it would actually serve).
+      * Promote ONLY if that effective MAE is strictly LOWER than the live
+        version's effective served MAE. Ties and regressions keep the incumbent.
+    """
+    from ..registry import registry
+
+    live = registry.load_promoted_metadata()
+    candidate_mae = model_mae if beats_baseline else cropmean_mae
+    candidate_kind = "ML model" if beats_baseline else "crop-mean fallback"
+
+    if live is None:
+        return True, f"No live predictor yet -> bootstrap with candidate ({candidate_kind}, MAE {candidate_mae:.2f})."
+
+    live_mae = _served_mae(live)
+    live_kind = "ML model" if live.get("beats_baseline") else "crop-mean fallback"
+    if live_mae is None:
+        return True, (f"Live {live.get('version')} has no recorded served MAE -> "
+                      f"promote candidate ({candidate_kind}, MAE {candidate_mae:.2f}).")
+
+    better = candidate_mae < live_mae
+    cmp = "<" if better else ">="
+    verdict = "better" if better else "not better"
+    return better, (
+        f"Candidate {candidate_kind} served-MAE {candidate_mae:.2f} {cmp} "
+        f"live {live.get('version')} {live_kind} served-MAE {live_mae:.2f} "
+        f"-> candidate is {verdict} than the live predictor.")
