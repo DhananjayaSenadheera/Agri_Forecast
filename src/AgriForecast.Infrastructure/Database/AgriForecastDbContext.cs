@@ -11,9 +11,20 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<MarketPrice> MarketPrices { get; set; }
     public DbSet<CropPrice> CropPrices { get; set; }
     public DbSet<WeatherRecord> WeatherRecords { get; set; }
-    
+    public DbSet<User> Users { get; set; }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<User>(e =>
+        {
+            e.Property(x => x.Username).HasMaxLength(50).IsRequired();
+            e.Property(x => x.Email).HasMaxLength(256).IsRequired();
+            e.Property(x => x.PasswordHash).IsRequired();
+            e.Property(x => x.Role).HasMaxLength(50).IsRequired();
+            e.HasIndex(x => x.Username).IsUnique();
+            e.HasIndex(x => x.Email).IsUnique();
+        });
+
         modelBuilder.Entity<DefaultSetting>().HasData(new DefaultSetting
         {
             Id = 1,

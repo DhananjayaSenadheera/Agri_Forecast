@@ -4,12 +4,14 @@ using AgriForecast.Application.Requests.EcconomicCenter.Commands.Update;
 using AgriForecast.Application.Requests.EcconomicCenter.Quaries.GetAll;
 using AgriForecast.Application.Requests.EcconomicCenter.Quaries.GetOneById;
 using MediatR;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AgriForecast.API.Controllers;
 
 [ApiController]
 [Route("api/eco")]
+[Authorize]
 public class EcoControler(IMediator mediator) : ControllerBase
 {
     private static object ToErrorResponse(string error) => new
