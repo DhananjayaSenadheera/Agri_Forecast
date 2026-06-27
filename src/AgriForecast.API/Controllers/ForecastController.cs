@@ -3,12 +3,14 @@ using AgriForecast.Application.Requests.Forecast.Quaries.GetHarvest;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetMonthly;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetTimeline;
 using MediatR;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AgriForecast.API.Controllers;
 
 [ApiController]
 [Route("api/forecast")]
+[Authorize]
 public class ForecastController(IMediator mediator) : ControllerBase
 {
     private static object ToErrorResponse(string error) => new

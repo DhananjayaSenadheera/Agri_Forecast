@@ -4,12 +4,14 @@ using AgriForecast.Application.Requests.Crop.Commands.Update;
 using AgriForecast.Application.Requests.Crop.Quaries.GetAll;
 using AgriForecast.Application.Requests.Crop.Quaries.GetOneById;
 using MediatR;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AgriForecast.API.Controllers;
 
 [ApiController]
 [Route("api/crops")]
+[Authorize]
 public class CropController(IMediator mediator) : ControllerBase
 {
     private static object ToErrorResponse(string error) => new

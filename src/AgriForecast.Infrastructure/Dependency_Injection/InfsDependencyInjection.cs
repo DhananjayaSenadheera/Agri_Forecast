@@ -9,6 +9,7 @@ using AgriForecast.Infrastructure.Services.Forecasting;
 using AgriForecast.Infrastructure.Services.MarketPriceIngestion;
 using AgriForecast.Infrastructure.Services.WeatherIngestion;
 using AgriForecast.Infrastructure.Services.Recommendation;
+using AgriForecast.Infrastructure.Security;
 
 namespace AgriForecast.Infrastructure.Dependency_Injection;
 
@@ -31,6 +32,12 @@ public static class InfsDependencyInjection
         services.AddScoped<IWeatherRecordRepository, WeatherRecordRepository>();
         services.AddScoped<IForecastingService, ForecastingService>();
         services.AddScoped<IRecommendationService, RecommendationService>();
+
+        // Auth: user store, password hashing, and JWT issuance.
+        services.AddScoped<IUserRepository, UserRepository>();
+        services.AddScoped<IPasswordHasher, PasswordHasher>();
+        services.AddScoped<IJwtTokenGenerator, JwtTokenGenerator>();
+        services.Configure<JwtSettings>(configuration.GetSection(JwtSettings.SectionName));
         services.AddHttpClient<IDambullaApiClient, DambullaApiClient>(http =>
         {
             var baseUrl = configuration["MarketPriceSources:DambullaDec:BaseUrl"];
