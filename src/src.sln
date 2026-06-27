@@ -1,5 +1,6 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
+# 
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "AgriForecast", "AgriForecast", "{E15BEBDB-E89A-4A65-A6DF-EDA52A1BFF39}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgriForecast.API", "AgriForecast.API\AgriForecast.API.csproj", "{21946C0B-585B-4F41-8450-769B1894F90A}"
@@ -30,6 +31,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "agriforecast_ml", "agrifore
 		AgriForecast.ML\agriforecast_ml\features.py = AgriForecast.ML\agriforecast_ml\features.py
 		AgriForecast.ML\agriforecast_ml\store.py = AgriForecast.ML\agriforecast_ml\store.py
 	EndProjectSection
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgriForecast.Tests", "AgriForecast.Tests\AgriForecast.Tests.csproj", "{BC87EC4E-01DF-416A-887A-AC284AA312B2}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -64,5 +67,9 @@ Global
 		{9FEDEA50-97F7-4AC6-9AE9-E79D5FB6FAE1}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{9FEDEA50-97F7-4AC6-9AE9-E79D5FB6FAE1}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{9FEDEA50-97F7-4AC6-9AE9-E79D5FB6FAE1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BC87EC4E-01DF-416A-887A-AC284AA312B2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BC87EC4E-01DF-416A-887A-AC284AA312B2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BC87EC4E-01DF-416A-887A-AC284AA312B2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BC87EC4E-01DF-416A-887A-AC284AA312B2}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
