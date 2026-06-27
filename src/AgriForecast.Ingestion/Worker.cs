@@ -1,5 +1,6 @@
 using AgriForecast.Infrastructure.Services.MarketPriceIngestion;
 using AgriForecast.Infrastructure.Services.WeatherIngestion;
+using AgriForecast.Infrastructure.Services.EconomicIngestion;
 
 namespace AgriForecast.Ingestion;
 
@@ -71,6 +72,18 @@ public class Worker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "An error occurred during weather ingestion");
+        }
+
+        try
+        {
+            var economic = scope.ServiceProvider.GetRequiredService<IEconomicIngestionService>();
+            _logger.LogInformation("Economic ingestion started");
+            await economic.IngestAsync(stoppingToken);
+            _logger.LogInformation("Economic ingestion finished");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "An error occurred during economic ingestion");
         }
     }
 }

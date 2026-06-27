@@ -11,6 +11,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<MarketPrice> MarketPrices { get; set; }
     public DbSet<CropPrice> CropPrices { get; set; }
     public DbSet<WeatherRecord> WeatherRecords { get; set; }
+    public DbSet<EconomicIndicator> EconomicIndicators { get; set; }
     public DbSet<User> Users { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -45,6 +46,16 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
         {
             e.Property(x => x.AvgTemperature).HasPrecision(6, 2);
             e.Property(x => x.TotalRainfall).HasPrecision(8, 2);
+        });
+
+        modelBuilder.Entity<EconomicIndicator>(e =>
+        {
+            e.Property(x => x.IndicatorCode).HasMaxLength(50).IsRequired();
+            e.Property(x => x.Source).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Value).HasPrecision(18, 6);
+
+            // One reading per (date, indicator) — keeps ingestion idempotent at the DB level.
+            e.HasIndex(x => new { x.Date, x.IndicatorCode }).IsUnique();
         });
 
         modelBuilder.Entity<CropPrice>(e =>

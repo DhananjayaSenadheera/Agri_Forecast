@@ -13,10 +13,11 @@ def main() -> None:
     prices = load.load_prices()
     crops = load.load_crops()
     weather = load.load_weather()
+    fx = load.load_fx()
     print(f"Loaded: prices={len(prices)} rows ({prices['CropId'].nunique()} crops), "
-          f"crops={len(crops)}, weather={len(weather)} months")
+          f"crops={len(crops)}, weather={len(weather)} months, fx={len(fx)} rows")
 
-    feats = features.build_all(prices, crops, weather)
+    feats = features.build_all(prices, crops, weather, fx)
 
     n = len(feats)
     labelled = int(feats["LabelAvailable"].sum())

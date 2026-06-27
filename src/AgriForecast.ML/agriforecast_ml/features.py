@@ -119,7 +119,30 @@ def build_crop_features(crop_id, group: pd.DataFrame, meta: pd.Series,
     return out.reset_index(drop=True)
 
 
-def build_all(prices: pd.DataFrame, crops: pd.DataFrame, weather: pd.DataFrame) -> pd.DataFrame:
+def _attach_fx(result: pd.DataFrame, fx: pd.DataFrame | None) -> pd.DataFrame:
+    """National FxUsdLkr column via point-in-time (as-of, backward) merge.
+
+    For each ObservationDate D, take the most recent FX with date <= D (NaN if
+    none). Same value across all crops for a given date — this is a national
+    indicator, not crop-specific. CARDINAL RULE: never an FX date AFTER D.
+    """
+    if fx is None or fx.empty:
+        result["FxUsdLkr"] = np.nan
+        return result
+    fx_sorted = fx[["date", "fx_usd_lkr"]].dropna(subset=["date"]).sort_values("date")
+    merged = pd.merge_asof(
+        result.sort_values("ObservationDate"),
+        fx_sorted,
+        left_on="ObservationDate",
+        right_on="date",
+        direction="backward",
+    )
+    merged = merged.rename(columns={"fx_usd_lkr": "FxUsdLkr"}).drop(columns=["date"])
+    return merged
+
+
+def build_all(prices: pd.DataFrame, crops: pd.DataFrame, weather: pd.DataFrame,
+              fx: pd.DataFrame | None = None) -> pd.DataFrame:
     weather_by_month, rain_clim = _weather_lookups(weather)
     meta_by_crop = crops.set_index("CropId")
     frames = []
@@ -130,4 +153,5 @@ def build_all(prices: pd.DataFrame, crops: pd.DataFrame, weather: pd.DataFrame) 
         frames.append(build_crop_features(crop_id, group, meta, weather_by_month, rain_clim))
     result = pd.concat(frames, ignore_index=True)
     result["HarvestDate"] = pd.to_datetime(result["HarvestDate"])
+    result = _attach_fx(result, fx)
     return result
