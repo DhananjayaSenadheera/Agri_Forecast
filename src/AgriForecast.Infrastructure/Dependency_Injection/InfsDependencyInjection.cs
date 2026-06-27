@@ -87,11 +87,11 @@ public static class InfsDependencyInjection
             http.BaseAddress = new Uri(configuration["EconomicSource:OpenErApi:BaseUrl"] ?? "https://open.er-api.com/");
             http.Timeout = TimeSpan.FromSeconds(30);
         });
-        // Historical FX backfill — fawazahmed0/currency-api via jsDelivr CDN (free, keyless, daily since 2000).
-        services.AddHttpClient<IFxHistoricalClient, CdnJsDelivrFxClient>(http =>
+        // Historical FX backfill — fawazahmed0/exchange-api on Cloudflare Pages (free, keyless, daily history).
+        // The client builds absolute per-date URLs ({date}.currency-api.pages.dev), so no BaseAddress is set.
+        services.AddHttpClient<IFxHistoricalClient, FawazCurrencyFxClient>(http =>
         {
-            http.BaseAddress = new Uri(configuration["EconomicSource:JsDelivrCdn:BaseUrl"] ?? "https://cdn.jsdelivr.net/");
-            http.Timeout = TimeSpan.FromSeconds(15);
+            http.Timeout = TimeSpan.FromSeconds(20);
         });
 
         return services;
