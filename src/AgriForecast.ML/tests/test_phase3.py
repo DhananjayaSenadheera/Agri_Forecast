@@ -287,6 +287,78 @@ class TestLeakageByTruncation:
 
 
 # ===========================================================================
+# 3b. FX POINT-IN-TIME AS-OF JOIN  (features._attach_fx)
+# ===========================================================================
+
+class TestFxAsOfJoin:
+    """
+    FxUsdLkr is a national economic indicator merged via a point-in-time
+    (as-of, backward) join: for an observation on date D, only an FX rate with
+    date <= D may be used.  No FX value may come from a date AFTER D.
+
+    Data today is sparse (FX is latest-only — open.er-api.com gives no history),
+    so the real column is all-NULL; we therefore inject a synthetic FX series to
+    exercise the as-of logic deterministically.
+    """
+
+    def test_fx_never_from_future_date(self):
+        from agriforecast_ml import load, features
+
+        prices  = load.load_prices()
+        brinjal = prices[prices["CropName"] == "Brinjal"].copy()
+        assert len(brinjal) > 0, "Brinjal price data not found — check DB connection"
+        crops   = load.load_crops()
+        weather = load.load_weather()
+
+        # Synthetic FX series spanning the price window, with distinct values so
+        # we can trace exactly which row each observation picked up.
+        lo, hi = brinjal["PriceDate"].min(), brinjal["PriceDate"].max()
+        fx_dates = pd.date_range(lo, hi, freq="37D")  # irregular cadence
+        fx = pd.DataFrame({
+            "date": fx_dates,
+            "fx_usd_lkr": np.arange(len(fx_dates), dtype=float) + 300.0,
+        })
+
+        feats = features.build_all(brinjal, crops, weather, fx)
+        assert "FxUsdLkr" in feats.columns, "FxUsdLkr column missing after build"
+
+        # For each row, the FX value must equal the most recent fx <= ObservationDate.
+        fx_sorted = fx.sort_values("date").reset_index(drop=True)
+        joined = feats.dropna(subset=["FxUsdLkr"])
+        assert len(joined) > 0, "Synthetic FX should populate at least some rows"
+        for obs, fxv in zip(joined["ObservationDate"], joined["FxUsdLkr"]):
+            eligible = fx_sorted[fx_sorted["date"] <= obs]
+            assert len(eligible) > 0, (
+                f"FX value {fxv} attached to {obs.date()} but no FX date <= it exists "
+                f"— this would be a future (leaking) FX rate"
+            )
+            expected = float(eligible.iloc[-1]["fx_usd_lkr"])
+            assert fxv == expected, (
+                f"as-of mismatch on {obs.date()}: got {fxv}, expected {expected} "
+                f"(most recent FX <= observation date)"
+            )
+
+    def test_fx_all_null_when_fx_after_window(self):
+        """If the only FX row post-dates every observation, FxUsdLkr must be all-NULL
+        (the current forward-investment reality), not silently filled."""
+        from agriforecast_ml import load, features
+
+        prices  = load.load_prices()
+        brinjal = prices[prices["CropName"] == "Brinjal"].copy()
+        crops   = load.load_crops()
+        weather = load.load_weather()
+
+        future = brinjal["PriceDate"].max() + pd.Timedelta(days=1)
+        fx = pd.DataFrame({"date": [future], "fx_usd_lkr": [336.67]})
+
+        feats = features.build_all(brinjal, crops, weather, fx)
+        assert feats["FxUsdLkr"].isna().all(), (
+            "FxUsdLkr must be all-NULL when the only FX rate post-dates the window "
+            "(no backward-looking rate exists) — never a future leak"
+        )
+
+
+# ===========================================================================
 # 4. PREDICT_HARVEST  (serving/predict.py)
 # ===========================================================================
 

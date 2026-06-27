@@ -8,6 +8,7 @@ using AgriForecast.Application.Services;
 using AgriForecast.Infrastructure.Services.Forecasting;
 using AgriForecast.Infrastructure.Services.MarketPriceIngestion;
 using AgriForecast.Infrastructure.Services.WeatherIngestion;
+using AgriForecast.Infrastructure.Services.EconomicIngestion;
 using AgriForecast.Infrastructure.Services.Recommendation;
 using AgriForecast.Infrastructure.Security;
 
@@ -28,8 +29,10 @@ public static class InfsDependencyInjection
         services.AddScoped<IMarketPriceRepository, MarketPriceRepository>();
         services.AddScoped<IMarketPriceIngestionService, MarketPriceIngestionService>();
         services.AddScoped<IWeatherIngestionService, WeatherIngestionService>();
+        services.AddScoped<IEconomicIngestionService, EconomicIngestionService>();
         services.AddScoped<ICropPriceRepository, CropPriceRepository>();
         services.AddScoped<IWeatherRecordRepository, WeatherRecordRepository>();
+        services.AddScoped<IEconomicIndicatorRepository, EconomicIndicatorRepository>();
         services.AddScoped<IForecastingService, ForecastingService>();
         services.AddScoped<IRecommendationService, RecommendationService>();
 
@@ -77,6 +80,14 @@ public static class InfsDependencyInjection
                 http.Timeout = TimeSpan.FromSeconds(60);
             });
         }
+
+        // Economic data provider (USD/LKR FX) — open.er-api.com (free, keyless, latest-only).
+        services.AddHttpClient<IEconomicDataClient, OpenErApiClient>(http =>
+        {
+            http.BaseAddress = new Uri(configuration["EconomicSource:OpenErApi:BaseUrl"] ?? "https://open.er-api.com/");
+            http.Timeout = TimeSpan.FromSeconds(30);
+        });
+
         return services;
     }
 }
