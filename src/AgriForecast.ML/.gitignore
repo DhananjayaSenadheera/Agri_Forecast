@@ -5,3 +5,4 @@ __pycache__/
 *.parquet
 .pytest_cache/
 models/
+harti_cache/
