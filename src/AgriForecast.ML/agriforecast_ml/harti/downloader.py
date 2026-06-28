@@ -89,10 +89,22 @@ def scrape_pdf_links(session: requests.Session) -> list[tuple[date, str]]:
     seen: set[str] = set()
     results: list[tuple[date, str]] = []
 
+    n_total_links = 0      # all <a href> tags on the page
+    n_pdf_links = 0        # .pdf links found before /eng/ filter
+    n_non_eng = 0          # dropped by /eng/ path filter
+    n_no_date = 0          # dropped because filename has no parseable date
+    n_dup = 0              # dropped as duplicates
+
     for tag in soup.find_all("a", href=True):
+        n_total_links += 1
         href: str = tag["href"]
+        if not href.lower().endswith(".pdf"):
+            continue
+        n_pdf_links += 1
         # Keep only English vegetable PDFs under assets/pdf/food_price/daily/eng/
-        if "/eng/" not in href or not href.lower().endswith(".pdf"):
+        if "/eng/" not in href:
+            n_non_eng += 1
+            logger.debug("Non-/eng/ PDF link dropped: %s", href)
             continue
         # Normalise: strip leading slash or domain if present
         href = href.lstrip("/")
@@ -103,14 +115,21 @@ def scrape_pdf_links(session: requests.Session) -> list[tuple[date, str]]:
 
         d = _parse_date_from_filename(href)
         if d is None:
+            n_no_date += 1
             logger.debug("No date in link, skipping: %s", href)
             continue
         if href in seen:
+            n_dup += 1
             continue
         seen.add(href)
         results.append((d, href))
 
-    logger.info("Found %d PDF links on listing page", len(results))
+    logger.info(
+        "Scrape complete: %d total links, %d PDFs seen, %d kept (/eng/ dated unique) "
+        "— dropped: %d non-/eng/, %d no-date, %d duplicate",
+        n_total_links, n_pdf_links, len(results),
+        n_non_eng, n_no_date, n_dup,
+    )
     return sorted(results, key=lambda x: x[0])
 
 
