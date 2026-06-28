@@ -4,7 +4,10 @@ Checks run after the loader completes:
 1. Row counts per crop / per year (HARTI rows only).
 2. Gap report: list of (crop, gap_start, gap_end, gap_days) where gaps > 7 days.
 3. Zero-duplicate assertion: no (CropId, PriceDate) has rows from BOTH HARTI
-   and DAMBULLA_DEC.  Raises AssertionError if violated.
+   and DAMBULLA_DEC that would BOTH reach the feature build.  Raises AssertionError if
+   violated.  Exception: DEC Ridge Gourd/Beans rows in [2025-05-05, 2025-06-30] are
+   intentionally left in the DB (they are excluded at ML-load time in load.py, not
+   deleted).  The check mirrors load.py's filter so the two cannot drift.
 
 All output is printed + returned as structured dicts for programmatic use.
 """
@@ -98,13 +101,23 @@ def assert_no_source_duplicates(engine=None) -> int:
     This is the critical splice invariant: the feature build should never
     see two price rows for the same crop+date from different sources.
 
+    Exception window: DEC Ridge Gourd/Beans rows in [2025-05-05, 2025-06-30]
+    are intentionally retained in the DB (excluded at ML-load time in load.py,
+    never deleted).  HARTI also has those crops in that window per the splice
+    exception rule, so they appear in BOTH sources in the DB — but only HARTI
+    reaches the feature build.  This check mirrors load.py's carve-out exactly.
+
     Returns:
         Number of (crop, date) pairs checked (i.e. total HARTI dates).
     Raises:
-        AssertionError with details if any duplicates are found.
+        AssertionError with details if any true (non-carve-out) duplicates are found.
     """
     eng = _engine_or_default(engine)
     with eng.connect() as conn:
+        # Mirror the load.py filter: exclude DEC Ridge Gourd/Beans rows in the
+        # exception window [2025-05-05, 2025-06-30].  Those DEC rows stay in the
+        # DB by design but are filtered at ML-load time, so they are NOT true
+        # splice violations — only HARTI data reaches the feature build there.
         dups = conn.execute(sa.text("""
             SELECT c.Name AS crop,
                    CONVERT(varchar(10), h.PriceDate) AS price_date,
@@ -119,6 +132,13 @@ def assert_no_source_duplicates(engine=None) -> int:
             JOIN Crops c ON c.Id = h.CropId
             WHERE h.Source = :harti
               AND d.Source = :dec
+              -- Carve out the intentional exception window: DEC Ridge Gourd/Beans
+              -- in [2025-05-05, 2025-06-30] are filtered by load.py, not deleted.
+              AND NOT (
+                c.Name IN ('Ridge Gourd', 'Beans')
+                AND d.PriceDate >= '2025-05-05'
+                AND d.PriceDate <= '2025-06-30'
+              )
             ORDER BY c.Name, h.PriceDate
         """), {"harti": HARTI_SOURCE, "dec": DEC_SOURCE}).fetchall()
 
@@ -138,7 +158,8 @@ def assert_no_source_duplicates(engine=None) -> int:
         )
 
     logger.info(
-        "Zero-duplicate assertion PASSED: %d HARTI rows, 0 (crop,date) overlaps with DEC",
+        "Zero-duplicate assertion PASSED: %d HARTI rows, 0 unexpected (crop,date) overlaps with DEC "
+        "(exception window Ridge Gourd/Beans 2025-05-05..2025-06-30 excluded per load.py carve-out)",
         total_harti,
     )
     return total_harti
