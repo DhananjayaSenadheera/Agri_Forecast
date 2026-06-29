@@ -67,6 +67,7 @@ DECISION: <what was decided + why + measured outcome>
 CONTRACT: <new/changed interface, schema, route, or registry shape>
 LESSON:   <gotcha / failure / non-obvious constraint worth remembering>
 REUSE:    <existing code or solution you reused, or that peers should reuse>
+CLICKUP:  <ClickUp task (name/id) this work maps to + whether it is now FULLY done (merged/verified); the hub syncs the board at the final-completion gate>
 ```
 
 **Token economy (mandatory):** read the index before full files; pull a full file only when relevant. Return **summaries, not transcripts** — compress aggressively. Never re-run analysis already captured in `DECISIONS.md`/`MEMORY.md`; cite it instead.

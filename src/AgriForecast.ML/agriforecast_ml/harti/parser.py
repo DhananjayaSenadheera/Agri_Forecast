@@ -115,10 +115,13 @@ def _find_english_veg_page(pdf) -> tuple[int | None, list[list] | None]:
     return None, None
 
 
-def _dambulla_col_index(table: list[list]) -> int:
-    """Confirm Dambulla column index from the header rows (usually 3).
+def _dambulla_col_index(table: list[list]) -> int | None:
+    """Locate the Dambulla column index by scanning the first 3 header rows.
 
-    Returns the column index, defaulting to 3 if not found (belt-and-suspenders).
+    Returns the column index if found, or None if "Dambulla" cannot be positively
+    located.  Callers must treat None as a hard skip — do NOT fall back to a
+    hardcoded column; over 11 years of varying layouts that would read the wrong
+    column silently.
     """
     for row in table[:3]:
         if not row:
@@ -126,7 +129,7 @@ def _dambulla_col_index(table: list[list]) -> int:
         for ci, cell in enumerate(row):
             if cell and "Dambulla" in _clean(cell):
                 return ci
-    return 3
+    return None  # fail-loud: caller skips the PDF
 
 
 def parse_pdf(pdf_path: Path, date_str: str) -> list[ParsedPrice]:
@@ -144,17 +147,25 @@ def parse_pdf(pdf_path: Path, date_str: str) -> list[ParsedPrice]:
             warnings.simplefilter("ignore")
             import pdfplumber
             with pdfplumber.open(str(pdf_path)) as pdf:
+                n_pages = len(pdf.pages)
                 pg_idx, table = _find_english_veg_page(pdf)
 
         if table is None:
             logger.warning(
                 "[%s] No English veg page found in %s (total pages=%d)",
                 date_str, pdf_path.name,
-                sum(1 for _ in range(100)),  # lazy; we already know from open
+                n_pages,
             )
             return results
 
         dambulla_col = _dambulla_col_index(table)
+        if dambulla_col is None:
+            logger.warning(
+                "[%s] English veg page found (pg%d) but Dambulla column header "
+                "not located — skipping PDF to avoid reading wrong column",
+                date_str, pg_idx,
+            )
+            return results
 
         # Walk all rows looking for target crops in column 0
         seen_crops: set[str] = set()  # deduplicate within one PDF
@@ -208,13 +219,20 @@ def parse_many(
     all_rows: list[ParsedPrice] = []
     n_total = len(cached_pdfs)
     n_ok = n_err = 0
+    # Per-year tally for corpus-coverage visibility
+    from collections import Counter
+    year_detected: Counter = Counter()   # PDFs where rows were extracted
+    year_skipped: Counter = Counter()    # PDFs that produced zero rows
 
     for i, (date_str, path) in enumerate(sorted(cached_pdfs, key=lambda x: x[0])):
         rows = parse_pdf(path, date_str)
+        yr = date_str[:4]
         if rows:
             n_ok += 1
+            year_detected[yr] += 1
         else:
             n_err += 1
+            year_skipped[yr] += 1
         all_rows.extend(rows)
 
         if (i + 1) % log_every == 0 or (i + 1) == n_total:
@@ -227,4 +245,14 @@ def parse_many(
         "parse_many complete: %d rows from %d PDFs (%d empty/error)",
         len(all_rows), n_ok, n_err,
     )
+    # Per-year detected-vs-skipped tally (corpus-coverage visibility)
+    all_years = sorted(set(year_detected) | set(year_skipped))
+    for yr in all_years:
+        detected = year_detected[yr]
+        skipped = year_skipped[yr]
+        total_yr = detected + skipped
+        logger.info(
+            "Coverage %s: %d/%d PDFs yielded prices, %d skipped (Sinhala-only or bad layout)",
+            yr, detected, total_yr, skipped,
+        )
     return all_rows
