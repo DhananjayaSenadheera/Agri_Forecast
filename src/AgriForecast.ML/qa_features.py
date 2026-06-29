@@ -30,7 +30,7 @@ def main():
 
     print("=== TC1: table sanity ===")
     check("row count > 0", len(feats) > 0, f"{len(feats)} rows")
-    check("41 columns (40 features + ComputedAtUtc)", feats.shape[1] == 41, f"{feats.shape[1]} cols")
+    check("42 columns (41 features + ComputedAtUtc)", feats.shape[1] == 42, f"{feats.shape[1]} cols")
     check("no duplicate (crop,date) keys",
           not feats.duplicated(["CropId", "ObservationDate"]).any())
 
