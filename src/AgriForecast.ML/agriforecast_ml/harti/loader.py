@@ -46,7 +46,17 @@ from .parser import ParsedPrice
 logger = logging.getLogger(__name__)
 
 SOURCE = "HARTI"
-EXTERNAL_PRODUCT_ID = 0  # HARTI has no numeric product IDs
+# Per-label synthetic ExternalProductIds for HARTI.
+# MUST be distinct (the unique index is (Source, ExternalProductId, PriceDate)
+# — NOT including CropId).  Negative values avoid collision with DEC range 1-101.
+_HARTI_PRODUCT_IDS: dict[str, int] = {
+    "Beans":         -1,
+    "Ladies Fingers": -2,
+    "Capsicum":      -3,
+    "Bitter Gourd":  -4,
+    "Luffa":         -5,
+    "Snake Gourd":   -6,
+}
 
 # --------------------------------------------------------------------------
 # Splice boundary dates
@@ -181,6 +191,7 @@ def upsert_harti_prices(
             "price_date": price_date,
             "min_price": pr.min_price,
             "max_price": pr.max_price,
+            "ext_prod_id": _HARTI_PRODUCT_IDS[pr.harti_label],
         })
 
     logger.info(
@@ -265,7 +276,7 @@ def upsert_harti_prices(
                     {
                         "id": new_id,
                         "crop_id": crop_id_str,
-                        "ext_prod_id": EXTERNAL_PRODUCT_ID,
+                        "ext_prod_id": row["ext_prod_id"],
                         "ext_prod_name": row["harti_label"],
                         "price_date": row["price_date"],
                         "min_price": row["min_price"],

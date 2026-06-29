@@ -77,7 +77,15 @@ def top_factors(row, payload, top_n: int = 5) -> list[dict]:
     try:
         if row is None or payload is None:
             return []
-        model = payload["models"]["p50"]
+        # Explain the p50 model that actually produced the forecast: the residual
+        # p50 model when the residual path is served, else the pooled p50. The
+        # per-crop offset is an additive log-space shift, so it does NOT change
+        # SHAP signs/ranking of the feature drivers — explaining the residual
+        # model's drivers is correct for the residual prediction.
+        if payload.get("served_ml_kind") == "residual" and "residual_models" in payload:
+            model = payload["residual_models"]["p50"]
+        else:
+            model = payload["models"]["p50"]
         X = _build_X(row, payload)
 
         import shap
