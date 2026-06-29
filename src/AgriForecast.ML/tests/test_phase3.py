@@ -439,13 +439,24 @@ class TestPredictHarvest:
         )
 
     def test_top_factors_empty_unless_model_active(self):
-        """Honesty contract: SHAP factors are only surfaced when the ML MODEL is the
-        active predictor. While the fallback serves, topFactors must be empty —
-        there is nothing to 'explain' about a historical average."""
+        """Honesty contract: SHAP factors are surfaced when an ML model is active
+        (active_predictor in _SERVED_ML_KINDS) and must be EMPTY under the
+        crop_mean_fallback (there is nothing to explain about a historical average).
+        Bidirectional: factors non-empty for a known crop with ML serving; empty
+        when fallback serves."""
         r = self._call(BRINJAL_ID)
-        if r["activePredictor"] != "model":
+        active = r["activePredictor"]
+        if active in _SERVED_ML_KINDS:
+            # ML model is serving: SHAP factors must be surfaced for a known crop.
+            assert r["topFactors"] != [], (
+                f"topFactors must be non-empty when ML kind {active!r} is active "
+                f"and the crop is known (BRINJAL_ID), got []"
+            )
+        else:
+            # Fallback (crop_mean_fallback): nothing to explain.
             assert r["topFactors"] == [], (
-                f"topFactors must be [] under '{r['activePredictor']}', got {r['topFactors']}"
+                f"topFactors must be [] under fallback predictor {active!r}, "
+                f"got {r['topFactors']}"
             )
 
     def test_active_predictor_matches_promoted_model(self):
@@ -569,13 +580,28 @@ class TestTimeline:
 # 6. GATE HONESTY  (model.py / registry metadata)
 # ===========================================================================
 
+# ---------------------------------------------------------------------------
+# Supported served ML kinds.  When beats_baseline=True the serving path must
+# use one of these -- never an unrecognised string that bypasses the guard.
+# ---------------------------------------------------------------------------
+_SERVED_ML_KINDS = frozenset({"model", "residual"})
+
+
 class TestGateHonesty:
     """
-    The promoted model (v3) lost to the crop-mean baseline.  The honesty rule:
-      beats_baseline must be False
-      active_predictor must be "crop_mean_fallback"
-    If either is wrong the gate is broken and we may be serving an inferior
-    ML model while thinking we serve the safer fallback.
+    Honesty invariants for the promoted model's metadata.
+
+    Post-v8 reality: the promoted model is a residual ML model that BEATS its
+    baselines on honest walk-forward folds (no leakage):
+      beats_baseline=True, active_predictor='residual',
+      best_ml_MAE 100.51 < best_baseline_MAE 114.93 (recency_weighted_mean).
+
+    These tests are invariant-based, not value-pinning tests.  They will catch:
+      - A gate that marks beats_baseline=True when the arithmetic says False.
+      - A gate that serves the wrong predictor for the beats_baseline outcome.
+      - A metadata record that misreports which baseline or ML variant won.
+    They will NOT break simply because a new model has a different MAE --
+    only if the metadata is internally inconsistent or the gate logic is wrong.
     """
 
     def _promoted_meta(self):
@@ -584,76 +610,253 @@ class TestGateHonesty:
         assert meta is not None, "No promoted model found in registry"
         return meta
 
-    def test_beats_baseline_is_false(self):
-        """Model A lost to crop_mean; beats_baseline must be False."""
-        meta = self._promoted_meta()
-        assert meta["beats_baseline"] is False, (
-            f"beats_baseline should be False (model lost to crop_mean), "
-            f"but got {meta['beats_baseline']!r}.  The promotion gate is lying."
-        )
+    def _best_ml_mae(self, cv: dict) -> float:
+        """Return the best (lowest) ML MAE from the cv block.
 
-    def test_active_predictor_is_crop_mean_fallback(self):
-        """When beats_baseline is False, active_predictor must be crop_mean_fallback."""
-        meta = self._promoted_meta()
-        assert meta["active_predictor"] == "crop_mean_fallback", (
-            f"active_predictor should be 'crop_mean_fallback' when model loses, "
-            f"got {meta['active_predictor']!r}"
-        )
+        Prefers the explicit 'best_ml_MAE' field (stored since v8) and falls
+        back to 'model_MAE' for older metadata shapes (v3-style).
+        """
+        return cv.get("best_ml_MAE", cv["model_MAE"])
+
+    def _best_baseline_mae(self, cv: dict) -> float:
+        """Return the best (lowest) baseline MAE from the cv block.
+
+        Prefers the explicit 'best_baseline_MAE' field (stored since v8, covers
+        carry / crop_mean / recency_weighted_mean) and falls back to
+        min(carry_MAE, cropmean_MAE) for older metadata shapes (v3-style).
+        """
+        if "best_baseline_MAE" in cv:
+            return cv["best_baseline_MAE"]
+        return min(cv["carry_MAE"], cv["cropmean_MAE"])
 
     def test_beats_baseline_consistent_with_cv_numbers(self):
-        """The gate decision must be arithmetically consistent with stored CV MAEs."""
+        """beats_baseline must equal (best_ml_MAE < best_baseline_MAE) -- no lying."""
         meta = self._promoted_meta()
         cv = meta["cv"]
-        model_mae   = cv["model_MAE"]
-        carry_mae   = cv["carry_MAE"]
-        cropmean_mae = cv["cropmean_MAE"]
-        best_baseline_mae = min(carry_mae, cropmean_mae)
+        best_ml_mae       = self._best_ml_mae(cv)
+        best_baseline_mae = self._best_baseline_mae(cv)
 
-        # beats_baseline = (model_mae < best_baseline_mae)
-        expected_beats = model_mae < best_baseline_mae
+        expected_beats = best_ml_mae < best_baseline_mae
         assert meta["beats_baseline"] == expected_beats, (
             f"beats_baseline={meta['beats_baseline']} is inconsistent with CV numbers: "
-            f"model_MAE={model_mae} vs best_baseline_MAE={best_baseline_mae:.2f}. "
-            f"Expected beats_baseline={expected_beats}."
+            f"best_ml_MAE={best_ml_mae:.2f} vs best_baseline_MAE={best_baseline_mae:.2f}. "
+            f"Expected beats_baseline={expected_beats}. "
+            f"The promotion gate is recording a false result."
         )
 
     def test_best_baseline_recorded_correctly(self):
-        """The recorded best_baseline must actually BE the minimum of carry/cropmean."""
+        """The recorded best_baseline must match the minimum over all stored baselines."""
         meta = self._promoted_meta()
         cv = meta["cv"]
-        carry_mae    = cv["carry_MAE"]
-        cropmean_mae = cv["cropmean_MAE"]
-        reported     = cv["best_baseline"]
+        reported = cv["best_baseline"]
 
-        if cropmean_mae <= carry_mae:
-            expected = "crop_mean"
-        else:
-            expected = "carry_forward"
+        # Build a mapping of every baseline present in the cv block.
+        candidates = {}
+        if "carry_MAE" in cv:
+            candidates["carry_forward"] = cv["carry_MAE"]
+        if "cropmean_MAE" in cv:
+            candidates["crop_mean"] = cv["cropmean_MAE"]
+        if "recencymean_MAE" in cv:
+            candidates["recency_weighted_mean"] = cv["recencymean_MAE"]
 
-        assert reported == expected, (
-            f"best_baseline recorded as {reported!r} but arithmetic says {expected!r}. "
-            f"carry_MAE={carry_mae}, cropmean_MAE={cropmean_mae}"
+        assert candidates, "cv block has no recognisable baseline MAE fields"
+
+        best_mae = min(candidates.values())
+
+        # Allow a tie: any baseline whose MAE equals the minimum is a valid winner.
+        tied_names = {k for k, v in candidates.items() if v == best_mae}
+        assert reported in tied_names, (
+            f"best_baseline recorded as {reported!r} but the minimum baseline "
+            f"({best_mae:.2f}) belongs to {tied_names}. "
+            f"Full baselines: {candidates}"
         )
 
     def test_active_predictor_consistent_with_beats_baseline(self):
-        """active_predictor must equal 'model' iff beats_baseline is True."""
+        """active_predictor must be a served ML kind iff beats_baseline is True."""
         meta = self._promoted_meta()
-        if meta["beats_baseline"]:
-            assert meta["active_predictor"] == "model", (
-                "beats_baseline=True but active_predictor is not 'model'"
-            )
+        beats = meta["beats_baseline"]
+        active = meta["active_predictor"]
+
+        if beats:
+            # When the model wins it must serve an ML predictor, not a fallback.
+            # Accept any recognised served ML kind (e.g. 'model', 'residual').
+            # For precision, prefer the explicit served_ml_kind field if present.
+            expected_kind = meta.get("served_ml_kind", None)
+            if expected_kind is not None:
+                assert active == expected_kind, (
+                    f"beats_baseline=True but active_predictor={active!r} does not "
+                    f"match served_ml_kind={expected_kind!r} recorded in metadata."
+                )
+            else:
+                assert active in _SERVED_ML_KINDS, (
+                    f"beats_baseline=True but active_predictor={active!r} is not "
+                    f"a recognised served ML kind {_SERVED_ML_KINDS}."
+                )
         else:
-            assert meta["active_predictor"] == "crop_mean_fallback", (
-                "beats_baseline=False but active_predictor is not 'crop_mean_fallback'"
+            assert active == "crop_mean_fallback", (
+                f"beats_baseline=False but active_predictor={active!r} -- "
+                f"must be 'crop_mean_fallback' when the model loses."
             )
 
-    def test_model_mae_greater_than_best_baseline(self):
-        """Concrete check: model_MAE > best_baseline_MAE (the reason it was not promoted)."""
+    def test_best_ml_beats_best_baseline_when_promoted(self):
+        """When beats_baseline=True: best_ml_MAE < best_baseline_MAE (honest win).
+        When beats_baseline=False: best_ml_MAE >= best_baseline_MAE (fair loss).
+        """
         meta = self._promoted_meta()
         cv = meta["cv"]
-        model_mae        = cv["model_MAE"]
-        best_baseline_mae = min(cv["carry_MAE"], cv["cropmean_MAE"])
-        assert model_mae > best_baseline_mae, (
-            f"Model MAE {model_mae} should be > best baseline MAE {best_baseline_mae:.2f} "
-            f"for current data volume — this is a known limitation, not a bug."
+        best_ml_mae       = self._best_ml_mae(cv)
+        best_baseline_mae = self._best_baseline_mae(cv)
+
+        if meta["beats_baseline"]:
+            assert best_ml_mae < best_baseline_mae, (
+                f"beats_baseline=True but best_ml_MAE {best_ml_mae:.2f} >= "
+                f"best_baseline_MAE {best_baseline_mae:.2f}. "
+                f"The gate is claiming a win it did not earn."
+            )
+        else:
+            assert best_ml_mae >= best_baseline_mae, (
+                f"beats_baseline=False but best_ml_MAE {best_ml_mae:.2f} < "
+                f"best_baseline_MAE {best_baseline_mae:.2f}. "
+                f"The gate is hiding a win -- the ML model should be serving."
+            )
+
+    def test_best_ml_kind_matches_served_ml_kind(self):
+        """The winning ML variant in cv ('best_ml') must match served_ml_kind."""
+        meta = self._promoted_meta()
+        cv = meta["cv"]
+        if "best_ml" not in cv or "served_ml_kind" not in meta:
+            pytest.skip("Metadata predates best_ml/served_ml_kind fields (v3-style)")
+        assert cv["best_ml"] == meta["served_ml_kind"], (
+            f"cv.best_ml={cv['best_ml']!r} but served_ml_kind={meta['served_ml_kind']!r}. "
+            f"The gate is serving a different ML variant than the one that won CV."
         )
+
+
+class TestPromotionDecisionRegimeAware:
+    """Regression tests for the REGIME-AWARE promotion guardrail (model.py).
+
+    The old guardrail compared a new candidate's absolute served-MAE against the
+    live version's RECORDED served-MAE. That is invalid across a data-regime
+    change (the HARTI backfill grew the corpus ~1 -> ~10 seasonal cycles, which
+    changed the walk-forward test distribution and the absolute MAE scale). It
+    wrongly BLOCKED v8 (residual 100.51, beats every baseline on its own folds)
+    because v3's crop-mean scored 94.64 on a different, easier 1-cycle regime.
+
+    The fixed rule decides on the WITHIN-FOLD gate (beats_baseline) and never on
+    cross-version absolute MAE. These tests mock the registry so they are fast
+    and DB/network-free.
+    """
+
+    def _decide(self, *, ml_mae, baseline_mae, beats, cropmean_mae, live_meta):
+        from unittest.mock import patch
+        from agriforecast_ml.train import model
+        # _promotion_decision does `from ..registry import registry` internally,
+        # so patch the function on the source module.
+        with patch("agriforecast_ml.registry.registry.load_promoted_metadata",
+                   return_value=live_meta):
+            return model._promotion_decision(
+                ml_mae, baseline_mae, beats, candidate_cropmean_mae=cropmean_mae)
+
+    def test_beating_candidate_promotes_despite_stale_lower_incumbent_mae(self):
+        """THE BUG: candidate beats its own baselines -> PROMOTE, even though the
+        incumbent's recorded MAE (94.64, measured on a different regime) is
+        numerically lower than the candidate's MAE (100.51)."""
+        live = {"version": "v3", "beats_baseline": False,
+                "cv": {"cropmean_MAE": 94.64, "best_baseline_MAE": 94.64}}
+        promote, reason = self._decide(
+            ml_mae=100.51, baseline_mae=114.93, beats=True,
+            cropmean_mae=136.13, live_meta=live)
+        assert promote is True, reason
+        assert "94.64" not in reason or "NOT" in reason  # must not compare to stale MAE
+
+    def test_genuinely_worse_candidate_does_not_promote(self):
+        """A non-beating candidate (serves crop-mean fallback) must NOT displace a
+        live ML model. This is the 'genuinely worse' regression guard."""
+        live = {"version": "v9", "beats_baseline": True,
+                "cv": {"best_ml_MAE": 80.0}}
+        promote, reason = self._decide(
+            ml_mae=130.0, baseline_mae=120.0, beats=False,
+            cropmean_mae=140.0, live_meta=live)
+        assert promote is False, reason
+        assert "KEEP" in reason
+
+    def test_non_beating_candidate_keeps_non_beating_incumbent_unless_strictly_better(self):
+        """Two fallbacks: keep incumbent unless the candidate's OWN-fold crop-mean
+        is strictly lower (like-for-like), never on cross-regime numbers."""
+        live = {"version": "v3", "beats_baseline": False,
+                "cv": {"cropmean_MAE": 90.0}}
+        # candidate fallback worse on its own folds -> keep incumbent
+        worse, _ = self._decide(ml_mae=200.0, baseline_mae=150.0, beats=False,
+                                cropmean_mae=136.13, live_meta=live)
+        assert worse is False
+        # candidate fallback strictly better on its own folds -> promote
+        better, _ = self._decide(ml_mae=200.0, baseline_mae=150.0, beats=False,
+                                 cropmean_mae=85.0, live_meta=live)
+        assert better is True
+
+    def test_bootstrap_when_nothing_promoted(self):
+        promote, reason = self._decide(
+            ml_mae=100.51, baseline_mae=114.93, beats=True,
+            cropmean_mae=136.13, live_meta=None)
+        assert promote is True
+        assert "No live predictor" in reason
+
+
+class TestResidualServingPath:
+    """Blocker-2 regression: serving honors served_ml_kind='residual' with the
+    persisted per-crop offset (expm1(model_pred + log1p(offset))), and fails
+    loud + safe for any non-servable ML kind. Pure-payload tests, no DB."""
+
+    def _payload(self, **over):
+        # minimal residual payload mirroring what train_and_register persists
+        base = {
+            "feature_cols": [], "categorical": ["CropId"], "log_target": True,
+            "quantiles": {"p10": 0.1, "p50": 0.5, "p90": 0.9},
+            "fallback": {"per_crop": {}, "global": {"p10": 1, "p50": 2, "p90": 3}},
+            "beats_baseline": True, "served_ml_kind": "residual",
+            "residual_models": {"p10": object(), "p50": object(), "p90": object()},
+            "residual_offsets": {"abc": 100.0}, "residual_offset_global": 50.0,
+            "models": {"p10": object(), "p50": object(), "p90": object()},
+        }
+        base.update(over)
+        return base
+
+    def test_residual_offset_lookup_point_in_time(self):
+        import agriforecast_ml.serving.predict as P
+        old = P._PAYLOAD
+        try:
+            P._PAYLOAD = self._payload()
+            assert P._residual_offset("abc") == 100.0       # known crop
+            assert P._residual_offset("ABC") == 100.0       # case-insensitive
+            assert P._residual_offset("unknown") == 50.0    # global fallback
+        finally:
+            P._PAYLOAD = old
+
+    def test_servable_true_for_complete_residual_payload(self):
+        import agriforecast_ml.serving.predict as P
+        old = P._PAYLOAD
+        try:
+            P._PAYLOAD = self._payload()
+            assert P._ml_servable() is True
+        finally:
+            P._PAYLOAD = old
+
+    def test_guard_blocks_unknown_kind(self):
+        import agriforecast_ml.serving.predict as P
+        old = P._PAYLOAD
+        try:
+            P._PAYLOAD = self._payload(served_ml_kind="blend")
+            assert P._ml_servable() is False
+        finally:
+            P._PAYLOAD = old
+
+    def test_guard_blocks_residual_with_missing_artifacts(self):
+        import agriforecast_ml.serving.predict as P
+        old = P._PAYLOAD
+        try:
+            pl = self._payload()
+            del pl["residual_offsets"]
+            P._PAYLOAD = pl
+            assert P._ml_servable() is False
+        finally:
+            P._PAYLOAD = old

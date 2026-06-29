@@ -6,6 +6,7 @@ P10/P50/P90 interval and never crashes on unknown crops.
 """
 from __future__ import annotations
 
+import logging
 from datetime import date, timedelta
 
 import numpy as np
@@ -15,6 +16,8 @@ from sqlalchemy import text
 from ..db import get_engine
 from ..registry import registry
 from . import explain
+
+_log = logging.getLogger(__name__)
 
 # Load the promoted payload once at import (serving is read-only).
 _PAYLOAD, _META = registry.load_promoted()
@@ -41,7 +44,45 @@ def _crop_meta(crop_id: str):
     return df["Name"].iloc[0], (int(gp) if pd.notna(gp) else None)
 
 
-def _model_quantiles(row) -> dict:
+# ML kinds whose serving artifacts this module knows how to honor. A promoted
+# version advertising any other served_ml_kind must NOT be served as an ML model
+# (its artifacts are not persisted/understood here) -> fail loud, fall back safe.
+_SERVABLE_ML_KINDS = {"model", "residual"}
+
+
+def _served_ml_kind() -> str:
+    # Older payloads predate served_ml_kind; default to the pooled "model" path.
+    return str((_PAYLOAD or {}).get("served_ml_kind", "model"))
+
+
+def _ml_servable() -> bool:
+    """True iff the promoted ML path is one we can actually serve with persisted
+    artifacts. Guards the long-flagged trap: serving must never honor a
+    non-`model` ML kind whose artifacts aren't in the registry."""
+    kind = _served_ml_kind()
+    if kind not in _SERVABLE_ML_KINDS:
+        _log.error(
+            "Promoted version %s advertises served_ml_kind=%r which serving "
+            "cannot honor (artifacts not persisted/understood) -> serving the "
+            "crop-mean fallback instead. Persist this kind's artifacts and add "
+            "a serving path before promoting it.",
+            (_META or {}).get("version"), kind)
+        return False
+    if kind == "residual":
+        ok = ("residual_models" in _PAYLOAD
+              and "residual_offsets" in _PAYLOAD
+              and "residual_offset_global" in _PAYLOAD)
+        if not ok:
+            _log.error(
+                "Promoted version %s served_ml_kind='residual' but residual "
+                "artifacts are missing from the payload -> serving crop-mean "
+                "fallback. Retrain so residual_models/residual_offsets are "
+                "persisted.", (_META or {}).get("version"))
+        return ok
+    return "models" in _PAYLOAD
+
+
+def _build_X(row):
     cols = _PAYLOAD["feature_cols"]
     X = pd.DataFrame([{c: row.get(c) for c in cols}])
     for c in cols:
@@ -49,6 +90,34 @@ def _model_quantiles(row) -> dict:
             X[c] = X[c].astype("category")
         else:
             X[c] = pd.to_numeric(X[c], errors="coerce").astype("float64")
+    return X
+
+
+def _residual_offset(crop_id: str) -> float:
+    """Per-crop residual offset, looked up from the PERSISTED train-only map.
+    Point-in-time / leakage-safe: the map was fixed at training time from data
+    at/before train; serving never recomputes it from current/future data."""
+    offsets = _PAYLOAD["residual_offsets"]
+    return float(offsets.get(str(crop_id).lower(), _PAYLOAD["residual_offset_global"]))
+
+
+def _model_quantiles(row, crop_id: str | None = None) -> dict:
+    """Quantile predictions for the promoted ML path.
+
+    served_ml_kind == "model":    expm1(model_pred)
+    served_ml_kind == "residual": expm1(model_pred + log1p(offset)) where offset
+                                  is the persisted per-crop train-only mean.
+    """
+    X = _build_X(row)
+    kind = _served_ml_kind()
+    if kind == "residual":
+        offset = _residual_offset(crop_id)
+        log_off = float(np.log1p(offset))
+        out = {}
+        for q, mdl in _PAYLOAD["residual_models"].items():
+            out[q] = float(np.expm1(mdl.predict(X)[0] + log_off))
+        return out
+    # default pooled "model" path
     out = {}
     for q, mdl in _PAYLOAD["models"].items():
         out[q] = float(np.expm1(mdl.predict(X))[0])
@@ -65,13 +134,15 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
         and pd.notna(row.get("GrowthPeriodDays")) else _crop_meta(crop_id)
 
     harvest_date = plant_date + timedelta(days=gp) if gp else None
-    model_active = bool(_PAYLOAD.get("beats_baseline"))
+    # Serve the ML path only when the gate promoted it AND its artifacts are
+    # present/understood here (guards the residual/blend latent trap).
+    model_active = bool(_PAYLOAD.get("beats_baseline")) and _ml_servable()
 
     top_factors: list[dict] = []
     if model_active and row is not None and gp:
-        q = _model_quantiles(row)
+        q = _model_quantiles(row, crop_id)
         p10, p50, p90 = q["p10"], q["p50"], q["p90"]
-        active, confidence = "model", "Medium"
+        active, confidence = _served_ml_kind(), "Medium"
         explanation = "ML model forecast from current price, season and recent weather."
         top_factors = explain.top_factors(row, _PAYLOAD, top_n=5)
     else:
@@ -135,10 +206,15 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
     """Monthly history + multi-horizon forecast for one crop.
 
     Leakage rule: history and forecast use ONLY data with date <= as_of.
-    With the fallback active, the point forecast is flat (the crop's
-    historical p50) and we are honest about it: the interval WIDENS with
-    horizon (half-spread scaled by sqrt(horizon)) because a flat forecast is
-    progressively less trustworthy further out.
+
+    Routing mirrors predict_harvest: when the ML path is promoted AND servable
+    (beats_baseline AND _ml_servable()) we anchor the forecast on the served ML
+    model (the pooled or residual quantile path, latest feature row <= as_of,
+    point-in-time / no lookahead — the residual offset comes from the persisted
+    train-only map). Otherwise the central forecast is the crop's historical p50
+    (flat) and we say so. In BOTH cases the band WIDENS with horizon (half-spread
+    scaled by sqrt(horizon)) because a single-anchor forecast is progressively
+    less trustworthy further out.
     """
     if _PAYLOAD is None:
         raise RuntimeError("No model registered — run train_model_a.py first.")
@@ -148,16 +224,25 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
 
     history = _monthly_history(crop_id, as_of, max_months=12)
 
-    model_active = bool(_PAYLOAD.get("beats_baseline"))
     fb = _PAYLOAD["fallback"]
     per = fb["per_crop"].get(crop_id) or fb["global"]
     p10, p50, p90 = float(per["p10"]), float(per["p50"]), float(per["p90"])
     have_crop = crop_id in fb["per_crop"]
 
-    if model_active:
-        active, confidence = "model", "Medium"
-        explanation = "ML model forecast from current price, season and recent weather."
+    # Serve the ML path only when promoted AND its artifacts are present/understood
+    # here (same guard as predict_harvest; protects the residual/blend trap).
+    model_active = bool(_PAYLOAD.get("beats_baseline")) and _ml_servable()
+    row = _latest_feature_row(crop_id, as_of) if model_active else None
+    if model_active and row is not None:
+        q = _model_quantiles(row, crop_id)  # residual or pooled, per served_ml_kind
+        p10, p50, p90 = float(q["p10"]), float(q["p50"]), float(q["p90"])
+        p10, p50, p90 = sorted([p10, p50, p90])
+        active, confidence = _served_ml_kind(), "Medium"
+        explanation = ("ML model forecast from current price, season and recent "
+                       "weather; the band widens with horizon to reflect growing "
+                       "uncertainty further out.")
     else:
+        # Fallback: no servable ML path (or no feature row to score for this crop).
         active = "crop_mean_fallback"
         confidence = "Medium" if have_crop else "Low"
         explanation = ("Based on this crop's historical harvest-price distribution. "
@@ -165,8 +250,9 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
                        "current data volume, so the central forecast is flat; the band "
                        "widens with horizon to reflect growing uncertainty.)")
 
-    # h=1 reproduces the fallback's actual [p10, p90] (so the 1-month band matches
-    # what /predict returns for the same crop); each side's distance from the median
+    # h=1 reproduces the active predictor's actual [p10, p90] (ML quantiles when
+    # served, else the fallback distribution) so the 1-month band matches what
+    # /predict returns for the same crop; each side's distance from the median
     # then scales by sqrt(horizon) — honest, asymmetric, growing uncertainty.
     lower_gap = p50 - p10
     upper_gap = p90 - p50
