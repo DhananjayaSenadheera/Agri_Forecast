@@ -137,7 +137,16 @@ def _crop_fallback(df: pd.DataFrame) -> dict:
             "global": {"p10": float(g[0.1]), "p50": float(g[0.5]), "p90": float(g[0.9])}}
 
 
-def train_and_register(verbose=True):
+def train_and_register(verbose=True, promote_override: bool | None = None):
+    """Train, evaluate, and register Model A.
+
+    `promote_override`:
+        None  -> use the guardrail's decision (default).
+        False -> register the new version for history but DO NOT move
+                 promoted.json (used to stage a candidate for review before the
+                 hub flips promotion).
+        True  -> force-promote regardless of the guardrail (hub use only).
+    """
     from ..registry import registry
 
     df = dataset.load_training_frame()
@@ -201,10 +210,26 @@ def train_and_register(verbose=True):
                         f"'{best_baseline_name}') -> serve fallback")
         print(f"Gate: {verdict}")
 
-    # Final quantile models on all labelled data (kept for when the model improves).
+    # Final quantile models on all labelled data (the pooled "model" kind).
     final = {q: make_model(a) for q, a in QUANTILES.items()}
     for q, mdl in final.items():
         mdl.fit(X, np.log1p(y))
+
+    # Final residual quantile models (the "residual" kind). Each predicts the
+    # multiplicative residual log1p(price) - log1p(offset); serving adds the
+    # offset back: expm1(model_pred + log1p(offset)). The offset is a per-crop
+    # mean computed from ALL labelled TRAIN data and PERSISTED below, so serving
+    # never recomputes it from future data -> point-in-time / leakage-safe.
+    # Offset is an additive log-space shift, identical across quantiles.
+    cm_means, cm_overall = baselines.crop_mean_map(df)
+    off_all = df["CropId"].map(cm_means).fillna(cm_overall).to_numpy(dtype=float)
+    resid_target = np.log1p(y) - np.log1p(off_all)
+    residual_models = {q: make_model(a) for q, a in QUANTILES.items()}
+    for q, mdl in residual_models.items():
+        mdl.fit(X, resid_target)
+    # Persisted offset map: {lower(crop_id): offset_price}, + global fallback.
+    residual_offsets = {str(cid).lower(): float(v) for cid, v in cm_means.items()}
+    residual_offset_global = float(cm_overall)
 
     fallback = _crop_fallback(df)
 
@@ -230,7 +255,13 @@ def train_and_register(verbose=True):
     }
     payload = {"models": final, "feature_cols": cols, "categorical": dataset.CATEGORICAL_COLS,
                "log_target": True, "quantiles": QUANTILES,
-               "fallback": fallback, "beats_baseline": beats_baseline}
+               "fallback": fallback, "beats_baseline": beats_baseline,
+               # served_ml_kind tells serving which path to use; residual artifacts
+               # are persisted so serving can honor served_ml_kind="residual".
+               "served_ml_kind": best_ml_name,
+               "residual_models": residual_models,
+               "residual_offsets": residual_offsets,
+               "residual_offset_global": residual_offset_global}
 
     # --- Retrain guardrail: never regress the live predictor ------------------
     # A retrain must NOT make serving worse. We always register the new version
@@ -241,15 +272,25 @@ def train_and_register(verbose=True):
     # active (no-op promotion / rollback).
     # The ML path's served MAE is the best leakage-safe ML candidate; the fallback
     # path's served MAE is the best baseline.
-    promote, reason = _promotion_decision(best_ml_mae, best_baseline_mae, beats_baseline)
+    promote, reason = _promotion_decision(best_ml_mae, best_baseline_mae, beats_baseline,
+                                          candidate_cropmean_mae=cropmean_mae)
     metadata["promotion_decision"] = reason
+    metadata["promotion_recommended"] = promote  # the guardrail's verdict (for review)
+
+    if promote_override is not None and promote_override != promote:
+        reason = (f"{reason} [OVERRIDDEN: caller forced promote={promote_override}]")
+    effective_promote = promote if promote_override is None else promote_override
 
     if verbose:
         print("\n=== Promotion guardrail ===")
         print(f"  {reason}")
-        print(f"  -> {'PROMOTE new version (live predictor improves)' if promote else 'KEEP currently-promoted version (no regression)'}")
+        rec = 'PROMOTE new version (live predictor improves)' if promote else 'KEEP currently-promoted version (no regression)'
+        print(f"  guardrail recommends -> {rec}")
+        if promote_override is not None:
+            print(f"  promote_override={promote_override} -> effective promote={effective_promote}")
 
-    version = registry.save_model(payload, metadata, promote=promote)
+    version = registry.save_model(payload, metadata, promote=effective_promote)
+    promote = effective_promote
     if verbose:
         if promote:
             active = "ML model" if beats_baseline else "crop-mean fallback"
@@ -274,36 +315,66 @@ def _served_mae(meta: dict) -> float | None:
 
 
 def _promotion_decision(candidate_ml_mae: float, candidate_baseline_mae: float,
-                        beats_baseline: bool):
+                        beats_baseline: bool, candidate_cropmean_mae: float | None = None):
     """Decide whether the freshly-trained candidate should become the live
     predictor. Returns (promote: bool, human_reason: str).
 
+    REGIME-AWARE rule (fixed 2026-06-29). The previous version compared the
+    candidate's served-MAE against the live version's *recorded* served-MAE.
+    That is INVALID across a data-regime change: a corpus expansion (e.g. the
+    HARTI backfill, ~1 -> ~10 seasonal cycles) changes the walk-forward test
+    distribution, so absolute MAE numbers between versions are not comparable
+    (v3 crop-mean scored 94.64 on ~1 cycle; on the 10-yr folds even crop-mean
+    scores ~136). Comparing 100.51 (10-yr) vs 94.64 (1-cycle) wrongly blocked a
+    model that beats EVERY baseline on its own folds.
+
+    The trainer already computes the only sound, same-regime comparison: the
+    within-fold gate `beats_baseline` (best ML strictly < best baseline on the
+    SAME folds, same data). We decide on THAT, not on cross-version MAE.
+
     Rules:
       * If nothing is promoted yet, promote (serving needs an active version).
-      * The candidate's EFFECTIVE MAE is its best-ML-candidate MAE when it beat the
-        baseline, else the served baseline's MAE (what it would actually serve).
-      * Promote ONLY if that effective MAE is strictly LOWER than the live
-        version's effective served MAE. Ties and regressions keep the incumbent.
+      * If the candidate's ML path beats its own baselines (beats_baseline=True),
+        PROMOTE: it is provably better than every baseline on the current data,
+        including the crop-mean the incumbent serves. Cross-version MAE is
+        irrelevant here.
+      * If the candidate does NOT beat its baselines, it would serve the same
+        crop-mean fallback as before. Then only re-promote when there is no live
+        version, or when the live version is ALSO a non-beating fallback AND the
+        candidate's own-fold crop-mean MAE is strictly lower than the live one
+        (a like-for-like fallback comparison). Otherwise keep the incumbent.
     """
     from ..registry import registry
 
     live = registry.load_promoted_metadata()
-    candidate_mae = candidate_ml_mae if beats_baseline else candidate_baseline_mae
-    candidate_kind = "ML model" if beats_baseline else "crop-mean fallback"
 
     if live is None:
-        return True, f"No live predictor yet -> bootstrap with candidate ({candidate_kind}, MAE {candidate_mae:.2f})."
+        kind = "ML model" if beats_baseline else "crop-mean fallback"
+        mae = candidate_ml_mae if beats_baseline else candidate_baseline_mae
+        return True, f"No live predictor yet -> bootstrap with candidate ({kind}, MAE {mae:.2f})."
 
-    live_mae = _served_mae(live)
-    live_kind = "ML model" if live.get("beats_baseline") else "crop-mean fallback"
-    if live_mae is None:
-        return True, (f"Live {live.get('version')} has no recorded served MAE -> "
-                      f"promote candidate ({candidate_kind}, MAE {candidate_mae:.2f}).")
+    if beats_baseline:
+        return True, (
+            f"Candidate ML model beats every baseline on its OWN walk-forward "
+            f"folds (best-ML {candidate_ml_mae:.2f} < best-baseline "
+            f"{candidate_baseline_mae:.2f}) -> PROMOTE. (Regime-aware: NOT "
+            f"compared to live {live.get('version')}'s recorded MAE, which was "
+            f"measured on a different data regime.)")
 
-    better = candidate_mae < live_mae
+    # Candidate serves the crop-mean fallback (did not beat its baselines).
+    if bool(live.get("beats_baseline")):
+        return False, (
+            f"Candidate did NOT beat its baselines (serves crop-mean fallback) "
+            f"but live {live.get('version')} serves an ML model -> KEEP incumbent.")
+    live_cm = (live.get("cv") or {}).get("cropmean_MAE")
+    cand_cm = candidate_cropmean_mae
+    if live_cm is None or cand_cm is None:
+        return False, (
+            f"Candidate and live both serve crop-mean fallback; no comparable "
+            f"crop-mean MAE recorded -> KEEP incumbent (no regression).")
+    better = cand_cm < live_cm
     cmp = "<" if better else ">="
-    verdict = "better" if better else "not better"
     return better, (
-        f"Candidate {candidate_kind} served-MAE {candidate_mae:.2f} {cmp} "
-        f"live {live.get('version')} {live_kind} served-MAE {live_mae:.2f} "
-        f"-> candidate is {verdict} than the live predictor.")
+        f"Both serve crop-mean fallback: candidate own-fold crop-mean "
+        f"{cand_cm:.2f} {cmp} live {live.get('version')} {live_cm:.2f} -> "
+        f"{'promote' if better else 'keep incumbent'}.")
