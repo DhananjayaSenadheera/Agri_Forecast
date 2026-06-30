@@ -11,6 +11,16 @@ gracefully -- if a feed URL becomes stale it warns and continues; it does NOT
 abort the run.
 
 Column produced by the fetcher: Source (str) maps to the 'source' field here.
+
+Feed health (live-probed 2026-06-30).  Removed feeds that no longer yield RSS:
+  - reuters_biz       feeds.reuters.com decommissioned (DNS no longer resolves)
+  - worldbank_food    feeds.worldbank.org decommissioned (DNS no longer resolves)
+  - fao_news          www.fao.org/feeds/rss/en/news/ returns 404
+  - daily_ft          www.ft.lk/rss/ now serves a JS-gated HTML page, not RSS
+  - news_first        newsfirst.lk/feed/ returns Cloudflare 403 to all bots
+  - daily_mirror_lk   dailymirror.lk/rss.xml returns Cloudflare 403 to all bots
+The two Cloudflare-403 outlets are good content sources but cannot be reached by
+a plain HTTP fetcher; revisit only if we add a headless-browser fetch path.
 """
 from __future__ import annotations
 
@@ -33,24 +43,9 @@ _SL_FEEDS: list[FeedSpec] = [
         "category": "SL_economy",
     },
     {
-        "source": "daily_ft",
-        "url": "https://www.ft.lk/rss/",
-        "category": "SL_economy",
-    },
-    {
         "source": "lbo",
         "url": "https://www.lankabusinessonline.com/feed/",
         "category": "SL_economy",
-    },
-    {
-        "source": "news_first",
-        "url": "https://newsfirst.lk/feed/",
-        "category": "SL_news",
-    },
-    {
-        "source": "daily_mirror_lk",
-        "url": "https://www.dailymirror.lk/rss.xml",
-        "category": "SL_news",
     },
     {
         "source": "ada_derana_biz",
@@ -69,29 +64,16 @@ _SL_FEEDS: list[FeedSpec] = [
 # ---------------------------------------------------------------------------
 _GLOBAL_AG_FEEDS: list[FeedSpec] = [
     {
-        "source": "fao_news",
-        "url": "https://www.fao.org/feeds/rss/en/news/",
-        "category": "global_ag",
-    },
-    {
-        "source": "reuters_biz",
-        "url": "https://feeds.reuters.com/reuters/businessNews",
-        "category": "global_commodity",
-    },
-    {
+        # ReliefWeb's per-country RSS path now 301-redirects to the updates river;
+        # primary_country=144 is Sri Lanka.  Old /country/lka/rss.xml path is dead.
         "source": "reliefweb_lka",
-        "url": "https://reliefweb.int/country/lka/rss.xml",
+        "url": "https://reliefweb.int/updates/rss.xml?primary_country=144",
         "category": "SL_disaster_weather",
     },
     {
         "source": "agrifarming_in",
         "url": "https://www.agrifarming.in/feed",
         "category": "regional_ag",
-    },
-    {
-        "source": "worldbank_food",
-        "url": "https://feeds.worldbank.org/wb/news/food",
-        "category": "global_commodity",
     },
 ]
 

@@ -30,10 +30,14 @@ ENV PYTHONUNBUFFERED=1 \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Application code: the package + the two entry-point scripts.
+# Application code: the package + the entry-point scripts.
+# ingest_news.py / score_news.py are imported by the /admin/ingest-news
+# endpoint (serving/app.py), so they must be present in the image.
 COPY agriforecast_ml ./agriforecast_ml
 COPY build_features.py .
 COPY train_model_a.py .
+COPY ingest_news.py .
+COPY score_news.py .
 
 EXPOSE 8077
 

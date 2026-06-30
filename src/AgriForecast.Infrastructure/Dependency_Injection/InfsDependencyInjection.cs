@@ -9,6 +9,7 @@ using AgriForecast.Infrastructure.Services.Forecasting;
 using AgriForecast.Infrastructure.Services.MarketPriceIngestion;
 using AgriForecast.Infrastructure.Services.WeatherIngestion;
 using AgriForecast.Infrastructure.Services.EconomicIngestion;
+using AgriForecast.Infrastructure.Services.NewsIngestion;
 using AgriForecast.Infrastructure.Services.Recommendation;
 using AgriForecast.Infrastructure.Security;
 
@@ -62,6 +63,23 @@ public static class InfsDependencyInjection
 
             http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(30);
+        });
+        // News ingestion: typed HttpClient over the same ML service, triggering
+        // the Python news pipeline via POST /admin/ingest-news (orchestrated by
+        // the Ingestion Worker). The pipeline fetches RSS + scores sentiment, so
+        // it needs a much longer timeout than /predict (override via
+        // MlService:NewsIngestTimeoutSeconds, default 600).
+        services.AddHttpClient<INewsIngestionService, NewsIngestionService>(http =>
+        {
+            var baseUrl = configuration["MlService:BaseUrl"];
+
+            if (string.IsNullOrWhiteSpace(baseUrl))
+                throw new InvalidOperationException("Missing MlService:BaseUrl");
+
+            var timeoutSeconds = configuration.GetValue<int?>("MlService:NewsIngestTimeoutSeconds") ?? 600;
+
+            http.BaseAddress = new Uri(baseUrl);
+            http.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
         });
         // Weather provider is swappable via WeatherSource:Provider (default: OpenMeteo - free, keyless).
         var weatherProvider = configuration["WeatherSource:Provider"] ?? "OpenMeteo";

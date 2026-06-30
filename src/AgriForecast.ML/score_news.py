@@ -32,6 +32,46 @@ import logging
 import sys
 
 
+def run(dry_run: bool = False, writeback_scores: bool = False) -> dict:
+    """Run the news sentiment scoring pipeline programmatically.
+
+    Mirrors `main()` (the CLI) but takes plain args and RETURNS a summary
+    dict instead of printing/exiting. Used by the FastAPI /admin/ingest-news
+    endpoint so the .NET Worker can orchestrate scoring over HTTP.
+    """
+    log = logging.getLogger(__name__)
+
+    from agriforecast_ml.news import sentiment, store_sentiment
+
+    articles = store_sentiment.load_articles()
+    n_articles = len(articles)
+    if n_articles == 0:
+        return {
+            "articlesScored": 0,
+            "dailyRows": 0,
+            "rowsWritten": 0,
+            "dryRun": dry_run,
+            "note": "No articles in NewsArticles -- nothing to score.",
+        }
+
+    scored, daily = sentiment.score_and_aggregate(articles)
+
+    rows_written = 0
+    article_scores_written = 0
+    if not dry_run:
+        rows_written = store_sentiment.write_daily(daily)
+        if writeback_scores:
+            article_scores_written = store_sentiment.write_article_scores(scored)
+
+    return {
+        "articlesScored": n_articles,
+        "dailyRows": len(daily),
+        "rowsWritten": rows_written,
+        "articleScoresWritten": article_scores_written,
+        "dryRun": dry_run,
+    }
+
+
 def _setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),

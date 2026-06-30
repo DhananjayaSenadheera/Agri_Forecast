@@ -83,6 +83,12 @@ def _ml_servable() -> bool:
 
 
 def _build_X(row):
+    # Serving contract — missing features stay NaN, never 0.0. A missing
+    # sentiment column (MeanSentiment / DroughtRatio / FloodRatio / PolicyRatio)
+    # means "no news signal as of this date"; 0.0 is a *measured* VADER-neutral
+    # value, which is semantically different. Training (_attach_sentiment) leaves
+    # these NaN and XGBoost handles NaN natively (learned default split
+    # direction). So errors="coerce" below is deliberate — do NOT add .fillna(0).
     cols = _PAYLOAD["feature_cols"]
     X = pd.DataFrame([{c: row.get(c) for c in cols}])
     for c in cols:
