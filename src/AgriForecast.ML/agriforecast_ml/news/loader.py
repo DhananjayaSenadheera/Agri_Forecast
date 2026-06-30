@@ -27,6 +27,7 @@ Indices:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 import sqlalchemy as sa
 from sqlalchemy import text
@@ -37,6 +38,22 @@ from .fetcher import RawArticle
 logger = logging.getLogger(__name__)
 
 TABLE = "NewsArticles"
+
+
+def _to_naive_utc(dt: "datetime | None") -> "datetime | None":
+    """Coerce a tz-aware UTC datetime to naive UTC for the *Utc DB columns.
+
+    Timezone convention: NewsArticles.PublishedDateUtc / RetrievedAtUtc store
+    naive UTC wall-clock. The fetcher always produces tz-aware UTC datetimes
+    (or None); SQL Server DATETIME2 is tz-naive, so we drop tzinfo here at the
+    DB boundary. Without this the ODBC driver may reinterpret a tz-aware value
+    in server-local time and shift the stored timestamp.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 # IF NOT EXISTS guard: safe to call on every run (idempotent DDL).
 _DDL_CREATE_TABLE = """IF NOT EXISTS (
@@ -142,8 +159,8 @@ def upsert_articles(
                     "source": art["source"],
                     "title": art["title"],
                     "summary": art["summary"],
-                    "pub_date": art["published_utc"],
-                    "retrieved": art["retrieved_utc"],
+                    "pub_date": _to_naive_utc(art["published_utc"]),
+                    "retrieved": _to_naive_utc(art["retrieved_utc"]),
                     "lang": art["language"],
                 },
             )

@@ -33,6 +33,46 @@ import sys
 from pathlib import Path
 
 
+def run(dry_run: bool = False, skip_qa: bool = False) -> dict:
+    """Run the news ingestion pipeline programmatically.
+
+    Mirrors `main()` (the CLI) but takes plain args and RETURNS a summary
+    dict instead of printing/exiting. Used by the FastAPI /admin/ingest-news
+    endpoint so the .NET Worker can orchestrate ingestion over HTTP.
+
+    Raises on QA failure (the CLI exits 2; here we let the caller decide).
+    """
+    log = logging.getLogger(__name__)
+
+    from agriforecast_ml.news import fetcher, loader, qa
+    from agriforecast_ml.news.feeds import FEEDS
+
+    log.info("Step 1: Fetching %d RSS feeds...", len(FEEDS))
+    articles, coverage = fetcher.fetch_all(FEEDS)
+    n_feeds_with_data = sum(1 for v in coverage.values() if v > 0)
+
+    if dry_run:
+        counters = {"inserted": 0, "dup_skipped": 0, "total": len(articles)}
+    else:
+        counters = loader.upsert_articles(articles)
+
+    qa_total_rows = None
+    if not (skip_qa or dry_run):
+        report = qa.run_all_qa()  # raises AssertionError on QA failure
+        qa_total_rows = report.get("total_rows")
+
+    return {
+        "feedsAttempted": len(FEEDS),
+        "feedsWithData": n_feeds_with_data,
+        "feedsEmpty": len(FEEDS) - n_feeds_with_data,
+        "uniqueFetched": len(articles),
+        "inserted": counters["inserted"],
+        "dupSkipped": counters["dup_skipped"],
+        "qaTotalRows": qa_total_rows,
+        "dryRun": dry_run,
+    }
+
+
 def _setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
