@@ -30,7 +30,11 @@ def main():
 
     print("=== TC1: table sanity ===")
     check("row count > 0", len(feats) > 0, f"{len(feats)} rows")
-    check("42 columns (41 features + ComputedAtUtc)", feats.shape[1] == 42, f"{feats.shape[1]} cols")
+    # 51 cols = 50 features + ComputedAtUtc. Prior 41 features + Chunk D's 9 new
+    # national signals: 4 sentiment (MeanSentiment, DroughtRatio, FloodRatio,
+    # PolicyRatio) + 5 policy (ActivePolicyNetDirection, ActivePolicyCount,
+    # PolicyImportBanActive, PolicyPriceCeilingActive, PolicyFertiliserSubsidyActive).
+    check("51 columns (50 features + ComputedAtUtc)", feats.shape[1] == 51, f"{feats.shape[1]} cols")
     check("no duplicate (crop,date) keys",
           not feats.duplicated(["CropId", "ObservationDate"]).any())
 
@@ -71,26 +75,124 @@ def main():
         ok = (pd.isna(got_t) and pd.isna(exp_t)) or (pd.notna(got_t) and abs(got_t - exp_t) < 0.01)
         check(f"WxAvgTempC @ {d.date()} = wx[{cur}]", ok, f"db={got_t} exp={exp_t}")
 
-    print("\n=== TC5: LEAKAGE-BY-TRUNCATION (decisive test) ===")
-    # Rebuild Brinjal features twice: full data vs data truncated at cutoff C.
-    # Features for dates well before C MUST be identical — if any used future
-    # data, truncation would change them.
-    crops = load.load_crops(); wx = load.load_weather()
-    cutoff = pd.Timestamp("2026-01-15")
-    full = features.build_all(brinjal, crops, wx)
-    trunc_src = brinjal[brinjal["PriceDate"] <= cutoff]
-    trunc = features.build_all(trunc_src, crops, wx)
+    print("\n=== TC5: LEAKAGE-BY-TRUNCATION — Beans, policy-transition era ===")
+    # Why Beans, not Brinjal: Brinjal's history starts 2025-05-05 and all seeded
+    # PolicyFlags have EffectiveFrom <= 2023-10-01, so Brinjal sees exactly ONE
+    # constant policy state across its entire history — truncation changes nothing
+    # and the test cannot catch a policy-join leak. Beans has 11 years of history
+    # (2015-06-22 onward) and the cutoff 2023-06-15 falls inside the 2020-2024
+    # policy-transition window, giving 4 distinct ActivePolicyNetDirection values
+    # in the safe window alone. This makes TC5 a genuine guard for all 5 policy
+    # columns.
+    #
+    # Strategy: rebuild Beans features twice — (a) full data vs (b) data truncated
+    # at cutoff C. Features for dates in the safe window (>= 90 days before C)
+    # MUST be bit-identical; any deviation reveals that a feature read future data.
+    #
+    # NewsSentimentDaily is currently empty in the DB, so _attach_sentiment's
+    # backward merge_asof is never executed in the real-data path. TC5b (below)
+    # exercises it with synthetic data.
+    crops = load.load_crops()
+    wx = load.load_weather()
+    fx = load.load_fx()
+    policy = load.load_policy_flags()
+
+    # --- TC5 main: Beans with REAL policy data; NewsSentimentDaily is empty ---
+    beans = prices[prices["CropName"] == "Beans"]
+    cutoff = pd.Timestamp("2023-06-15")   # inside 2020-2024 policy-transition window
+    safe_end = cutoff - pd.Timedelta(days=90)
+
+    # Use an empty-schema sentiment frame (mirrors the live empty table).
+    _SENTIMENT_COLS = ["Date", "MeanSentiment", "ArticleCount",
+                       "DroughtRatio", "FloodRatio", "PolicyRatio"]
+    sentiment_empty = pd.DataFrame(columns=_SENTIMENT_COLS)
+
+    full = features.build_all(beans, crops, wx, fx,
+                              sentiment=sentiment_empty, policy=policy)
+    trunc_src = beans[beans["PriceDate"] <= cutoff]
+    trunc_fx = fx[fx["date"] <= cutoff] if not fx.empty else fx
+    trunc_pol = policy[policy["EffectiveFrom"] <= cutoff]
+    trunc = features.build_all(trunc_src, crops, wx, trunc_fx,
+                               sentiment=sentiment_empty, policy=trunc_pol)
+
+    # All feature columns (labels excluded — they legitimately look into the future).
     feat_cols = [c for c in full.columns if c not in
-                 ("CropId","CropCode","CropName","ObservationDate","HarvestDate",
-                  "LabelHarvestPrice","LabelAvailable")]  # label legitimately uses future
+                 ("CropId", "CropCode", "CropName", "ObservationDate", "HarvestDate",
+                  "LabelHarvestPrice", "LabelAvailable")]
     fa = full.set_index("ObservationDate")[feat_cols]
     ta = trunc.set_index("ObservationDate")[feat_cols]
-    # compare dates at least 1 window (90d) before cutoff
-    safe = ta.index[ta.index <= cutoff - pd.Timedelta(days=90)]
+    safe = ta.index[ta.index <= safe_end]
+
+    # Guard: the safe window must span multiple distinct policy states so that a
+    # policy-join leak cannot hide as a constant and slip past the diff check.
+    n_policy_states = fa.loc[safe, "ActivePolicyNetDirection"].nunique()
+    check("TC5 safe window has >1 distinct ActivePolicyNetDirection (test has teeth)",
+          n_policy_states > 1,
+          f"{n_policy_states} distinct states in {len(safe)} safe-window rows")
+
     diff = (fa.loc[safe] - ta.loc[safe]).abs()
-    max_diff = np.nanmax(diff.values)
-    check("features identical with/without future data (max abs diff < 1e-6)",
-          max_diff < 1e-6, f"max diff={max_diff:.2e} over {len(safe)} dates x {len(feat_cols)} feats")
+    max_diff = float(np.nanmax(diff.values)) if diff.size > 0 else 0.0
+    check(
+        "TC5 features identical with/without future data — Beans, real policy "
+        f"(max abs diff < 1e-6, {len(safe)} dates x {len(feat_cols)} feats)",
+        max_diff < 1e-6,
+        f"max diff={max_diff:.2e}",
+    )
+
+    print("\n=== TC5b: LEAKAGE-BY-TRUNCATION — sentiment backward merge_asof ===")
+    # NewsSentimentDaily is empty in the live DB, so _attach_sentiment's
+    # backward merge_asof path is never exercised by TC5. This sub-case builds a
+    # SMALL synthetic sentiment frame in-memory (same columns that the real loader
+    # returns), spanning the TC5 cutoff, and re-runs the identity check for the 4
+    # sentiment columns specifically. Weekly rows are sufficient because
+    # merge_asof carries the last known value forward — 12 rows before the cutoff
+    # give 12 distinct values in the safe window.
+    #
+    # Seeded for determinism. Columns match _SENTIMENT_COLS / _SENTIMENT_FEATURES.
+    np.random.seed(42)
+    # 30 weekly rows centred on the cutoff: 2023-01-01 to 2023-07-23
+    n_sent = 30
+    sent_dates = pd.date_range("2023-01-01", periods=n_sent, freq="7D")
+    synthetic_sentiment = pd.DataFrame({
+        "Date": sent_dates,
+        "MeanSentiment": np.random.uniform(-0.5, 0.5, n_sent).round(6),
+        "ArticleCount": np.random.randint(5, 50, n_sent),
+        "DroughtRatio": np.random.uniform(0.0, 0.4, n_sent).round(6),
+        "FloodRatio":   np.random.uniform(0.0, 0.3, n_sent).round(6),
+        "PolicyRatio":  np.random.uniform(0.0, 0.5, n_sent).round(6),
+    })
+
+    # Build: full uses all synthetic sentiment; truncated uses only rows <= cutoff.
+    trunc_sent = synthetic_sentiment[synthetic_sentiment["Date"] <= cutoff]
+
+    full_s = features.build_all(beans, crops, wx, fx,
+                                sentiment=synthetic_sentiment, policy=policy)
+    trunc_s = features.build_all(trunc_src, crops, wx, trunc_fx,
+                                 sentiment=trunc_sent, policy=trunc_pol)
+
+    sent_feat_cols = ["MeanSentiment", "DroughtRatio", "FloodRatio", "PolicyRatio"]
+    fa_s = full_s.set_index("ObservationDate")[sent_feat_cols]
+    ta_s = trunc_s.set_index("ObservationDate")[sent_feat_cols]
+    safe_s = ta_s.index[ta_s.index <= safe_end]
+
+    # Guard: sentiment columns must vary in the safe window (backward merge_asof
+    # carried at least 2 distinct synthetic readings into this window).
+    n_sent_states = fa_s.loc[safe_s, "MeanSentiment"].dropna().nunique()
+    check(
+        "TC5b safe window has >1 distinct MeanSentiment value (sentiment path exercised)",
+        n_sent_states > 1,
+        f"{n_sent_states} distinct values in {len(safe_s)} safe-window rows",
+    )
+
+    # Identity check over all 4 sentiment columns.
+    sdiff = (fa_s.loc[safe_s] - ta_s.loc[safe_s]).abs()
+    max_sdiff = float(np.nanmax(sdiff.values)) if sdiff.size > 0 else 0.0
+    check(
+        "TC5b sentiment columns identical with/without future data "
+        f"(max abs diff < 1e-6, {len(safe_s)} dates x {len(sent_feat_cols)} cols)",
+        max_sdiff < 1e-6,
+        f"max diff={max_sdiff:.2e}",
+    )
 
     print(f"\n=== RESULT: {len(passed)} passed, {len(failed)} failed ===")
     if failed:

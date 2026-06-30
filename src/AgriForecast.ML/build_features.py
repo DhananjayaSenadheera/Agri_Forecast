@@ -14,10 +14,14 @@ def main() -> None:
     crops = load.load_crops()
     weather = load.load_weather()
     fx = load.load_fx()
+    sentiment = load.load_news_sentiment()
+    policy = load.load_policy_flags()
     print(f"Loaded: prices={len(prices)} rows ({prices['CropId'].nunique()} crops), "
-          f"crops={len(crops)}, weather={len(weather)} months, fx={len(fx)} rows")
+          f"crops={len(crops)}, weather={len(weather)} months, fx={len(fx)} rows, "
+          f"sentiment={len(sentiment)} daily rows, policy={len(policy)} flags")
 
-    feats = features.build_all(prices, crops, weather, fx)
+    feats = features.build_all(prices, crops, weather, fx,
+                              sentiment=sentiment, policy=policy)
 
     n = len(feats)
     labelled = int(feats["LabelAvailable"].sum())

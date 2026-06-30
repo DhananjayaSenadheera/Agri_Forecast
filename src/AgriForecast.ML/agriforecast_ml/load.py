@@ -78,3 +78,73 @@ def load_weather() -> pd.DataFrame:
     for col in ("AvgTemperature", "TotalRainfall"):
         df[col] = df[col].astype(float)
     return df.sort_values("Month").reset_index(drop=True)
+
+
+# Empty-frame schemas so a missing/empty source degrades to all-NaN features
+# (mirrors load_fx returning a sparse series) rather than failing the build.
+_POLICY_COLS = ["Id", "PolicyType", "Title", "EffectiveFrom", "EffectiveTo",
+                "Direction", "Source", "ReferenceUrl"]
+_SENTIMENT_COLS = ["Date", "MeanSentiment", "ArticleCount",
+                   "DroughtRatio", "FloodRatio", "PolicyRatio"]
+
+
+def load_policy_flags() -> pd.DataFrame:
+    """Government-policy flags as date ranges for a point-in-time (active-as-of)
+    join.
+
+    A flag is active on date D iff EffectiveFrom <= D AND (EffectiveTo IS NULL OR
+    D <= EffectiveTo). Knowledge date = EffectiveFrom (the policy is publicly in
+    effect from then), so attaching it at D is leakage-safe. CreatedAtUtc is an
+    audit field and is deliberately NOT loaded -- it must never become a feature.
+
+    Returns columns [Id, PolicyType, Title, EffectiveFrom, EffectiveTo,
+    Direction, Source, ReferenceUrl] with EffectiveFrom/EffectiveTo as
+    datetimes (EffectiveTo NaT = still active), sorted by EffectiveFrom.
+    """
+    sql = """
+        SELECT Id, PolicyType, Title, EffectiveFrom, EffectiveTo,
+               Direction, Source, ReferenceUrl
+        FROM PolicyFlags
+    """
+    try:
+        df = pd.read_sql(sql, get_engine())
+    except Exception:
+        return pd.DataFrame(columns=_POLICY_COLS)
+    if df.empty:
+        return pd.DataFrame(columns=_POLICY_COLS)
+    df["EffectiveFrom"] = pd.to_datetime(df["EffectiveFrom"])
+    df["EffectiveTo"] = pd.to_datetime(df["EffectiveTo"])  # NULL -> NaT
+    df["PolicyType"] = df["PolicyType"].astype(int)
+    df["Direction"] = df["Direction"].astype(int)
+    return df.sort_values("EffectiveFrom").reset_index(drop=True)
+
+
+def load_news_sentiment() -> pd.DataFrame:
+    """National daily news-sentiment signal for a point-in-time (as-of) join.
+
+    NewsSentimentDaily is a Python-owned ML table (built by score_news.py). The
+    live news fetch may not have run yet, so the table can be MISSING or EMPTY --
+    in that case we return an empty frame with the right columns so the sentiment
+    features attach as all-NaN (exactly like load_fx with a sparse FX series). No
+    article means a date is ABSENT, so the backward as-of join carries the last
+    known reading forward without ever using a Date after the observation date.
+
+    Returns [Date, MeanSentiment, ArticleCount, DroughtRatio, FloodRatio,
+    PolicyRatio] sorted by Date ascending.
+    """
+    sql = """
+        SELECT Date, MeanSentiment, ArticleCount,
+               DroughtRatio, FloodRatio, PolicyRatio
+        FROM NewsSentimentDaily
+    """
+    try:
+        df = pd.read_sql(sql, get_engine())
+    except Exception:
+        return pd.DataFrame(columns=_SENTIMENT_COLS)
+    if df.empty:
+        return pd.DataFrame(columns=_SENTIMENT_COLS)
+    df["Date"] = pd.to_datetime(df["Date"])
+    for col in ("MeanSentiment", "DroughtRatio", "FloodRatio", "PolicyRatio"):
+        df[col] = df[col].astype(float)
+    df["ArticleCount"] = df["ArticleCount"].astype(int)
+    return df.sort_values("Date").reset_index(drop=True)

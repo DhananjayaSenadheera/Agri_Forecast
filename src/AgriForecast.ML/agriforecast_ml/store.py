@@ -21,10 +21,11 @@ def write_features(df: pd.DataFrame) -> int:
     engine = get_engine()
     out = df.copy()
     out["ComputedAtUtc"] = pd.Timestamp.utcnow().tz_localize(None)
-    # chunksize kept small: SQL Server caps a statement at 2100 parameters
-    # (~40 cols * 50 rows = 2000), so method="multi" stays under the limit.
+    # chunksize kept small: SQL Server caps a statement at 2100 parameters.
+    # With the enriched feature set (~51 cols) we use 40 rows/chunk
+    # (51 * 40 = 2040 < 2100) so method="multi" stays under the limit.
     out.to_sql(TABLE, engine, if_exists="replace", index=False,
-               chunksize=50, method="multi", dtype=_DTYPES)
+               chunksize=40, method="multi", dtype=_DTYPES)
     with engine.begin() as conn:
         conn.execute(text(
             f"CREATE INDEX IX_{TABLE}_Crop_Date ON {TABLE} (CropId, ObservationDate)"
