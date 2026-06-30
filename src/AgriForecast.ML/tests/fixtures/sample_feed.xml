@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>AgriForecast Test Feed</title>
+    <link>https://example-agri.test/</link>
+    <description>Sample RSS for unit tests</description>
+    <language>en</language>
+
+    <item>
+      <title>Sri Lanka vegetable prices rise 12% in Dambulla market</title>
+      <link>https://example-agri.test/story/1</link>
+      <description>Wholesale vegetable prices at the Dambulla economic centre
+        surged 12% this week, driven by reduced supply of beans and capsicum
+        following heavy rainfall in the North Central Province.</description>
+      <pubDate>Mon, 23 Jun 2025 06:00:00 +0000</pubDate>
+    </item>
+
+    <item>
+      <title>FAO warns of food-price volatility across South Asia</title>
+      <link>https://example-agri.test/story/2</link>
+      <description>The Food and Agriculture Organisation flagged elevated
+        commodity price risks for South Asia amid drought conditions affecting
+        key rice and pulse producing regions.</description>
+      <pubDate>Tue, 24 Jun 2025 08:30:00 +0000</pubDate>
+    </item>
+
+    <item>
+      <title>Monsoon onset delayed, farmers urged to adjust planting calendar</title>
+      <link>https://example-agri.test/story/3</link>
+      <description>The Department of Meteorology confirmed a two-week delay in
+        the south-west monsoon onset this year. Agricultural extension officers
+        are advising Maha season farmers to reassess sowing dates for Yala
+        crops including bitter gourd and ridge gourd.</description>
+      <pubDate>Wed, 25 Jun 2025 09:15:00 +0000</pubDate>
+    </item>
+
+    <item>
+      <title>Sinhala-only article (should be skipped)</title>
+      <link>https://example-agri.test/story/4</link>
+      <language>si</language>
+      <description>This entry has an explicit Sinhala language tag and must
+        be filtered out by the English-only language check.</description>
+      <pubDate>Thu, 26 Jun 2025 07:00:00 +0000</pubDate>
+    </item>
+
+    <item>
+      <title>Long summary article to test truncation at 1000 chars</title>
+      <link>https://example-agri.test/story/5</link>
+      <description>AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA</description>
+      <pubDate>Fri, 27 Jun 2025 10:00:00 +0000</pubDate>
+    </item>
+
+  </channel>
+</rss>

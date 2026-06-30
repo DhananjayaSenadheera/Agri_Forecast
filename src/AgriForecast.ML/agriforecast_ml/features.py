@@ -141,8 +141,109 @@ def _attach_fx(result: pd.DataFrame, fx: pd.DataFrame | None) -> pd.DataFrame:
     return merged
 
 
+# National news-sentiment columns attached at observation time. Kept lean: the
+# overall mood plus the topic ratios most relevant to a price go/no-go decision.
+_SENTIMENT_FEATURES = ["MeanSentiment", "DroughtRatio", "FloodRatio", "PolicyRatio"]
+
+# PolicyType enum (mirror of AgriForecast.Domain.Enums.PolicyType). Only the
+# few types whose active state is decision-relevant for price are exposed as
+# per-type booleans.
+_POLICY_IMPORT_BAN = 1
+_POLICY_PRICE_CEILING = 3
+_POLICY_FERTILISER_SUBSIDY = 5
+_POLICY_FEATURES = ["ActivePolicyNetDirection", "ActivePolicyCount",
+                    "PolicyImportBanActive", "PolicyPriceCeilingActive",
+                    "PolicyFertiliserSubsidyActive"]
+
+
+def _attach_sentiment(result: pd.DataFrame, sentiment: pd.DataFrame | None) -> pd.DataFrame:
+    """National news-sentiment columns via point-in-time (as-of, backward) merge.
+
+    Mirrors _attach_fx exactly: for each ObservationDate D take the most recent
+    sentiment row with Date <= D (NaN if none / no news yet). Same value across
+    all crops for a given date -- national signal. No-article days are absent in
+    NewsSentimentDaily, so the backward join simply carries the last known
+    reading forward; it NEVER reads a Date AFTER D. Empty/missing sentiment ->
+    all feature columns are NaN.
+    """
+    if sentiment is None or sentiment.empty:
+        for col in _SENTIMENT_FEATURES:
+            result[col] = np.nan
+        return result
+    cols = ["Date"] + _SENTIMENT_FEATURES
+    s_sorted = sentiment[cols].dropna(subset=["Date"]).sort_values("Date")
+    merged = pd.merge_asof(
+        result.sort_values("ObservationDate"),
+        s_sorted,
+        left_on="ObservationDate",
+        right_on="Date",
+        direction="backward",
+    )
+    return merged.drop(columns=["Date"])
+
+
+def _attach_policy(result: pd.DataFrame, policy: pd.DataFrame | None) -> pd.DataFrame:
+    """Active-government-policy signal at observation time.
+
+    NOT an as-of merge: policy flags are date RANGES, not a point series. A flag
+    is active on date D iff EffectiveFrom <= D AND (EffectiveTo IS NULL OR
+    D <= EffectiveTo). Knowledge date = EffectiveFrom, so this is leakage-safe.
+    National signal -> identical across crops for a given D.
+
+    Attaches:
+      ActivePolicyNetDirection    sum of Direction over flags active on D
+      ActivePolicyCount           number of flags active on D
+      PolicyImportBanActive       1 if an ImportBan(1) flag is active on D
+      PolicyPriceCeilingActive    1 if a PriceCeiling(3) flag is active on D
+      PolicyFertiliserSubsidyActive 1 if a FertiliserSubsidy(5) flag active on D
+
+    Empty/missing policy -> net direction 0, count 0, booleans 0 (there is
+    genuinely no active policy, so zero is the correct value, not NaN).
+    """
+    out = result.copy()
+    n = len(out)
+    if policy is None or policy.empty:
+        out["ActivePolicyNetDirection"] = np.zeros(n, dtype="float64")
+        out["ActivePolicyCount"] = np.zeros(n, dtype="int64")
+        out["PolicyImportBanActive"] = np.zeros(n, dtype="int8")
+        out["PolicyPriceCeilingActive"] = np.zeros(n, dtype="int8")
+        out["PolicyFertiliserSubsidyActive"] = np.zeros(n, dtype="int8")
+        return out
+
+    D = out["ObservationDate"].to_numpy(dtype="datetime64[ns]")
+    eff_from = policy["EffectiveFrom"].to_numpy(dtype="datetime64[ns]")
+    eff_to = policy["EffectiveTo"].to_numpy(dtype="datetime64[ns]")  # NaT = open
+    direction = policy["Direction"].to_numpy(dtype="float64")
+    ptype = policy["PolicyType"].to_numpy()
+
+    # Vectorised per-(date, flag) overlap. ~6 flags so the outer product is tiny.
+    # active[i, j] = flag j is active on observation date i.
+    started = D[:, None] >= eff_from[None, :]
+    # EffectiveTo is NaT -> open-ended -> always within range; NaT comparison is
+    # False, so OR it in explicitly.
+    open_ended = np.isnat(eff_to)
+    not_ended = (D[:, None] <= eff_to[None, :]) | open_ended[None, :]
+    active = started & not_ended  # (n_dates, n_flags) bool
+
+    # Net direction = sum of Direction over active flags. We avoid matmul (which
+    # raised spurious divide-by-zero/overflow RuntimeWarnings on this BLAS build)
+    # and instead mask-and-sum: zero-out inactive flags' directions, sum per row.
+    out["ActivePolicyNetDirection"] = \
+        np.where(active, direction[None, :], 0.0).sum(axis=1)
+    out["ActivePolicyCount"] = active.sum(axis=1).astype("int64")
+    out["PolicyImportBanActive"] = \
+        (active & (ptype == _POLICY_IMPORT_BAN)[None, :]).any(axis=1).astype("int8")
+    out["PolicyPriceCeilingActive"] = \
+        (active & (ptype == _POLICY_PRICE_CEILING)[None, :]).any(axis=1).astype("int8")
+    out["PolicyFertiliserSubsidyActive"] = \
+        (active & (ptype == _POLICY_FERTILISER_SUBSIDY)[None, :]).any(axis=1).astype("int8")
+    return out
+
+
 def build_all(prices: pd.DataFrame, crops: pd.DataFrame, weather: pd.DataFrame,
-              fx: pd.DataFrame | None = None) -> pd.DataFrame:
+              fx: pd.DataFrame | None = None,
+              sentiment: pd.DataFrame | None = None,
+              policy: pd.DataFrame | None = None) -> pd.DataFrame:
     weather_by_month, rain_clim = _weather_lookups(weather)
     meta_by_crop = crops.set_index("CropId")
     frames = []
@@ -153,5 +254,8 @@ def build_all(prices: pd.DataFrame, crops: pd.DataFrame, weather: pd.DataFrame,
         frames.append(build_crop_features(crop_id, group, meta, weather_by_month, rain_clim))
     result = pd.concat(frames, ignore_index=True)
     result["HarvestDate"] = pd.to_datetime(result["HarvestDate"])
+    # National signals attach AFTER the per-crop build (each is point-in-time).
     result = _attach_fx(result, fx)
+    result = _attach_sentiment(result, sentiment)
+    result = _attach_policy(result, policy)
     return result
