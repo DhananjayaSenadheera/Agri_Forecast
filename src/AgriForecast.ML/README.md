@@ -64,3 +64,22 @@ Guardrail code: `agriforecast_ml/train/model.py` — `_promotion_decision()` /
 ## Database
 Connection is resolved (in order): environment variables `AGRI_DB_*`, then the
 .NET API's `appsettings.json` connection string. No secrets are committed here.
+
+## Serving auth (admin endpoints)
+Public endpoints (`/health`, `/model-info`, `/predict`, `/timeline`) are
+unauthenticated by design. Every `/admin/*` route (e.g. `/admin/ingest-news`)
+requires an API key:
+
+- **Env var (server side):** `ML_ADMIN_API_KEY` — the expected key. Set it in
+  the environment / a local `.env` (never committed). If it is unset or empty,
+  admin requests fail closed with a 500 (auth is never silently disabled).
+  Example (placeholder only, do NOT commit a real value):
+  ```bash
+  export ML_ADMIN_API_KEY="replace-with-a-strong-random-key"
+  ```
+- **Header (caller side):** `X-API-Key: <the same key>`. Compared in constant
+  time; a missing or mismatched header returns 401.
+
+The .NET Ingestion Worker that calls `/admin/ingest-news` must send this
+`X-API-Key` header, reading the key from its own configuration / user-secrets
+(same key as `ML_ADMIN_API_KEY` on the ML service).
