@@ -138,31 +138,31 @@ def ingest_news_endpoint(req: IngestNewsRequest):
     try:
         import ingest_news
         import score_news
-    except Exception as exc:  # pragma: no cover - import wiring guard
+    except Exception:  # pragma: no cover - import wiring guard
         _log.exception("News pipeline modules unavailable")
         raise HTTPException(
             status_code=503,
-            detail=f"News pipeline unavailable: {type(exc).__name__}: {exc}",
+            detail="News pipeline module unavailable.",
         )
 
     try:
         ingest_summary = ingest_news.run(dry_run=req.dryRun, skip_qa=req.skipQa)
-    except Exception as exc:
+    except Exception:
         _log.exception("News ingestion (ingest_news) failed")
         raise HTTPException(
             status_code=502,
-            detail=f"ingest_news failed: {type(exc).__name__}: {exc}",
+            detail="News ingestion failed.",
         )
 
     try:
         score_summary = score_news.run(
             dry_run=req.dryRun, writeback_scores=req.writebackScores
         )
-    except Exception as exc:
+    except Exception:
         _log.exception("News scoring (score_news) failed")
         raise HTTPException(
             status_code=502,
-            detail=f"score_news failed: {type(exc).__name__}: {exc}",
+            detail="News scoring failed.",
         )
 
     return {
