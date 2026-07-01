@@ -2,17 +2,59 @@
 
 models/<version>/model.pkl + metadata.json. A models/promoted.json pointer
 records which version is live. No external services.
+
+Security (F-03) — two trust-boundary hardenings live here:
+
+1. Safe deserialization. ``model.pkl`` is loaded with joblib/pickle, which
+   executes arbitrary code embedded in the byte stream. If an attacker can
+   overwrite a promoted ``model.pkl``, loading it is remote code execution.
+   We therefore verify the artifact BEFORE joblib ever touches it:
+     * ``save_model`` records ``model_sha256`` (always) and, when
+       ``AGRI_MODEL_HMAC_KEY`` is set, an ``model_hmac`` (HMAC-SHA256) in
+       metadata.json.
+     * ``load_promoted`` recomputes over the on-disk bytes and enforces a
+       match, fail-CLOSED, before calling ``joblib.load``.
+   A bare sha256 detects a stray/partial overwrite but NOT an attacker who
+   can also rewrite the co-located metadata.json (they'd just restore the
+   hash). The keyed HMAC path resists that: without ``AGRI_MODEL_HMAC_KEY``
+   the attacker cannot forge a valid ``model_hmac``. Keep the key OUT of the
+   models dir (env/secret store).
+
+2. Path traversal. The live version string comes from ``promoted.json`` and
+   is joined into a filesystem path. A crafted pointer like
+   ``{"version": "../../etc"}`` would escape ``models/``. Versions only ever
+   have the shape ``^v\\d+$`` (see ``_next_version``); ``_safe_version_dir``
+   enforces that shape AND re-checks the resolved directory is contained in
+   ``models/``. Anything else raises before touching disk.
+
+On any integrity/path failure we RAISE. serving/predict.py loads the promoted
+payload at import, so a raise surfaces loudly and refuses to serve a tampered
+or unverifiable model — the correct fail-closed behaviour.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import logging
+import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
 
+_log = logging.getLogger(__name__)
+
 # AgriForecast.ML/models  (registry/ -> agriforecast_ml/ -> AgriForecast.ML/)
 _MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
+
+# The ONLY shape _next_version() ever produces. Enforced on every version
+# string that becomes a path — kills "..", slashes and absolute paths.
+_VERSION_RE = re.compile(r"^v\d+$")
+
+_HMAC_KEY_ENV = "AGRI_MODEL_HMAC_KEY"
+_ALLOW_UNVERIFIED_ENV = "AGRI_ALLOW_UNVERIFIED_MODEL"
 
 
 def _next_version() -> str:
@@ -21,18 +63,155 @@ def _next_version() -> str:
     return f"v{(max(existing) + 1) if existing else 1}"
 
 
+def _safe_version_dir(version: str) -> Path:
+    """Resolve ``models/<version>`` safely, or raise ValueError.
+
+    Two independent gates so neither is load-bearing alone:
+      1. ``version`` must match ``^v\\d+$`` (rejects traversal/slashes/abs paths).
+      2. the resolved directory must be contained within ``_MODELS_DIR``.
+    """
+    if not isinstance(version, str) or not _VERSION_RE.match(version):
+        raise ValueError(
+            f"Refusing unsafe model version {version!r}: expected 'v<N>' "
+            f"(e.g. 'v9'). This blocks path traversal via promoted.json."
+        )
+    base = _MODELS_DIR.resolve()
+    vdir = (base / version).resolve()
+    if not vdir.is_relative_to(base):
+        raise ValueError(
+            f"Model version {version!r} resolves outside the models directory "
+            f"({vdir} not under {base}) — refusing."
+        )
+    return vdir
+
+
+def _pkl_digest(pkl_path: Path, hmac_key: bytes | None = None) -> tuple[str, str | None]:
+    """Return (sha256_hex, hmac_sha256_hex_or_None) over the file's bytes.
+
+    Single source of truth for hashing, shared by save_model / sign_version /
+    load_promoted so signing and verification can never drift.
+    """
+    data = pkl_path.read_bytes()
+    sha = hashlib.sha256(data).hexdigest()
+    mac = hmac.new(hmac_key, data, hashlib.sha256).hexdigest() if hmac_key else None
+    return sha, mac
+
+
+def _hmac_key() -> bytes | None:
+    val = os.environ.get(_HMAC_KEY_ENV)
+    return val.encode("utf-8") if val else None
+
+
+def _env_truthy(val: str | None) -> bool:
+    return str(val).strip().lower() in {"1", "true", "yes"} if val is not None else False
+
+
+def _integrity_fields(pkl_path: Path) -> dict:
+    """Compute the metadata integrity fields for a written model.pkl."""
+    sha, mac = _pkl_digest(pkl_path, _hmac_key())
+    fields = {"model_sha256": sha}
+    if mac is not None:
+        fields["model_hmac"] = mac
+    return fields
+
+
+def sign_version(version: str) -> dict:
+    """(Re)compute integrity fields for ``version`` and write them into that
+    version's metadata.json in place, preserving all existing keys. Returns the
+    fields that were written. Used by save_model and the resign_promoted.py
+    migration helper."""
+    vdir = _safe_version_dir(version)
+    pkl_path = vdir / "model.pkl"
+    meta_path = vdir / "metadata.json"
+    if not pkl_path.exists():
+        raise FileNotFoundError(f"No model.pkl for version {version!r} at {pkl_path}")
+    if not meta_path.exists():
+        raise FileNotFoundError(f"No metadata.json for version {version!r} at {meta_path}")
+    fields = _integrity_fields(pkl_path)
+    meta = json.loads(meta_path.read_text())
+    meta.update(fields)
+    meta_path.write_text(json.dumps(meta, indent=2))
+    return fields
+
+
 def save_model(payload: dict, metadata: dict, promote: bool) -> str:
     version = _next_version()
     vdir = _MODELS_DIR / version
     vdir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(payload, vdir / "model.pkl")
+    pkl_path = vdir / "model.pkl"
+    joblib.dump(payload, pkl_path)
+    # Integrity fields computed over the freshly-written pkl bytes and baked
+    # into metadata.json (written just below).
+    integrity = _integrity_fields(pkl_path)
     metadata = {**metadata, "version": version,
                 "trained_at": datetime.now(timezone.utc).isoformat(),
-                "promoted": promote}
+                "promoted": promote,
+                **integrity}
     (vdir / "metadata.json").write_text(json.dumps(metadata, indent=2))
     if promote:
         (_MODELS_DIR / "promoted.json").write_text(json.dumps({"version": version}, indent=2))
     return version
+
+
+def _verify_integrity(pkl_path: Path, metadata: dict, version: str) -> None:
+    """Enforce, fail-CLOSED, that ``pkl_path`` matches the integrity fields in
+    ``metadata`` BEFORE the caller unpickles it. Raises RuntimeError on any
+    mismatch or on an unverifiable (legacy, no-hash) model unless the operator
+    explicitly opts in via AGRI_ALLOW_UNVERIFIED_MODEL.
+
+    Precedence: HMAC (strong) > sha256 > legacy escape hatch.
+    """
+    stored_hmac = metadata.get("model_hmac")
+    stored_sha = metadata.get("model_sha256")
+    key = _hmac_key()
+
+    # 1. Strong path: keyed HMAC present and we hold the key.
+    if stored_hmac and key is not None:
+        _, actual_hmac = _pkl_digest(pkl_path, key)
+        if not hmac.compare_digest(str(stored_hmac), str(actual_hmac)):
+            raise RuntimeError(
+                f"Model integrity check FAILED for version {version!r}: "
+                f"HMAC mismatch — {pkl_path} does not match the signed value in "
+                f"metadata.json. Refusing to load (possible tampering)."
+            )
+        return
+
+    # 2. sha256 path: detects tampering, but NOT an attacker who also rewrote
+    #    the co-located metadata. Recommend HMAC.
+    if stored_sha:
+        actual_sha, _ = _pkl_digest(pkl_path)
+        if not hmac.compare_digest(str(stored_sha), str(actual_sha)):
+            raise RuntimeError(
+                f"Model integrity check FAILED for version {version!r}: "
+                f"sha256 mismatch — {pkl_path} does not match metadata.json. "
+                f"Refusing to load (possible tampering)."
+            )
+        if key is None:
+            _log.warning(
+                "Model %s verified by sha256 only. metadata.json is co-located "
+                "with model.pkl, so an attacker able to rewrite the pkl could "
+                "also rewrite its hash. Set %s and run resign_promoted.py to "
+                "enable tamper-resistant HMAC signing.", version, _HMAC_KEY_ENV)
+        return
+
+    # 3. Legacy model with no stored hash: refuse by default; explicit opt-in
+    #    lets the operator load a pre-hash model without hard-breaking serving.
+    if _env_truthy(os.environ.get(_ALLOW_UNVERIFIED_ENV)):
+        _log.warning(
+            "LOADING UNVERIFIED MODEL %s: metadata.json has no model_sha256/"
+            "model_hmac and %s is set. This model's bytes are NOT integrity-"
+            "checked — arbitrary code in a tampered model.pkl would execute. "
+            "Run resign_promoted.py to sign it and remove this override.",
+            version, _ALLOW_UNVERIFIED_ENV)
+        return
+
+    raise RuntimeError(
+        f"Model version {version!r} has no integrity fields (model_sha256/"
+        f"model_hmac) in metadata.json — refusing to unpickle an unverifiable "
+        f"artifact. Run resign_promoted.py to sign the promoted model (optionally "
+        f"set {_HMAC_KEY_ENV} first for the strong HMAC path), or set "
+        f"{_ALLOW_UNVERIFIED_ENV}=1 to load it unverified (NOT recommended)."
+    )
 
 
 def load_promoted():
@@ -40,9 +219,12 @@ def load_promoted():
     if not pointer.exists():
         return None, None
     version = json.loads(pointer.read_text())["version"]
-    vdir = _MODELS_DIR / version
-    payload = joblib.load(vdir / "model.pkl")
+    vdir = _safe_version_dir(version)  # rejects traversal before any path use
+    pkl_path = vdir / "model.pkl"
     metadata = json.loads((vdir / "metadata.json").read_text())
+    # Verify bytes on disk BEFORE joblib (== pickle) executes anything.
+    _verify_integrity(pkl_path, metadata, version)
+    payload = joblib.load(pkl_path)
     return payload, metadata
 
 
@@ -55,7 +237,8 @@ def load_promoted_metadata() -> dict | None:
     if not pointer.exists():
         return None
     version = json.loads(pointer.read_text())["version"]
-    meta_path = _MODELS_DIR / version / "metadata.json"
+    vdir = _safe_version_dir(version)  # rejects traversal before any path use
+    meta_path = vdir / "metadata.json"
     if not meta_path.exists():
         return None
     return json.loads(meta_path.read_text())
