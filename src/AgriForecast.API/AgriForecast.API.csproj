@@ -4,6 +4,7 @@
         <TargetFramework>net9.0</TargetFramework>
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
+        <UserSecretsId>dotnet-AgriForecast.API-9d3f1c6a-4b2e-4f57-b8a1-2c7e5d90f4aa</UserSecretsId>
     </PropertyGroup>
 
     <ItemGroup>
