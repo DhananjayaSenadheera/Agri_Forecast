@@ -1,5 +1,4 @@
 using AgriForecast.Application.common;
-using AgriForecast.Application.Mapper;
 using FluentValidation;
 using MediatR;
 using Microsoft.Extensions.DependencyInjection;
@@ -11,7 +10,7 @@ public static class ApplicationDependencyInjection
     public static IServiceCollection AddApplicationLayer(this IServiceCollection services)
     {
         services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(ApplicationDependencyInjection).Assembly));
-        services.AddAutoMapper(typeof(ProfileMapper));
+        // Mapping is now hand-written static mapper classes (Mapper/*Mapper.cs) — no DI registration needed.
         services.AddValidatorsFromAssembly(typeof(ApplicationDependencyInjection).Assembly);
         services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
         services.AddTransient<CodeSettings>();

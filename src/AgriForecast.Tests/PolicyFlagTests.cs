@@ -2,11 +2,9 @@ using AgriForecast.Application.Requests.PolicyFlag.Commands.Create;
 using AgriForecast.Application.Requests.PolicyFlag.DTOs;
 using AgriForecast.Application.Requests.PolicyFlag.Quaries.GetAll;
 using AgriForecast.Application.Requests.PolicyFlag.Validators;
-using AgriForecast.Application.Mapper;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
-using AutoMapper;
 using FluentAssertions;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -114,12 +112,6 @@ public class PolicyFlagTests
     // GetAll query handler
     // ──────────────────────────────────────────────────────────────────────────────
 
-    private static IMapper BuildMapper()
-    {
-        var config = new MapperConfiguration(cfg => cfg.AddProfile<ProfileMapper>());
-        return config.CreateMapper();
-    }
-
     private static PolicyFlag Flag(string title, DateTime from, DateTime? to) => new()
     {
         Id = Guid.NewGuid(),
@@ -143,7 +135,7 @@ public class PolicyFlagTests
             });
 
         var handler = new PolicyFlagGetAllQueryHandler(
-            repo.Object, BuildMapper(), Mock.Of<ILogger<PolicyFlagGetAllQueryHandler>>());
+            repo.Object, Mock.Of<ILogger<PolicyFlagGetAllQueryHandler>>());
 
         var result = await handler.Handle(new PolicyFlagGetAllQuery { AsOfDate = null }, default);
 
@@ -162,7 +154,7 @@ public class PolicyFlagTests
             .ReturnsAsync(new[] { Flag("active", new DateTime(2021, 1, 1), null) });
 
         var handler = new PolicyFlagGetAllQueryHandler(
-            repo.Object, BuildMapper(), Mock.Of<ILogger<PolicyFlagGetAllQueryHandler>>());
+            repo.Object, Mock.Of<ILogger<PolicyFlagGetAllQueryHandler>>());
 
         var result = await handler.Handle(new PolicyFlagGetAllQuery { AsOfDate = asOf }, default);
 
@@ -179,7 +171,7 @@ public class PolicyFlagTests
         repo.Setup(r => r.GetAllAsync()).ReturnsAsync(Array.Empty<PolicyFlag>());
 
         var handler = new PolicyFlagGetAllQueryHandler(
-            repo.Object, BuildMapper(), Mock.Of<ILogger<PolicyFlagGetAllQueryHandler>>());
+            repo.Object, Mock.Of<ILogger<PolicyFlagGetAllQueryHandler>>());
 
         var result = await handler.Handle(new PolicyFlagGetAllQuery(), default);
 

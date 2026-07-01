@@ -1,6 +1,6 @@
 using AgriForecast.Application.common;
+using AgriForecast.Application.Mapper;
 using AgriForecast.Domain.Interfaces;
-using AutoMapper;
 using MediatR;
 using Microsoft.Extensions.Logging;
 
@@ -9,15 +9,13 @@ namespace AgriForecast.Application.Requests.EcconomicCenter.Commands.Create;
 public class EcoCreateCommandHandler : IRequestHandler<EcoCreateCommand, Result<bool>>
 {
     private readonly IEconimicCenterRepository _economicCenterRepository;
-    private readonly IMapper _mapper;
     private readonly ILogger<EcoCreateCommandHandler> _logger;
     private readonly IUnitofWorkRepository _unitofWorkRepository;
     private readonly CodeSettings _codeSettings;
-    
-    public EcoCreateCommandHandler(IEconimicCenterRepository economicCenterRepository, IMapper mapper, ILogger<EcoCreateCommandHandler> logger, IUnitofWorkRepository unitofWorkRepository, CodeSettings codeSettings)
+
+    public EcoCreateCommandHandler(IEconimicCenterRepository economicCenterRepository, ILogger<EcoCreateCommandHandler> logger, IUnitofWorkRepository unitofWorkRepository, CodeSettings codeSettings)
     {
         _economicCenterRepository = economicCenterRepository;
-        _mapper = mapper;
         _logger = logger;
         _unitofWorkRepository = unitofWorkRepository;
         _codeSettings = codeSettings;
@@ -38,7 +36,7 @@ public class EcoCreateCommandHandler : IRequestHandler<EcoCreateCommand, Result<
             return Result<bool>.Failure("Failed to generate economic center code.");
         }
         
-        var economicCenter = _mapper.Map<Domain.Entities.EconomicCenter>(dto);
+        var economicCenter = dto.ToEntity();
         economicCenter.EcoCode = EcoCode;
         await _economicCenterRepository.Addasync(economicCenter);
         await _unitofWorkRepository.CommitAsync();
