@@ -14,7 +14,7 @@
 #
 # DB credentials come from env vars (AGRI_DB_*) or a mounted appsettings.json —
 # never hard-coded here. No secrets in this Dockerfile.
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # libgomp1: OpenMP runtime required by xgboost at inference time.
 RUN apt-get update \

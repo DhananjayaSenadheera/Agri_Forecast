@@ -1,13 +1,38 @@
+# AgriForecast.ML runtime dependencies.
+#
+# Version floors below are SECURITY floors (pip-audit clean as of 2026-07-01),
+# not just feature floors — do not lower them without re-running pip-audit.
+# See requirements-dev.txt for test/lint/audit-only tooling.
+#
+# Requires Python >= 3.12 (see Dockerfile / .venv).
+
+# --- data / features ---
 pandas>=2.0
 numpy>=1.24
 SQLAlchemy>=2.0
 pymssql>=2.2
-python-dotenv>=1.0
+
+# --- modeling / serving ---
 xgboost>=2.0
 scikit-learn>=1.3
 shap>=0.44
 joblib>=1.3
-fastapi>=0.110
+fastapi>=0.128.8
+starlette>=1.3.1
 uvicorn>=0.29
+
+# --- news ingestion / sentiment ---
 feedparser>=6.0
 vaderSentiment>=3.3
+requests>=2.33.0
+beautifulsoup4>=4.13
+
+# --- HARTI PDF bulletin ingestion (UNTRUSTED-INPUT PATH: parses PDFs scraped
+#     from gov-site bulletins) — keep these floors current with pip-audit ---
+pdfplumber>=0.11.8
+pdfminer.six>=20251230
+pillow>=12.2.0
+
+# --- transitive pin required for a known CVE (kept explicit so pip cannot
+#     silently resolve back to a vulnerable transitive version) ---
+urllib3>=2.7.0
