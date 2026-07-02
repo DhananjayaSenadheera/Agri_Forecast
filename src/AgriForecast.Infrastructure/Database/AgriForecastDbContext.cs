@@ -18,6 +18,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<Market> Markets { get; set; }
     public DbSet<PriceObservation> PriceObservations { get; set; }
     public DbSet<CommodityAlias> CommodityAliases { get; set; }
+    public DbSet<IngestionWatermark> IngestionWatermarks { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -214,6 +215,20 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             // Resolution read path: look up active aliases by (Alias, Source).
             e.HasIndex(x => new { x.Alias, x.Source, x.IsActive })
                 .HasDatabaseName("IX_CommodityAliases_AliasSourceActive");
+        });
+
+        modelBuilder.Entity<IngestionWatermark>(e =>
+        {
+            e.Property(x => x.Source).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Status).HasConversion<int>().IsRequired();
+            e.Property(x => x.LastMessage).HasMaxLength(1000);
+
+            // Vintage high-water mark stored date-only (no hidden time) — mirrors the
+            // date-only discipline on PriceObservation.ObservedDate / PolicyFlag effective dates.
+            e.Property(x => x.LastObservedDate).HasColumnType("date");
+
+            // One watermark per source — this is the business key the services resume on.
+            e.HasIndex(x => x.Source).IsUnique();
         });
 
         SeedMarkets(modelBuilder);
