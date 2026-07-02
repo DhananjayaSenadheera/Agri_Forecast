@@ -16,7 +16,14 @@ from typing import Optional
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from . import predict
+from ..envfile import load_env_file
+
+# Load secrets from the gitignored .env BEFORE anything reads the environment,
+# so the service works regardless of how uvicorn was launched (run_ml.sh, IDE
+# run config, or a bare `python -m uvicorn`). Real env vars take precedence.
+load_env_file()
+
+from . import predict  # noqa: E402  (env must be loaded first)
 
 app = FastAPI(title="AgriForecast ML — Model A", version="1.0")
 
