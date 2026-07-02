@@ -234,19 +234,81 @@ public class MarketDomainTests
     }
 
     [Fact]
-    public void PriceObservation_AssignCrop_HasNoGuardAgainstEmptyGuid()
+    public void PriceObservation_AssignCrop_Throws_WhenCropIdIsEmpty()
     {
-        // AssignCrop(Guid) has no validation in the current entity — it will happily accept
-        // Guid.Empty and overwrite an already-assigned CropId. Documented here as a smell
-        // (see report), not asserted as desirable behavior — this test pins the *actual*
-        // current behavior so a future change to add a guard is a deliberate, visible diff.
+        // R1.1 P1 guard: Guid.Empty is never a valid mapping target — AssignCrop must reject
+        // it rather than silently blanking the crop. (Was previously pinned as a no-guard smell;
+        // this rewrite pins the new deliberate guard.)
+        var a = ValidArgs();
+        var obs = PriceObservation.Create(a.marketId, a.commodityName, a.observedDate, a.asOfUtc, a.source);
+
+        var act = () => obs.AssignCrop(Guid.Empty);
+
+        act.Should().Throw<ArgumentException>().And.ParamName.Should().Be("cropId");
+    }
+
+    [Fact]
+    public void PriceObservation_AssignCrop_Throws_WhenAlreadyAssignedAndNotOverwriting()
+    {
+        // R1.1 P1 guard: the self-heal path must NOT silently re-map an already-assigned
+        // observation. A second AssignCrop without overwrite:true is a defect, not a no-op.
+        var a = ValidArgs();
+        var obs = PriceObservation.Create(a.marketId, a.commodityName, a.observedDate, a.asOfUtc, a.source);
+        var first = Guid.NewGuid();
+        obs.AssignCrop(first);
+
+        var act = () => obs.AssignCrop(Guid.NewGuid());
+
+        act.Should().Throw<InvalidOperationException>();
+        obs.CropId.Should().Be(first, "the rejected re-map must not have mutated the crop");
+    }
+
+    [Fact]
+    public void PriceObservation_AssignCrop_Remaps_WhenOverwriteTrue()
+    {
+        // A deliberate re-map (e.g. a corrected canonical mapping) is allowed via overwrite:true.
         var a = ValidArgs();
         var obs = PriceObservation.Create(a.marketId, a.commodityName, a.observedDate, a.asOfUtc, a.source);
         obs.AssignCrop(Guid.NewGuid());
+        var corrected = Guid.NewGuid();
 
-        obs.AssignCrop(Guid.Empty);
+        obs.AssignCrop(corrected, overwrite: true);
 
-        obs.CropId.Should().Be(Guid.Empty);
+        obs.CropId.Should().Be(corrected);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // PriceObservation.Create — unit quarantine (R1.1 P1)
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void PriceObservation_Create_UnitIsUnconfirmedByDefault()
+    {
+        // Fail-closed: a row is quarantined (unit unproven) until ingestion explicitly confirms
+        // it. The default must be FALSE and the unit fields NULL — never assume LKR/kg.
+        var a = ValidArgs();
+
+        var obs = PriceObservation.Create(a.marketId, a.commodityName, a.observedDate, a.asOfUtc, a.source);
+
+        obs.IsUnitConfirmed.Should().BeFalse();
+        obs.UnitRaw.Should().BeNull();
+        obs.UnitConversionFactor.Should().BeNull();
+    }
+
+    [Fact]
+    public void PriceObservation_Create_CopiesUnitFields_WhenProvidedAndConfirmed()
+    {
+        var a = ValidArgs();
+
+        var obs = PriceObservation.Create(
+            a.marketId, a.commodityName, a.observedDate, a.asOfUtc, a.source,
+            unitRaw: "Rs/kg",
+            unitConversionFactor: 1.0m,
+            isUnitConfirmed: true);
+
+        obs.UnitRaw.Should().Be("Rs/kg");
+        obs.UnitConversionFactor.Should().Be(1.0m);
+        obs.IsUnitConfirmed.Should().BeTrue();
     }
 
     // ──────────────────────────────────────────────────────────────────────────────
@@ -303,16 +365,57 @@ public class MarketDomainTests
         market.District.Should().BeNull();
     }
 
-    [Fact]
-    public void Market_CreateNew_HasNoGuardAgainstEmptyOrNullName()
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void Market_CreateNew_Throws_WhenNameIsEmptyOrWhitespace(string? name)
     {
-        // CreateNew has no argument validation at all (unlike PriceObservation.Create) — it
-        // will accept an empty/whitespace name without throwing. Documented as a smell (see
-        // report); this test pins the actual current behavior rather than inventing a guard
-        // that doesn't exist.
-        var market = Market.CreateNew(string.Empty, "Matale", MarketType.DEC);
+        // R1.1 P1 guard: a market with no name is meaningless. CreateNew now rejects
+        // empty/whitespace/null names (was previously pinned as a no-guard smell).
+        var act = () => Market.CreateNew(name!, "Matale", MarketType.DEC);
 
-        market.Name.Should().Be(string.Empty);
+        act.Should().Throw<ArgumentException>().And.ParamName.Should().Be("name");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Market.AssignCode
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void Market_AssignCode_StampsCode_WhenNotYetAssigned()
+    {
+        var market = Market.CreateNew("Dambulla DEC", "Matale", MarketType.DEC);
+
+        market.AssignCode("MKT00000007");
+
+        market.MarketCode.Should().Be("MKT00000007");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void Market_AssignCode_Throws_WhenCodeIsEmptyOrWhitespace(string? code)
+    {
+        var market = Market.CreateNew("Dambulla DEC", "Matale", MarketType.DEC);
+
+        var act = () => market.AssignCode(code!);
+
+        act.Should().Throw<ArgumentException>().And.ParamName.Should().Be("marketCode");
+    }
+
+    [Fact]
+    public void Market_AssignCode_Throws_WhenAlreadyAssigned()
+    {
+        // Code is a one-time stamp — refuse a silent re-stamp.
+        var market = Market.CreateNew("Dambulla DEC", "Matale", MarketType.DEC);
+        market.AssignCode("MKT00000007");
+
+        var act = () => market.AssignCode("MKT00000099");
+
+        act.Should().Throw<InvalidOperationException>();
+        market.MarketCode.Should().Be("MKT00000007");
     }
 
     [Fact]

@@ -10,9 +10,15 @@ namespace AgriForecast.Domain.Entities;
 public class Market
 {
     public Guid Id { get; private set; }
-    public string MarketCode { get; set; } = string.Empty;
+    // MarketCode is the human-facing business key. Private-set: it is assigned exactly
+    // once by the create handler via AssignCode (mirrors how Crop.CropCode / EconomicCenter
+    // are code-stamped) and never mutated ad hoc thereafter. The HasData seed and the
+    // ECOMAP back-fill set it at the DB level, not through this setter, so they are unaffected.
+    public string MarketCode { get; private set; } = string.Empty;
     public string Name { get; private set; } = string.Empty;
-    public string? District { get; set; }
+    // District is private-set: mutated only through the CreateNew factory and ApplyUpdate,
+    // keeping this controlled dimension from being poked with unvalidated free text.
+    public string? District { get; private set; }
     public MarketType MarketType { get; set; }
     public bool IsActive { get; set; }
     public DateTime CreatedAt { get; set; }
@@ -22,6 +28,9 @@ public class Market
     // handler after construction (mirrors EconomicCenter.CreateNew / Crop.CreateForManualEntry).
     public static Market CreateNew(string name, string? district, MarketType marketType)
     {
+        if (string.IsNullOrWhiteSpace(name))
+            throw new ArgumentException("Market name is required.", nameof(name));
+
         return new Market
         {
             Id = Guid.NewGuid(),
@@ -32,6 +41,18 @@ public class Market
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };
+    }
+
+    // Controlled one-time code assignment: the create handler stamps the generated
+    // MKT###### code here after construction (mirrors Crop/EconomicCenter code-stamping).
+    // Guards an empty code and refuses to silently re-stamp an already-coded market.
+    public void AssignCode(string marketCode)
+    {
+        if (string.IsNullOrWhiteSpace(marketCode))
+            throw new ArgumentException("MarketCode is required.", nameof(marketCode));
+        if (!string.IsNullOrEmpty(MarketCode))
+            throw new InvalidOperationException("MarketCode is already assigned and cannot be re-stamped.");
+        MarketCode = marketCode;
     }
 
     // Mutate-in-place update used by an update handler on a tracked entity.

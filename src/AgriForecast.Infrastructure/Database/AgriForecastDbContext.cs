@@ -17,6 +17,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<User> Users { get; set; }
     public DbSet<Market> Markets { get; set; }
     public DbSet<PriceObservation> PriceObservations { get; set; }
+    public DbSet<CommodityAlias> CommodityAliases { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -139,6 +140,13 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.Property(x => x.MaxPrice).HasPrecision(10, 2);
             e.Property(x => x.ArrivalsKg).HasPrecision(12, 2);
 
+            // Unit quarantine (R1.1 P1). UnitRaw nullable; UnitConversionFactor decimal(10,4)
+            // nullable; IsUnitConfirmed NOT NULL default false (fail-closed — rows are
+            // quarantined until ingestion confirms the unit). The 0-row table needs no back-fill.
+            e.Property(x => x.UnitRaw).HasMaxLength(50);
+            e.Property(x => x.UnitConversionFactor).HasPrecision(10, 4);
+            e.Property(x => x.IsUnitConfirmed).IsRequired().HasDefaultValue(false);
+
             e.HasOne<Market>()
                 .WithMany()
                 .HasForeignKey(x => x.MarketId)
@@ -170,6 +178,42 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             // Forecast read path: prices for a crop at a market over time.
             e.HasIndex(x => new { x.MarketId, x.CropId, x.ObservedDate })
                 .HasDatabaseName("IX_PriceObservations_MarketCropDate");
+        });
+
+        modelBuilder.Entity<CommodityAlias>(e =>
+        {
+            e.Property(x => x.Alias).HasMaxLength(200).IsRequired();
+            e.Property(x => x.Source).HasMaxLength(100);
+            e.Property(x => x.Language).HasMaxLength(20);
+            e.Property(x => x.IsActive).IsRequired().HasDefaultValue(true);
+
+            // Restrict: a Crop can never be deleted while an alias still maps to it.
+            e.HasOne<Crop>()
+                .WithMany()
+                .HasForeignKey(x => x.CropId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // Ambiguity guard: one alias must not map to two crops. SQL Server treats NULLs
+            // as EQUAL in a unique index, which would collapse every global (Source IS NULL)
+            // alias into one row — so we split into TWO filtered unique indexes, exactly as
+            // PriceObservation splits its id/name-keyed dedup:
+            //   * source-scoped aliases dedupe on (Alias, Source) where Source IS NOT NULL,
+            //   * global aliases dedupe on (Alias) where Source IS NULL.
+            // Both are case-INSENSITIVE (SQL Server default collation) — desirable here, so
+            // "Beans"/"beans" cannot be inserted as two conflicting mappings.
+            e.HasIndex(x => new { x.Alias, x.Source })
+                .IsUnique()
+                .HasFilter("[Source] IS NOT NULL")
+                .HasDatabaseName("UX_CommodityAliases_AliasSource");
+
+            e.HasIndex(x => x.Alias)
+                .IsUnique()
+                .HasFilter("[Source] IS NULL")
+                .HasDatabaseName("UX_CommodityAliases_AliasGlobal");
+
+            // Resolution read path: look up active aliases by (Alias, Source).
+            e.HasIndex(x => new { x.Alias, x.Source, x.IsActive })
+                .HasDatabaseName("IX_CommodityAliases_AliasSourceActive");
         });
 
         SeedMarkets(modelBuilder);

@@ -45,6 +45,19 @@ public class PriceObservation
     // Arrivals volume in kilograms. decimal(12,2).
     public decimal? ArrivalsKg { get; private set; }
 
+    // --- Unit quarantine (R1.1 P1, PRD risk R5 High/High: unit/label mismatch across sources) ---
+    // Fail-closed unit provenance. Sources state prices in differing units ("Rs/kg", "Rs/100kg",
+    // "Rs/bushel", ...); a silently-assumed unit corrupts every downstream price. So:
+    //   UnitRaw               — the unit exactly as the source stated it (nullable; audit trail).
+    //   UnitConversionFactor  — factor applied to reach the canonical LKR/kg (decimal(10,4));
+    //                           1.0 = already LKR/kg. Nullable until a unit is resolved.
+    //   IsUnitConfirmed       — NOT NULL, defaults FALSE. A row is QUARANTINED (unit unproven)
+    //                           until ingestion explicitly confirms the unit. Aggregation/feature
+    //                           layers must exclude unconfirmed rows — never assume LKR/kg.
+    public string? UnitRaw { get; private set; }
+    public decimal? UnitConversionFactor { get; private set; }
+    public bool IsUnitConfirmed { get; private set; }
+
     // Bulletin publication timestamp — the point-in-time vintage (distinct from ObservedDate).
     public DateTime AsOfUtc { get; private set; }
 
@@ -73,7 +86,10 @@ public class PriceObservation
         decimal? retailPrice = null,
         decimal? minPrice = null,
         decimal? maxPrice = null,
-        decimal? arrivalsKg = null)
+        decimal? arrivalsKg = null,
+        string? unitRaw = null,
+        decimal? unitConversionFactor = null,
+        bool isUnitConfirmed = false)
     {
         if (marketId == Guid.Empty)
             throw new ArgumentException("MarketId is required.", nameof(marketId));
@@ -102,14 +118,27 @@ public class PriceObservation
             MinPrice = minPrice,
             MaxPrice = maxPrice,
             ArrivalsKg = arrivalsKg,
+            UnitRaw = unitRaw,
+            UnitConversionFactor = unitConversionFactor,
+            IsUnitConfirmed = isUnitConfirmed,
             RetrievedAtUtc = DateTime.UtcNow
         };
     }
 
     // Self-healing crop resolution: the canonical-mapping layer sets CropId once the
     // source commodity is mapped. Mirrors how MarketPrice.CropId is back-filled.
-    public void AssignCrop(Guid cropId)
+    //
+    // Guards (R1.1 P1): Guid.Empty is never a valid mapping target — reject it rather than
+    // silently blanking the crop. And the self-heal path must NOT silently re-map an
+    // observation that is already assigned: pass overwrite:true to deliberately re-map
+    // (e.g. a corrected canonical mapping), otherwise a second assignment throws.
+    public void AssignCrop(Guid cropId, bool overwrite = false)
     {
+        if (cropId == Guid.Empty)
+            throw new ArgumentException("CropId must be a non-empty Guid.", nameof(cropId));
+        if (CropId.HasValue && !overwrite)
+            throw new InvalidOperationException(
+                "CropId is already assigned; pass overwrite:true to deliberately re-map this observation.");
         CropId = cropId;
     }
 }

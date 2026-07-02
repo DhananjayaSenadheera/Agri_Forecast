@@ -71,6 +71,29 @@ PRICE COLUMNS (PriceObservations):
   every market including Pettah/Narahenpita. WholesalePrice/RetailPrice are
   for other sources that publish a single point figure. The feature layer
   must read MinPrice/MaxPrice for Source='HARTI', not WholesalePrice.
+
+CROP RESOLUTION (R1.1 P1 Stage B, canonical mapping layer):
+  upsert_harti_price_observations() resolves each row's CropId via
+  ..canonical.CommodityAliasResolver, loaded once per call (cache-per-run,
+  same pattern as _build_market_map()) against active CommodityAliases rows
+  scoped Source='HARTI' (falling back to a global alias if no HARTI-scoped
+  one matches). A label with no active alias match is written with
+  CropId = NULL and logged as a WARNING — never guessed, never
+  fuzzy-matched. Existing NULL-CropId rows self-heal later via
+  canonical.heal_price_observation_crops() as new aliases are added; this
+  loader does not need to be re-run for that.
+
+UNIT CONTRACT (R1.1 P1 Stage B):
+  HARTI daily wholesale bulletins are Rs/kg, verified corpus-wide (bulletin
+  header states "... (Rs./kg)" for every located market column in the same
+  table — see harti_multimarket_audit.md). Every row this loader writes
+  therefore sets UnitRaw=canonical.HARTI_UNIT_RAW ("Rs/kg"),
+  UnitConversionFactor=canonical.HARTI_UNIT_CONVERSION_FACTOR (1.0), and
+  IsUnitConfirmed=1 — per the fail-closed contract documented in
+  canonical.py, a source writer may only set IsUnitConfirmed=1 when the unit
+  is a verified constant of that source (true here) or a per-row confirmed
+  conversion. MinPrice/MaxPrice are already the LKR/kg figures HARTI
+  publishes, so no numeric conversion is applied (factor 1.0).
 """
 from __future__ import annotations
 
@@ -82,6 +105,11 @@ from typing import Sequence
 
 import sqlalchemy as sa
 
+from ..canonical import (
+    HARTI_UNIT_CONVERSION_FACTOR,
+    HARTI_UNIT_RAW,
+    CommodityAliasResolver,
+)
 from ..db import get_engine
 from .parser import ParsedPrice
 
@@ -564,6 +592,14 @@ def upsert_harti_price_observations(
     duration of this call) — never a hardcoded GUID.  A market_name that
     does not resolve is WARN-skipped, never invented.
 
+    Failure-mode split (by design): if the Markets or CommodityAliases
+    lookup itself cannot be loaded (table missing/DB unreachable), the
+    _build_market_map()/CommodityAliasResolver construction below raises and
+    this whole upsert ABORTS — better to fail loudly than ingest an entire
+    run with every row unresolved.  A per-row miss (unknown market name /
+    unknown commodity label) is the opposite: WARN + skip / WARN + CropId
+    NULL respectively, and ingestion continues.
+
     Price column convention: HARTI publishes a single Min/Max wholesale
     range per market per crop (no separate wholesale-vs-retail split, no
     single-point price) — the same convention the legacy MarketPrices table
@@ -582,12 +618,13 @@ def upsert_harti_price_observations(
 
     Returns:
         Dict with counts: inserted, updated, skipped_no_market,
-        skipped_invalid_price.
+        skipped_invalid_price, crop_resolved, crop_unresolved.
     """
     if engine is None:
         engine = get_engine()
 
     market_map = _build_market_map(engine)  # cached once per run, not per row
+    crop_resolver = CommodityAliasResolver(engine)  # cached once per run, not per row
     now_utc = datetime.now(timezone.utc)
 
     counters = dict(
@@ -595,6 +632,8 @@ def upsert_harti_price_observations(
         updated=0,
         skipped_no_market=0,
         skipped_invalid_price=0,
+        crop_resolved=0,
+        crop_unresolved=0,
     )
 
     to_upsert: list[dict] = []
@@ -621,21 +660,43 @@ def upsert_harti_price_observations(
         observed_date = date.fromisoformat(pr.date_str)
         as_of_utc = _resolve_as_of_utc(pr.pdf_creation_date_raw, observed_date)
 
+        # Canonical crop resolution (R1.1 P1 Stage B): resolve via active
+        # CommodityAliases (source-scoped 'HARTI' beats a global alias for
+        # the same label). Never guess — unresolved stays NULL + WARN, and
+        # the row still gets inserted (crop resolution is additive, not a
+        # gate on ingestion; heal_price_observation_crops() back-fills it
+        # later as aliases are added).
+        crop_id = crop_resolver.resolve(pr.harti_label, SOURCE)
+        if crop_id is None:
+            logger.warning(
+                "[%s] %s/%s: no active CommodityAlias resolved this label — "
+                "CropId left NULL, never guessed",
+                pr.date_str, pr.market_name, pr.harti_label,
+            )
+            counters["crop_unresolved"] += 1
+        else:
+            counters["crop_resolved"] += 1
+
         to_upsert.append({
             "market_id": str(market_id),
+            "crop_id": str(crop_id) if crop_id is not None else None,
             "external_commodity_name": pr.harti_label,
             "observed_date": observed_date,
             "min_price": pr.min_price,
             "max_price": pr.max_price,
             "arrivals_kg": pr.arrivals_kg,
             "as_of_utc": as_of_utc,
+            "unit_raw": HARTI_UNIT_RAW,
+            "unit_conversion_factor": HARTI_UNIT_CONVERSION_FACTOR,
+            "is_unit_confirmed": True,
         })
 
     logger.info(
         "PriceObservations upsert candidates: %d rows (of %d parsed). "
-        "no-market=%d, invalid-price=%d",
+        "no-market=%d, invalid-price=%d, crop-resolved=%d, crop-unresolved=%d",
         len(to_upsert), len(parsed_rows),
         counters["skipped_no_market"], counters["skipped_invalid_price"],
+        counters["crop_resolved"], counters["crop_unresolved"],
     )
 
     if dry_run:
@@ -680,7 +741,10 @@ def upsert_harti_price_observations(
                 row["observed_date"].isoformat(),
             )
             if key in existing_keys:
-                # UPDATE existing row
+                # UPDATE existing row. CropId uses COALESCE so a re-run never
+                # overwrites an already-assigned CropId (mirrors the .NET
+                # AssignCrop no-silent-re-map contract) -- it can only move
+                # NULL -> resolved, exactly like heal_price_observation_crops().
                 conn.execute(
                     sa.text(
                         """UPDATE PriceObservations
@@ -688,7 +752,11 @@ def upsert_harti_price_observations(
                                MaxPrice = :max_price,
                                ArrivalsKg = :arrivals_kg,
                                AsOfUtc = :as_of_utc,
-                               RetrievedAtUtc = :retrieved_at
+                               RetrievedAtUtc = :retrieved_at,
+                               CropId = COALESCE(CropId, :crop_id),
+                               UnitRaw = :unit_raw,
+                               UnitConversionFactor = :unit_conversion_factor,
+                               IsUnitConfirmed = :is_unit_confirmed
                            WHERE CONVERT(varchar(36), MarketId) = :market_id
                              AND ExternalCommodityName = :ext_commodity_name
                              AND ExternalCommodityId IS NULL
@@ -701,6 +769,10 @@ def upsert_harti_price_observations(
                         "arrivals_kg": row["arrivals_kg"],
                         "as_of_utc": row["as_of_utc"],
                         "retrieved_at": now_utc,
+                        "crop_id": row["crop_id"],
+                        "unit_raw": row["unit_raw"],
+                        "unit_conversion_factor": row["unit_conversion_factor"],
+                        "is_unit_confirmed": row["is_unit_confirmed"],
                         "market_id": row["market_id"],
                         "ext_commodity_name": row["external_commodity_name"],
                         "observed_date": row["observed_date"],
@@ -717,16 +789,19 @@ def upsert_harti_price_observations(
                            (Id, MarketId, CropId, ExternalCommodityId,
                             ExternalCommodityName, ObservedDate,
                             WholesalePrice, RetailPrice, MinPrice, MaxPrice,
-                            ArrivalsKg, AsOfUtc, Source, RetrievedAtUtc)
+                            ArrivalsKg, AsOfUtc, Source, RetrievedAtUtc,
+                            UnitRaw, UnitConversionFactor, IsUnitConfirmed)
                            VALUES
-                           (:id, :market_id, NULL, NULL,
+                           (:id, :market_id, :crop_id, NULL,
                             :ext_commodity_name, :observed_date,
                             NULL, NULL, :min_price, :max_price,
-                            :arrivals_kg, :as_of_utc, :source, :retrieved_at)"""
+                            :arrivals_kg, :as_of_utc, :source, :retrieved_at,
+                            :unit_raw, :unit_conversion_factor, :is_unit_confirmed)"""
                     ),
                     {
                         "id": new_id,
                         "market_id": row["market_id"],
+                        "crop_id": row["crop_id"],
                         "ext_commodity_name": row["external_commodity_name"],
                         "observed_date": row["observed_date"],
                         "min_price": row["min_price"],
@@ -735,6 +810,9 @@ def upsert_harti_price_observations(
                         "as_of_utc": row["as_of_utc"],
                         "source": SOURCE,
                         "retrieved_at": now_utc,
+                        "unit_raw": row["unit_raw"],
+                        "unit_conversion_factor": row["unit_conversion_factor"],
+                        "is_unit_confirmed": row["is_unit_confirmed"],
                     },
                 )
                 counters["inserted"] += 1
