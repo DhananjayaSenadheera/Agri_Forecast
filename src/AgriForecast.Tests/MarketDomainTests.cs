@@ -1,0 +1,412 @@
+using AgriForecast.Domain.Entities;
+using AgriForecast.Domain.Enums;
+using FluentAssertions;
+
+namespace AgriForecast.Tests;
+
+/// <summary>
+/// Regression tests for the new market-dimension entities (R1P1): Market, PriceObservation,
+/// MarketType. Style mirrors MapperTests.cs already in this project.
+///
+/// PriceObservation.Create's asOfUtc guard is the most important test in this file: it is the
+/// leakage safeguard that stops a forgetful ingestion path from writing AsOfUtc = 0001-01-01,
+/// which would make the row "already published" in every as-of window (look-ahead leakage).
+/// </summary>
+public class MarketDomainTests
+{
+    // ──────────────────────────────────────────────────────────────────────────────
+    // PriceObservation.Create — happy path
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    private static (Guid marketId, string commodityName, DateOnly observedDate, DateTime asOfUtc, string source)
+        ValidArgs() => (
+            Guid.NewGuid(),
+            "Carrot (Local)",
+            new DateOnly(2026, 6, 1),
+            new DateTime(2026, 6, 2, 5, 30, 0, DateTimeKind.Utc),
+            "HARTI");
+
+    [Fact]
+    public void PriceObservation_Create_AssignsNonEmptyUniqueId()
+    {
+        var a = ValidArgs();
+
+        var obs1 = PriceObservation.Create(a.marketId, a.commodityName, a.observedDate, a.asOfUtc, a.source);
+        var obs2 = PriceObservation.Create(a.marketId, a.commodityName, a.observedDate, a.asOfUtc, a.source);
+
+        obs1.Id.Should().NotBe(Guid.Empty);
+        obs2.Id.Should().NotBe(Guid.Empty);
+        obs1.Id.Should().NotBe(obs2.Id, "each create call must mint a fresh identity");
+    }
+
+    [Fact]
+    public void PriceObservation_Create_CopiesRequiredFieldsExactly()
+    {
+        var a = ValidArgs();
+
+        var obs = PriceObservation.Create(a.marketId, a.commodityName, a.observedDate, a.asOfUtc, a.source);
+
+        obs.MarketId.Should().Be(a.marketId);
+        obs.ExternalCommodityName.Should().Be(a.commodityName);
+        obs.ObservedDate.Should().Be(a.observedDate);
+        obs.AsOfUtc.Should().Be(a.asOfUtc);
+        obs.Source.Should().Be(a.source);
+    }
+
+    [Fact]
+    public void PriceObservation_Create_CopiesOptionalFields_WhenProvided()
+    {
+        var a = ValidArgs();
+        var cropId = Guid.NewGuid();
+
+        var obs = PriceObservation.Create(
+            a.marketId, a.commodityName, a.observedDate, a.asOfUtc, a.source,
+            externalCommodityId: 42,
+            cropId: cropId,
+            wholesalePrice: 100.50m,
+            retailPrice: 120.00m,
+            minPrice: 95.00m,
+            maxPrice: 130.00m,
+            arrivalsKg: 5000.25m);
+
+        obs.ExternalCommodityId.Should().Be(42);
+        obs.CropId.Should().Be(cropId);
+        obs.WholesalePrice.Should().Be(100.50m);
+        obs.RetailPrice.Should().Be(120.00m);
+        obs.MinPrice.Should().Be(95.00m);
+        obs.MaxPrice.Should().Be(130.00m);
+        obs.ArrivalsKg.Should().Be(5000.25m);
+    }
+
+    [Fact]
+    public void PriceObservation_Create_NullablePricesStayNull_WhenNotProvided()
+    {
+        // Partial bulletins (e.g. arrivals-only, or wholesale-only) must insert cleanly
+        // without coercing missing fields to zero.
+        var a = ValidArgs();
+
+        var obs = PriceObservation.Create(a.marketId, a.commodityName, a.observedDate, a.asOfUtc, a.source);
+
+        obs.ExternalCommodityId.Should().BeNull();
+        obs.CropId.Should().BeNull();
+        obs.WholesalePrice.Should().BeNull();
+        obs.RetailPrice.Should().BeNull();
+        obs.MinPrice.Should().BeNull();
+        obs.MaxPrice.Should().BeNull();
+        obs.ArrivalsKg.Should().BeNull();
+    }
+
+    [Fact]
+    public void PriceObservation_Create_StampsRetrievedAtUtc_ToUtcNow()
+    {
+        var a = ValidArgs();
+
+        var before = DateTime.UtcNow;
+        var obs = PriceObservation.Create(a.marketId, a.commodityName, a.observedDate, a.asOfUtc, a.source);
+        var after = DateTime.UtcNow;
+
+        obs.RetrievedAtUtc.Should().BeOnOrAfter(before).And.BeOnOrBefore(after);
+    }
+
+    [Fact]
+    public void PriceObservation_Create_RetrievedAtUtc_IsNeverCallerSupplied()
+    {
+        // RetrievedAtUtc has no constructor parameter at all — this pins that fact so a
+        // future refactor can't quietly add a caller-supplied override (it is audit-only,
+        // never a feature, per the entity's own doc comment).
+        typeof(PriceObservation)
+            .GetMethod(nameof(PriceObservation.Create))!
+            .GetParameters()
+            .Select(p => p.Name)
+            .Should().NotContain("retrievedAtUtc");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // PriceObservation.Create — THE LEAKAGE GUARD
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void PriceObservation_Create_Throws_WhenAsOfUtcIsDefault()
+    {
+        // This is the leakage guard. A default(DateTime) AsOfUtc == 0001-01-01, which would
+        // be "already published" in every as-of window the ML layer joins on — a silent
+        // look-ahead leak that would be invisible in a spot-check of the data. This must
+        // never be relaxed to a silent default.
+        var a = ValidArgs();
+
+        var act = () => PriceObservation.Create(a.marketId, a.commodityName, a.observedDate, default, a.source);
+
+        act.Should().Throw<ArgumentException>()
+            .And.ParamName.Should().Be("asOfUtc");
+    }
+
+    [Fact]
+    public void PriceObservation_Create_Throws_WhenMarketIdIsEmpty()
+    {
+        var a = ValidArgs();
+
+        var act = () => PriceObservation.Create(Guid.Empty, a.commodityName, a.observedDate, a.asOfUtc, a.source);
+
+        act.Should().Throw<ArgumentException>()
+            .And.ParamName.Should().Be("marketId");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void PriceObservation_Create_Throws_WhenExternalCommodityNameIsEmptyOrWhitespace(string? name)
+    {
+        var a = ValidArgs();
+
+        var act = () => PriceObservation.Create(a.marketId, name!, a.observedDate, a.asOfUtc, a.source);
+
+        act.Should().Throw<ArgumentException>()
+            .And.ParamName.Should().Be("externalCommodityName");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void PriceObservation_Create_Throws_WhenSourceIsEmptyOrWhitespace(string? source)
+    {
+        var a = ValidArgs();
+
+        var act = () => PriceObservation.Create(a.marketId, a.commodityName, a.observedDate, a.asOfUtc, source!);
+
+        act.Should().Throw<ArgumentException>()
+            .And.ParamName.Should().Be("source");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // PriceObservation.Create — AsOfUtc vs ObservedDate independence
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void PriceObservation_Create_KeepsAsOfUtcAndObservedDateDistinct_WhenPublishedLate()
+    {
+        // A price observation FOR June 1st, published June 2nd (D+1 bulletin lag) must keep
+        // both vintages distinct — never collapse AsOfUtc to ObservedDate or vice versa.
+        // This is what the ML layer's as-of join relies on to avoid treating the price as
+        // "known" on the day it was actually for.
+        var marketId = Guid.NewGuid();
+        var observedDate = new DateOnly(2026, 6, 1);
+        var asOfUtc = new DateTime(2026, 6, 2, 6, 0, 0, DateTimeKind.Utc);
+
+        var obs = PriceObservation.Create(marketId, "Carrot (Local)", observedDate, asOfUtc, "HARTI");
+
+        obs.ObservedDate.Should().Be(observedDate);
+        obs.AsOfUtc.Should().Be(asOfUtc);
+        obs.AsOfUtc.Should().BeAfter(obs.ObservedDate.ToDateTime(TimeOnly.MinValue),
+            "the bulletin vintage lags the economic event date in this fixture, by design");
+    }
+
+    [Fact]
+    public void PriceObservation_Create_AllowsAsOfUtcSameDayAsObservedDate()
+    {
+        // Same-day publication is a valid, common case too — no artificial minimum lag
+        // should be enforced by the entity.
+        var observedDate = new DateOnly(2026, 6, 1);
+        var asOfUtc = new DateTime(2026, 6, 1, 18, 0, 0, DateTimeKind.Utc);
+
+        var obs = PriceObservation.Create(Guid.NewGuid(), "Carrot (Local)", observedDate, asOfUtc, "HARTI");
+
+        obs.ObservedDate.Should().Be(observedDate);
+        obs.AsOfUtc.Should().Be(asOfUtc);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // PriceObservation.AssignCrop
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void PriceObservation_AssignCrop_SetsCropId()
+    {
+        var a = ValidArgs();
+        var obs = PriceObservation.Create(a.marketId, a.commodityName, a.observedDate, a.asOfUtc, a.source);
+        obs.CropId.Should().BeNull();
+        var cropId = Guid.NewGuid();
+
+        obs.AssignCrop(cropId);
+
+        obs.CropId.Should().Be(cropId);
+    }
+
+    [Fact]
+    public void PriceObservation_AssignCrop_HasNoGuardAgainstEmptyGuid()
+    {
+        // AssignCrop(Guid) has no validation in the current entity — it will happily accept
+        // Guid.Empty and overwrite an already-assigned CropId. Documented here as a smell
+        // (see report), not asserted as desirable behavior — this test pins the *actual*
+        // current behavior so a future change to add a guard is a deliberate, visible diff.
+        var a = ValidArgs();
+        var obs = PriceObservation.Create(a.marketId, a.commodityName, a.observedDate, a.asOfUtc, a.source);
+        obs.AssignCrop(Guid.NewGuid());
+
+        obs.AssignCrop(Guid.Empty);
+
+        obs.CropId.Should().Be(Guid.Empty);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Market.CreateNew — happy path
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void Market_CreateNew_AssignsNonEmptyUniqueId()
+    {
+        var a = Market.CreateNew("Dambulla DEC", "Matale", MarketType.DEC);
+        var b = Market.CreateNew("Dambulla DEC", "Matale", MarketType.DEC);
+
+        a.Id.Should().NotBe(Guid.Empty);
+        b.Id.Should().NotBe(Guid.Empty);
+        a.Id.Should().NotBe(b.Id, "each create call must mint a fresh identity");
+    }
+
+    [Fact]
+    public void Market_CreateNew_CopiesNameDistrictAndMarketType()
+    {
+        var market = Market.CreateNew("Dambulla DEC", "Matale", MarketType.DEC);
+
+        market.Name.Should().Be("Dambulla DEC");
+        market.District.Should().Be("Matale");
+        market.MarketType.Should().Be(MarketType.DEC);
+    }
+
+    [Fact]
+    public void Market_CreateNew_SetsIsActiveTrue()
+    {
+        var market = Market.CreateNew("Dambulla DEC", "Matale", MarketType.DEC);
+
+        market.IsActive.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Market_CreateNew_SetsCreatedAndUpdatedAt_ToUtcNow()
+    {
+        var before = DateTime.UtcNow;
+        var market = Market.CreateNew("Dambulla DEC", "Matale", MarketType.DEC);
+        var after = DateTime.UtcNow;
+
+        market.CreatedAt.Should().BeOnOrAfter(before).And.BeOnOrBefore(after);
+        market.UpdatedAt.Should().BeOnOrAfter(before).And.BeOnOrBefore(after);
+    }
+
+    [Fact]
+    public void Market_CreateNew_AllowsNullDistrict()
+    {
+        // NationalAggregate pseudo-markets (e.g. CBSL national average) are explicitly not
+        // tied to a location, per the entity's doc comment — District must accept null.
+        var market = Market.CreateNew("CBSL National Average", null, MarketType.NationalAggregate);
+
+        market.District.Should().BeNull();
+    }
+
+    [Fact]
+    public void Market_CreateNew_HasNoGuardAgainstEmptyOrNullName()
+    {
+        // CreateNew has no argument validation at all (unlike PriceObservation.Create) — it
+        // will accept an empty/whitespace name without throwing. Documented as a smell (see
+        // report); this test pins the actual current behavior rather than inventing a guard
+        // that doesn't exist.
+        var market = Market.CreateNew(string.Empty, "Matale", MarketType.DEC);
+
+        market.Name.Should().Be(string.Empty);
+    }
+
+    [Fact]
+    public void Market_CreateNew_MarketCodeIsLeftUnassigned()
+    {
+        // MarketCode is assigned by the create handler after construction (mirrors
+        // EconomicCenter.CreateNew / Crop.CreateForManualEntry) — CreateNew itself must not
+        // set it.
+        var market = Market.CreateNew("Dambulla DEC", "Matale", MarketType.DEC);
+
+        market.MarketCode.Should().Be(string.Empty);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Market.ApplyUpdate
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    private static Market ExistingMarket() => Market.CreateNew("Original", "OrigDistrict", MarketType.Wholesale);
+
+    [Fact]
+    public void Market_ApplyUpdate_OverwritesNameDistrictMarketTypeAndIsActive()
+    {
+        var existing = ExistingMarket();
+
+        existing.ApplyUpdate("Renamed", "NewDistrict", MarketType.DEC, false);
+
+        existing.Name.Should().Be("Renamed");
+        existing.District.Should().Be("NewDistrict");
+        existing.MarketType.Should().Be(MarketType.DEC);
+        existing.IsActive.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Market_ApplyUpdate_OverwritesDistrictWithNull_Unconditionally()
+    {
+        var existing = ExistingMarket();
+
+        existing.ApplyUpdate("Renamed", null, MarketType.DEC, true);
+
+        existing.District.Should().BeNull();
+    }
+
+    [Fact]
+    public void Market_ApplyUpdate_RefreshesUpdatedAt()
+    {
+        var existing = ExistingMarket();
+        existing.UpdatedAt = DateTime.UtcNow.AddDays(-5);
+
+        var before = DateTime.UtcNow;
+        existing.ApplyUpdate("Renamed", "NewDistrict", MarketType.DEC, true);
+        var after = DateTime.UtcNow;
+
+        existing.UpdatedAt.Should().BeOnOrAfter(before).And.BeOnOrBefore(after);
+    }
+
+    [Fact]
+    public void Market_ApplyUpdate_DoesNotChangeIdOrCreatedAt()
+    {
+        var existing = ExistingMarket();
+        var originalId = existing.Id;
+        var originalCreatedAt = existing.CreatedAt;
+
+        existing.ApplyUpdate("Renamed", "NewDistrict", MarketType.DEC, false);
+
+        existing.Id.Should().Be(originalId);
+        existing.CreatedAt.Should().Be(originalCreatedAt);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // MarketType enum — persisted-int pinning
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    // MarketType is stored as a plain int column in SQL Server (no HasConversion<string>
+    // seen in the model). Any reorder/insertion of a member here silently reassigns the
+    // numeric value of everything after it and corrupts every already-persisted row without
+    // throwing anywhere — the DB would just start meaning something different. If this test
+    // fails, do NOT "fix" the test: the enum has drifted from its persisted contract, and the
+    // fix belongs in a migration/backfill, not in this file.
+    [Theory]
+    [InlineData(MarketType.Wholesale, 0)]
+    [InlineData(MarketType.Retail, 1)]
+    [InlineData(MarketType.DEC, 2)]
+    [InlineData(MarketType.NationalAggregate, 3)]
+    public void MarketType_NumericValues_ArePinned(MarketType value, int expected)
+    {
+        ((int)value).Should().Be(expected);
+    }
+
+    [Fact]
+    public void MarketType_HasExactlyFourMembers()
+    {
+        // Guards against a silent insertion (e.g. a new member added in the middle) that
+        // wouldn't be caught by the pinned-value theory above if it also shifted a later one
+        // in a way that happened to still pass by coincidence — belt and suspenders.
+        Enum.GetValues<MarketType>().Should().HaveCount(4);
+    }
+}
