@@ -471,15 +471,38 @@ class TestParserOnCachedPDF:
             "Dambulla column should be index 3 in 2019-format PDFs, got %d" % col
         )
 
+    def _dambulla_rows(self):
+        """Dambulla-only slice -- preserves the original (pre-multi-market)
+        assertions, which were always implicitly Dambulla-scoped."""
+        return [r for r in self._parse() if r.market_name == "Dambulla"]
+
     def test_six_crops_returned(self):
+        """parse_pdf() now emits rows for every locatable target market
+        (Dambulla + Pettah for this PDF; Narahenpita's header is not present
+        in 2019-format bulletins and is WARN-skipped) -- 6 crops x 2 markets."""
         rows = self._parse()
         labels = [r.harti_label for r in rows]
+        assert len(rows) == 12, (
+            "Expected 12 rows (6 crops x 2 locatable markets) from 2019-01-01 "
+            "PDF, got %d: %s" % (len(rows), labels)
+        )
+        markets = {r.market_name for r in rows}
+        assert markets == {"Dambulla", "Pettah"}, (
+            "Expected only Dambulla+Pettah markets (Narahenpita header absent "
+            "in this PDF format), got %s" % markets
+        )
+
+    def test_dambulla_six_crops_returned(self):
+        """R1 regression: the Dambulla-only slice must still be exactly 6
+        rows, matching pre-multi-market behaviour bit-for-bit."""
+        rows = self._dambulla_rows()
+        labels = [r.harti_label for r in rows]
         assert len(rows) == 6, (
-            "Expected 6 crop rows from 2019-01-01 PDF, got %d: %s" % (len(rows), labels)
+            "Expected 6 Dambulla crop rows from 2019-01-01 PDF, got %d: %s" % (len(rows), labels)
         )
 
     def test_all_six_harti_labels_present(self):
-        rows = self._parse()
+        rows = self._dambulla_rows()
         returned = {r.harti_label for r in rows}
         expected = {"Beans", "Ladies Fingers", "Capsicum", "Bitter Gourd", "Luffa", "Snake Gourd"}
         assert returned == expected, (
@@ -487,8 +510,8 @@ class TestParserOnCachedPDF:
         )
 
     def test_beans_min_max_price(self):
-        """Beans in 2019-01-01: raw='100.00 -120.00' => min=100, max=120."""
-        rows = self._parse()
+        """Dambulla Beans in 2019-01-01: raw='100.00 -120.00' => min=100, max=120."""
+        rows = self._dambulla_rows()
         beans = next((r for r in rows if r.harti_label == "Beans"), None)
         assert beans is not None, "Beans row missing"
         assert beans.min_price == pytest.approx(100.0), (
@@ -500,16 +523,29 @@ class TestParserOnCachedPDF:
 
     def test_beans_midpoint(self):
         """(100+120)/2 = 110.0"""
-        rows = self._parse()
+        rows = self._dambulla_rows()
         beans = next(r for r in rows if r.harti_label == "Beans")
         midpoint = (beans.min_price + beans.max_price) / 2.0
         assert midpoint == pytest.approx(110.0), (
             "Beans midpoint should be 110.0, got %s" % midpoint
         )
 
+    def test_pettah_beans_differs_from_dambulla_no_column_swap(self):
+        """R1 regression: Pettah Beans (raw='80.00- 100.00') must NOT equal
+        Dambulla Beans (raw='100.00 -120.00') -- a column swap would silently
+        make these identical or cross-contaminated."""
+        rows = self._parse()
+        dambulla_beans = next(r for r in rows if r.harti_label == "Beans" and r.market_name == "Dambulla")
+        pettah_beans = next(r for r in rows if r.harti_label == "Beans" and r.market_name == "Pettah")
+        assert (dambulla_beans.min_price, dambulla_beans.max_price) == (100.0, 120.0)
+        assert (pettah_beans.min_price, pettah_beans.max_price) == (80.0, 100.0)
+        assert (dambulla_beans.min_price, dambulla_beans.max_price) != (
+            pettah_beans.min_price, pettah_beans.max_price
+        ), "Dambulla and Pettah Beans prices must differ -- identical values would indicate a column swap"
+
     def test_bitter_gourd_other_consolidates(self):
         """In 2019-01-01 the row is 'Bitter Gourd (Other)'; must consolidate to 'Bitter Gourd'."""
-        rows = self._parse()
+        rows = self._dambulla_rows()
         labels = [r.harti_label for r in rows]
         assert "Bitter Gourd" in labels, (
             "'Bitter Gourd' must be in output (consolidated from 'Bitter Gourd (Other)')"
@@ -521,14 +557,14 @@ class TestParserOnCachedPDF:
     def test_no_zero_or_negative_prices(self):
         rows = self._parse()
         for r in rows:
-            assert r.min_price > 0, "%s: min_price must be > 0, got %s" % (r.harti_label, r.min_price)
-            assert r.max_price > 0, "%s: max_price must be > 0, got %s" % (r.harti_label, r.max_price)
+            assert r.min_price > 0, "%s/%s: min_price must be > 0, got %s" % (r.market_name, r.harti_label, r.min_price)
+            assert r.max_price > 0, "%s/%s: max_price must be > 0, got %s" % (r.market_name, r.harti_label, r.max_price)
 
     def test_min_price_le_max_price(self):
         rows = self._parse()
         for r in rows:
             assert r.min_price <= r.max_price, (
-                "%s: min_price (%s) > max_price (%s)" % (r.harti_label, r.min_price, r.max_price)
+                "%s/%s: min_price (%s) > max_price (%s)" % (r.market_name, r.harti_label, r.min_price, r.max_price)
             )
 
     def test_date_str_preserved(self):
@@ -539,11 +575,22 @@ class TestParserOnCachedPDF:
             )
 
     def test_no_duplicate_canonical_labels_per_pdf(self):
+        """No duplicate (market_name, harti_label) pairs -- per-market dedup,
+        not global, since 6 crops x 2 markets legitimately repeats labels."""
         rows = self._parse()
         from collections import Counter
-        counts = Counter(r.harti_label for r in rows)
-        dups = {label: cnt for label, cnt in counts.items() if cnt > 1}
-        assert not dups, "Duplicate canonical labels in single PDF parse: %s" % dups
+        counts = Counter((r.market_name, r.harti_label) for r in rows)
+        dups = {key: cnt for key, cnt in counts.items() if cnt > 1}
+        assert not dups, "Duplicate (market, label) pairs in single PDF parse: %s" % dups
+
+    def test_narahenpita_absent_in_2019_format_warn_skip_not_guessed(self):
+        """R1 regression: Narahenpita's header does not exist in 2019-format
+        bulletins -- it must be WARN-skipped (absent from output), never
+        positionally guessed from an unrelated column."""
+        rows = self._parse()
+        assert "Narahenpita" not in {r.market_name for r in rows}, (
+            "Narahenpita must not appear for a PDF format that has no Narahenpita column"
+        )
 
 
 # ===========================================================================

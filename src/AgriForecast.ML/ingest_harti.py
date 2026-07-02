@@ -156,10 +156,23 @@ def main() -> None:
     # Step 3: Load into DB (with splice rule + idempotent upsert)
     # ------------------------------------------------------------------ #
     log.info(
-        "Step 3: Loading into MarketPrices (dry_run=%s)...", args.dry_run
+        "Step 3: Loading into MarketPrices (Dambulla-only, back-compat; dry_run=%s)...",
+        args.dry_run,
     )
     counters = loader.upsert_harti_prices(parsed_rows, dry_run=args.dry_run)
     log.info("Step 3 complete: %s", counters)
+
+    # ------------------------------------------------------------------ #
+    # Step 3b: Load ALL markets (Dambulla, Pettah, Narahenpita) into
+    # PriceObservations — R1.1 P1 multi-market table. Additive to Step 3;
+    # no splice rule applies here (see loader.py docstring).
+    # ------------------------------------------------------------------ #
+    log.info(
+        "Step 3b: Loading into PriceObservations (all markets; dry_run=%s)...",
+        args.dry_run,
+    )
+    po_counters = loader.upsert_harti_price_observations(parsed_rows, dry_run=args.dry_run)
+    log.info("Step 3b complete: %s", po_counters)
 
     # ------------------------------------------------------------------ #
     # Step 4: QA checks
@@ -171,10 +184,15 @@ def main() -> None:
             log.info("--skip-qa: skipping QA checks")
         print("\nPipeline complete.")
         print(f"  Parsed rows  : {len(parsed_rows)}")
-        print(f"  Inserted     : {counters.get('inserted', 0)}")
-        print(f"  Updated      : {counters.get('updated', 0)}")
-        print(f"  Splice-skip  : {counters.get('skipped_splice', 0)}")
-        print(f"  No-crop-skip : {counters.get('skipped_no_crop', 0)}")
+        print(f"  MarketPrices (Dambulla only):")
+        print(f"    Inserted     : {counters.get('inserted', 0)}")
+        print(f"    Updated      : {counters.get('updated', 0)}")
+        print(f"    Splice-skip  : {counters.get('skipped_splice', 0)}")
+        print(f"    No-crop-skip : {counters.get('skipped_no_crop', 0)}")
+        print(f"  PriceObservations (all markets):")
+        print(f"    Inserted        : {po_counters.get('inserted', 0)}")
+        print(f"    Updated         : {po_counters.get('updated', 0)}")
+        print(f"    No-market-skip  : {po_counters.get('skipped_no_market', 0)}")
         return
 
     log.info("Step 4: Running QA checks...")
@@ -190,12 +208,17 @@ def main() -> None:
     print("\nPipeline summary:")
     print(f"  PDFs processed : {len(cached_pdfs)}")
     print(f"  Parsed rows    : {len(parsed_rows)}")
-    print(f"  Inserted       : {counters.get('inserted', 0)}")
-    print(f"  Updated        : {counters.get('updated', 0)}")
-    print(f"  Splice-skip    : {counters.get('skipped_splice', 0)}")
-    print(f"  No-crop-skip   : {counters.get('skipped_no_crop', 0)}")
-    print(f"  Total HARTI DB : {report['grand_total']}")
-    print(f"  Duplicate check: PASSED (0 overlaps with DEC)")
+    print(f"  MarketPrices (Dambulla only):")
+    print(f"    Inserted       : {counters.get('inserted', 0)}")
+    print(f"    Updated        : {counters.get('updated', 0)}")
+    print(f"    Splice-skip    : {counters.get('skipped_splice', 0)}")
+    print(f"    No-crop-skip   : {counters.get('skipped_no_crop', 0)}")
+    print(f"    Total HARTI DB : {report['grand_total']}")
+    print(f"    Duplicate check: PASSED (0 overlaps with DEC)")
+    print(f"  PriceObservations (all markets):")
+    print(f"    Inserted        : {po_counters.get('inserted', 0)}")
+    print(f"    Updated         : {po_counters.get('updated', 0)}")
+    print(f"    No-market-skip  : {po_counters.get('skipped_no_market', 0)}")
 
 
 if __name__ == "__main__":
