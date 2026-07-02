@@ -50,6 +50,54 @@ _HEADERS = {
 
 _REQUEST_DELAY = 1.0   # seconds between requests
 
+# Security fix F-10: cap the size of any single downloaded PDF. HARTI daily-price
+# PDFs are a few hundred KB; 25 MB is a generous ceiling that still stops a
+# malicious/oversized response (decompression bomb, wrong file) from exhausting
+# memory or disk. The cap is enforced against streamed bytes, not just the
+# Content-Length header (which can lie or be absent).
+_MAX_PDF_BYTES = 25 * 1024 * 1024   # 25 MB
+_STREAM_CHUNK_BYTES = 64 * 1024     # 64 KB read chunks
+_DOWNLOAD_TIMEOUT = 60              # seconds, per-request
+
+
+class PdfTooLargeError(Exception):
+    """Raised when a downloaded PDF exceeds the configured size cap."""
+
+
+def _download_capped(session: requests.Session, url: str) -> bytes:
+    """Stream ``url`` into memory, aborting if it exceeds ``_MAX_PDF_BYTES``.
+
+    Checks the Content-Length header up front (when present) AND the actual number
+    of streamed bytes, since the header is attacker-controllable / can be missing.
+    """
+    with session.get(
+        url, headers=_HEADERS, timeout=_DOWNLOAD_TIMEOUT, stream=True
+    ) as resp:
+        resp.raise_for_status()
+
+        # Cheap pre-check: reject early if the server advertises an oversized body.
+        declared = resp.headers.get("Content-Length")
+        if declared is not None:
+            try:
+                if int(declared) > _MAX_PDF_BYTES:
+                    raise PdfTooLargeError(
+                        f"Content-Length {declared} exceeds cap {_MAX_PDF_BYTES}"
+                    )
+            except ValueError:
+                # Malformed header — ignore and rely on the streamed-byte guard below.
+                pass
+
+        buffer = bytearray()
+        for chunk in resp.iter_content(chunk_size=_STREAM_CHUNK_BYTES):
+            if not chunk:
+                continue
+            buffer.extend(chunk)
+            if len(buffer) > _MAX_PDF_BYTES:
+                raise PdfTooLargeError(
+                    f"Streamed body exceeded cap {_MAX_PDF_BYTES} bytes"
+                )
+        return bytes(buffer)
+
 
 def _parse_date_from_filename(filename: str) -> date | None:
     """Extract date from HARTI PDF filename.  Returns None if no match.
@@ -173,16 +221,15 @@ def download_pdfs(
 
         try:
             time.sleep(delay)
-            resp = session.get(url, headers=_HEADERS, timeout=60)
-            resp.raise_for_status()
-            if len(resp.content) < 500:
-                logger.warning("Suspiciously small PDF (%d bytes): %s", len(resp.content), url)
+            content = _download_capped(session, url)
+            if len(content) < 500:
+                logger.warning("Suspiciously small PDF (%d bytes): %s", len(content), url)
                 n_fail += 1
                 continue
-            local_path.write_bytes(resp.content)
+            local_path.write_bytes(content)
             n_ok += 1
             cached.append((date_str, local_path))
-            logger.info("[%s] Downloaded %.1f KB -> %s", date_str, len(resp.content) / 1024, local_path.name)
+            logger.info("[%s] Downloaded %.1f KB -> %s", date_str, len(content) / 1024, local_path.name)
         except Exception as exc:
             logger.warning("[%s] Download FAILED: %s -- %s", date_str, url, exc)
             n_fail += 1
