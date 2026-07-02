@@ -3,12 +3,15 @@ using AgriForecast.Application.Requests.Auth.Commands.Register;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace AgriForecast.API.Controllers;
 
 [ApiController]
 [Route("api/auth")]
 [AllowAnonymous]
+// Stricter rate limit on auth endpoints to blunt credential-stuffing / brute force (F-08).
+[EnableRateLimiting("auth")]
 public class AuthController(IMediator mediator) : ControllerBase
 {
     private static object ToErrorResponse(string error) => new
