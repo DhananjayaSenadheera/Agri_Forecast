@@ -250,6 +250,124 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.ToTable("MarketPrices");
                 });
 
+            modelBuilder.Entity("AgriForecast.Domain.Entities.PolicyFlag", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<int>("Direction")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("EffectiveFrom")
+                        .HasColumnType("date");
+
+                    b.Property<DateTime?>("EffectiveTo")
+                        .HasColumnType("date");
+
+                    b.Property<int>("PolicyType")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ReferenceUrl")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<string>("Source")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EffectiveFrom");
+
+                    b.ToTable("PolicyFlags");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = new Guid("a1f1c001-0000-0000-0000-000000000001"),
+                            CreatedAtUtc = new DateTime(2026, 6, 30, 0, 0, 0, 0, DateTimeKind.Utc),
+                            Description = "Government banned imports of chemical fertilisers, pesticides and weedicides, forcing a nationwide shift to organic farming. Cut yields sharply across paddy and vegetables, pushing harvest-time prices up.",
+                            Direction = 1,
+                            EffectiveFrom = new DateTime(2021, 5, 6, 0, 0, 0, 0, DateTimeKind.Unspecified),
+                            EffectiveTo = new DateTime(2021, 11, 24, 0, 0, 0, 0, DateTimeKind.Unspecified),
+                            PolicyType = 1,
+                            ReferenceUrl = "https://en.wikipedia.org/wiki/2021%E2%80%932022_Sri_Lankan_political_crisis",
+                            Source = "Government of Sri Lanka",
+                            Title = "Chemical fertiliser & agrochemical import ban"
+                        },
+                        new
+                        {
+                            Id = new Guid("a1f1c001-0000-0000-0000-000000000002"),
+                            CreatedAtUtc = new DateTime(2026, 6, 30, 0, 0, 0, 0, DateTimeKind.Utc),
+                            Description = "Reinstated fertiliser support for the 2022/23 Maha season via direct cash and subsidised fertiliser to paddy farmers, easing input costs and partially recovering yields.",
+                            Direction = -1,
+                            EffectiveFrom = new DateTime(2022, 10, 1, 0, 0, 0, 0, DateTimeKind.Unspecified),
+                            EffectiveTo = new DateTime(2023, 3, 31, 0, 0, 0, 0, DateTimeKind.Unspecified),
+                            PolicyType = 5,
+                            Source = "Ministry of Agriculture, Sri Lanka",
+                            Title = "Aswesuma / fertiliser cash subsidy for paddy farmers"
+                        },
+                        new
+                        {
+                            Id = new Guid("a1f1c001-0000-0000-0000-000000000003"),
+                            CreatedAtUtc = new DateTime(2026, 6, 30, 0, 0, 0, 0, DateTimeKind.Utc),
+                            Description = "Introduction of a transparent monthly fuel pricing formula. Transport/diesel cost feeds into farm-gate to wholesale transport margins; ongoing, still in effect.",
+                            Direction = 0,
+                            EffectiveFrom = new DateTime(2022, 9, 1, 0, 0, 0, 0, DateTimeKind.Unspecified),
+                            PolicyType = 6,
+                            Source = "Ceylon Petroleum Corporation",
+                            Title = "Monthly fuel price formula (CPC pricing formula)"
+                        },
+                        new
+                        {
+                            Id = new Guid("a1f1c001-0000-0000-0000-000000000004"),
+                            CreatedAtUtc = new DateTime(2026, 6, 30, 0, 0, 0, 0, DateTimeKind.Utc),
+                            Description = "Import controls / suspension on big onions and potatoes to protect local growers around the harvest window, tightening domestic supply and lifting prices.",
+                            Direction = 1,
+                            EffectiveFrom = new DateTime(2020, 7, 1, 0, 0, 0, 0, DateTimeKind.Unspecified),
+                            EffectiveTo = new DateTime(2021, 2, 28, 0, 0, 0, 0, DateTimeKind.Unspecified),
+                            PolicyType = 1,
+                            Source = "Department of Imports and Exports Control, Sri Lanka",
+                            Title = "Big onion & potato import restrictions"
+                        },
+                        new
+                        {
+                            Id = new Guid("a1f1c001-0000-0000-0000-000000000005"),
+                            CreatedAtUtc = new DateTime(2026, 6, 30, 0, 0, 0, 0, DateTimeKind.Utc),
+                            Description = "Consumer Affairs Authority imposed maximum retail prices (price ceilings) on Nadu, Samba and Keeri Samba rice to curb retail inflation during the economic crisis.",
+                            Direction = -1,
+                            EffectiveFrom = new DateTime(2023, 2, 13, 0, 0, 0, 0, DateTimeKind.Unspecified),
+                            EffectiveTo = new DateTime(2024, 1, 31, 0, 0, 0, 0, DateTimeKind.Unspecified),
+                            PolicyType = 3,
+                            Source = "Consumer Affairs Authority, Sri Lanka",
+                            Title = "Maximum retail price on rice varieties"
+                        },
+                        new
+                        {
+                            Id = new Guid("a1f1c001-0000-0000-0000-000000000006"),
+                            CreatedAtUtc = new DateTime(2026, 6, 30, 0, 0, 0, 0, DateTimeKind.Utc),
+                            Description = "Continued subsidised fertiliser distribution to paddy farmers for the 2023/24 Maha season, supporting normalised yields; still in effect.",
+                            Direction = -1,
+                            EffectiveFrom = new DateTime(2023, 10, 1, 0, 0, 0, 0, DateTimeKind.Unspecified),
+                            PolicyType = 5,
+                            Source = "Ministry of Agriculture, Sri Lanka",
+                            Title = "Fertiliser subsidy scheme continuation (2023/24)"
+                        });
+                });
+
             modelBuilder.Entity("AgriForecast.Domain.Entities.User", b =>
                 {
                     b.Property<Guid>("Id")

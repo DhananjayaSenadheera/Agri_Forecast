@@ -2,7 +2,7 @@ namespace AgriForecast.Application.Requests.Crop.DTOs;
 
 public class Crop_GetDto
 {
-    public Guid Id { get; private set; }
+    public Guid Id { get; set; }
     public string Name { get; set; } = string.Empty;
     public int? ExternalProductId { get; set; }
     public string? Source { get; set; }

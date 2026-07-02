@@ -1,6 +1,5 @@
 using AgriForecast.Application.common;
 using AgriForecast.Domain.Interfaces;
-using AutoMapper;
 using MediatR;
 using Microsoft.Extensions.Logging;
 
@@ -9,14 +8,12 @@ namespace AgriForecast.Application.Requests.EcconomicCenter.Commands.Delete;
 public class EcoDeleteCommandHandler : IRequestHandler<EcoDeleteCommand, Result<bool>>
 {
     private readonly IEconimicCenterRepository _econimicCenterRepository;
-    private readonly IMapper _mapper;
     private readonly IUnitofWorkRepository _unitofWorkRepository;
     private readonly ILogger <EcoDeleteCommandHandler> _logger;
 
-    public EcoDeleteCommandHandler(IEconimicCenterRepository econimicCenterRepository, IMapper mapper, IUnitofWorkRepository unitofWorkRepository, ILogger<EcoDeleteCommandHandler> logger)
+    public EcoDeleteCommandHandler(IEconimicCenterRepository econimicCenterRepository, IUnitofWorkRepository unitofWorkRepository, ILogger<EcoDeleteCommandHandler> logger)
     {
         _econimicCenterRepository = econimicCenterRepository;
-        _mapper = mapper;
         _unitofWorkRepository = unitofWorkRepository;
         _logger = logger;
     }

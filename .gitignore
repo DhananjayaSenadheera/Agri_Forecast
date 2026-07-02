@@ -19,3 +19,10 @@
 # Agent tooling
 .agents/
 run-daily.sh
+
+# Local per-dev override config (F-01). appsettings.json stays TRACKED but
+# secret-free (DefaultConnection = ""); the real DB password lives ONLY in
+# user-secrets (dev) or the ConnectionStrings__DefaultConnection env var (prod).
+# Only the local override file is ignored; its .example template stays tracked.
+**/appsettings.Development.json
+!**/appsettings.Development.example.json

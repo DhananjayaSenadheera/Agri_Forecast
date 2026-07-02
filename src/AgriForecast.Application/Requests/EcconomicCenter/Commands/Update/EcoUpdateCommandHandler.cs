@@ -1,6 +1,6 @@
 using AgriForecast.Application.common;
+using AgriForecast.Application.Mapper;
 using AgriForecast.Domain.Interfaces;
-using AutoMapper;
 using MediatR;
 using Microsoft.Extensions.Logging;
 
@@ -10,14 +10,12 @@ public class EcoUpdateCommandHandler : IRequestHandler<EcoUpdateCommand, Result<
 {
     private readonly IEconimicCenterRepository _econimicCenterRepository;
     private readonly IUnitofWorkRepository _unitOfWork;
-    private readonly IMapper _mapper;
     private readonly ILogger<EcoUpdateCommandHandler> _logger;
 
-    public EcoUpdateCommandHandler(IEconimicCenterRepository econimicCenterRepository, IUnitofWorkRepository unitOfWork, IMapper mapper, ILogger<EcoUpdateCommandHandler> logger)
+    public EcoUpdateCommandHandler(IEconimicCenterRepository econimicCenterRepository, IUnitofWorkRepository unitOfWork, ILogger<EcoUpdateCommandHandler> logger)
     {
         _econimicCenterRepository = econimicCenterRepository;
         _unitOfWork = unitOfWork;
-        _mapper = mapper;
         _logger = logger;
     }
     
@@ -35,7 +33,7 @@ public class EcoUpdateCommandHandler : IRequestHandler<EcoUpdateCommand, Result<
             _logger.LogWarning("Economic center with ID {Id} not found.", dto.Id);
             return Result<bool>.Failure("Economic center does not exist.");
         }
-        var eco = _mapper.Map(dto, existingEco);
+        var eco = dto.ApplyTo(existingEco);
         await _econimicCenterRepository.UpdateAsync(eco);
         await _unitOfWork.CommitAsync();
         _logger.LogInformation("Economic center with ID {Id} updated successfully.", dto.Id);

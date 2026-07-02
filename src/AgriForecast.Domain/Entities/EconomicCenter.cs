@@ -9,5 +9,32 @@ public class EconomicCenter
     public string Description { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
-    
+
+    // Factory for economic centers created via the manual CRUD path (Eco_CreateDto).
+    // Encapsulates the private-set Id/Name and the created/updated timestamps that the
+    // old CreateMap<Eco_CreateDto, EconomicCenter> profile populated (Location and
+    // Description were carried by the same-name copy convention). EcoCode is assigned
+    // by the create handler after construction (matches prior behaviour).
+    public static EconomicCenter CreateNew(string name, string location, string description)
+    {
+        return new EconomicCenter
+        {
+            Id = Guid.NewGuid(),
+            Name = name,
+            Location = location,
+            Description = description,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+    }
+
+    // Mutate-in-place update used by the update handler on a tracked entity.
+    // Reproduces CreateMap<Eco_UpdateDto, EconomicCenter> (Name/Location/Description
+    // overwritten unconditionally). UpdatedAt is set by the mapper after this call.
+    public void ApplyUpdate(string name, string location, string description)
+    {
+        Name = name;
+        Location = location;
+        Description = description;
+    }
 }

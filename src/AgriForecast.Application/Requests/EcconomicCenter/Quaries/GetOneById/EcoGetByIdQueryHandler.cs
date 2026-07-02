@@ -1,7 +1,7 @@
 using AgriForecast.Application.common;
+using AgriForecast.Application.Mapper;
 using AgriForecast.Application.Requests.EcconomicCenter.DTOs;
 using AgriForecast.Domain.Interfaces;
-using AutoMapper;
 using MediatR;
 using Microsoft.Extensions.Logging;
 
@@ -10,13 +10,11 @@ namespace AgriForecast.Application.Requests.EcconomicCenter.Quaries.GetOneById;
 public class EcoGetByIdQueryHandler : IRequestHandler<EcoGetByIdQuery, Result<Eco_GetDto>>
 {
     private readonly IEconimicCenterRepository _econimicCenterRepository;
-    private readonly IMapper _mapper;
     private readonly ILogger<EcoGetByIdQueryHandler> _loger;
 
-    public EcoGetByIdQueryHandler(IEconimicCenterRepository econimicCenterRepository, IMapper mapper, ILogger<EcoGetByIdQueryHandler> loger)
+    public EcoGetByIdQueryHandler(IEconimicCenterRepository econimicCenterRepository, ILogger<EcoGetByIdQueryHandler> loger)
     {
         _econimicCenterRepository = econimicCenterRepository;
-        _mapper = mapper;
         _loger = loger;
     }
     
@@ -29,7 +27,7 @@ public class EcoGetByIdQueryHandler : IRequestHandler<EcoGetByIdQuery, Result<Ec
             return Result<Eco_GetDto>.Failure("Economic center does not exist");
         }
         
-        var ecoDto = _mapper.Map<Eco_GetDto>(exsitingEco);
+        var ecoDto = exsitingEco.ToGetDto();
         _loger.LogInformation("Economic center with ID {Id} retrieved successfully.", request.Guid);
         return Result<Eco_GetDto>.Success(ecoDto);
     }
