@@ -205,6 +205,24 @@ def main() -> None:
         log.error("QA FAILED: %s", exc)
         sys.exit(2)
 
+    # Step 4b: PriceObservations-scoped data-quality checks (R1.1 P1 Step 5,
+    # ClickUp 86cahef64). assert_no_source_duplicates is a hard-fail check
+    # (mirrors qa.assert_no_source_duplicates above, scoped to
+    # PriceObservations rather than the legacy MarketPrices table) — it must
+    # run every ingestion pass, not just be available to call manually.
+    # gap_report()/flag_price_outliers() are intentionally NOT called here:
+    # per their own contracts they return structured findings for manual
+    # ack / are meant to be run as a separate post-ingestion pass, not gate
+    # this pipeline's exit code.
+    from agriforecast_ml.data_quality import assert_no_source_duplicates
+    log.info("Step 4b: Running PriceObservations cross-source duplicate check...")
+    try:
+        n_checked = assert_no_source_duplicates(eng)
+        log.info("PriceObservations duplicate check PASSED — %d triples checked", n_checked)
+    except AssertionError as exc:
+        log.error("PriceObservations duplicate check FAILED: %s", exc)
+        sys.exit(2)
+
     print("\nPipeline summary:")
     print(f"  PDFs processed : {len(cached_pdfs)}")
     print(f"  Parsed rows    : {len(parsed_rows)}")

@@ -94,6 +94,27 @@ UNIT CONTRACT (R1.1 P1 Stage B):
   is a verified constant of that source (true here) or a per-row confirmed
   conversion. MinPrice/MaxPrice are already the LKR/kg figures HARTI
   publishes, so no numeric conversion is applied (factor 1.0).
+
+QUARANTINE HOLDS ARE STICKY-DOWN ACROSS RE-INGEST (R1.1 P1 Step 5,
+ClickUp 86cahef64): IsUnitConfirmed=0 set by data_quality.flag_price_outliers()
+or by this loader's own min>max quarantine (see data_quality.validate_price_row)
+is a ONE-WAY gate with respect to routine re-ingestion. upsert_harti_price_
+observations() is designed to be re-run repeatedly (ingest_harti.py
+--no-download re-parses the whole cache every time it runs) and is
+idempotent on every OTHER column — but IsUnitConfirmed must NOT be
+"idempotent" in the naive sense of "just re-write whatever the fresh parse
+says," because a fresh, clean re-parse of an already-held row always
+computes IsUnitConfirmed=1 (validation.hold=False for a normal min<=max
+row), which would silently erase the hold the very next time this loader
+runs — defeating flag_price_outliers()'s entire quarantine mechanism. The
+UPDATE branch therefore uses
+  IsUnitConfirmed = CASE WHEN IsUnitConfirmed = 0 THEN 0 ELSE :is_unit_confirmed END
+i.e. already-0 (held) stays 0 regardless of what this run's row computes;
+already-1 (not held) takes the incoming value normally, so a newly-detected
+min>max on a previously-clean row can still transition 1 -> 0 in the same
+write. The ONLY sanctioned way to release an existing hold is
+data_quality.clear_outlier_hold() (explicit, single-row, parameterized,
+never a bulk/incidental side effect of re-ingesting).
 """
 from __future__ import annotations
 
@@ -110,6 +131,7 @@ from ..canonical import (
     HARTI_UNIT_RAW,
     CommodityAliasResolver,
 )
+from ..data_quality import validate_price_row
 from ..db import get_engine
 from .parser import ParsedPrice
 
@@ -648,16 +670,30 @@ def upsert_harti_price_observations(
             counters["skipped_no_market"] += 1
             continue
 
-        if pr.min_price <= 0 or pr.max_price <= 0:
-            logger.debug(
-                "[%s] %s/%s: invalid price (min=%.2f max=%.2f) — skipping",
-                pr.date_str, pr.market_name, pr.harti_label, pr.min_price, pr.max_price,
-            )
+        observed_date = date.fromisoformat(pr.date_str)
+
+        # Shared, source-agnostic row validator (R1.1 P1 Step 5,
+        # data_quality.validate_price_row) — non-positive price is
+        # REJECTED (row not written at all); min>max is QUARANTINED
+        # (written with IsUnitConfirmed=0, never silently swapped). See
+        # data_quality.py module docstring Sections 1-2 for full rationale
+        # and why this differs from the parser's own upstream lo/hi swap.
+        validation = validate_price_row(
+            min_price=pr.min_price,
+            max_price=pr.max_price,
+            source=SOURCE,
+            crop_label=pr.harti_label,
+            observed_date=observed_date,
+            market_name=pr.market_name,
+        )
+        if validation.reject:
+            logger.warning(validation.message)
             counters["skipped_invalid_price"] += 1
             continue
+        if validation.hold:
+            logger.warning(validation.message)
 
         market_id = market_map[pr.market_name]
-        observed_date = date.fromisoformat(pr.date_str)
         as_of_utc = _resolve_as_of_utc(pr.pdf_creation_date_raw, observed_date)
 
         # Canonical crop resolution (R1.1 P1 Stage B): resolve via active
@@ -688,7 +724,13 @@ def upsert_harti_price_observations(
             "as_of_utc": as_of_utc,
             "unit_raw": HARTI_UNIT_RAW,
             "unit_conversion_factor": HARTI_UNIT_CONVERSION_FACTOR,
-            "is_unit_confirmed": True,
+            # HARTI's own unit is a verified corpus-wide constant (see
+            # canonical.py's fail-closed contract), so this would normally
+            # always be True — EXCEPT a min>max hold from validate_price_row
+            # above forces it to False (quarantine), overriding the source's
+            # own unit-confirmation status. Ambiguous-price rows must not
+            # reach the feature layer regardless of unit confidence.
+            "is_unit_confirmed": not validation.hold,
         })
 
     logger.info(
@@ -745,6 +787,31 @@ def upsert_harti_price_observations(
                 # overwrites an already-assigned CropId (mirrors the .NET
                 # AssignCrop no-silent-re-map contract) -- it can only move
                 # NULL -> resolved, exactly like heal_price_observation_crops().
+                #
+                # IsUnitConfirmed is STICKY-DOWN, never silently raised back
+                # up by a routine re-ingest (R1.1 P1 Step 5 reviewer finding,
+                # ClickUp 86cahef64): a hold set by flag_price_outliers() or
+                # a prior min>max quarantine (IsUnitConfirmed=0) must survive
+                # re-running this upsert with the SAME clean parsed row --
+                # ingest_harti.py is designed to be re-run routinely
+                # (--no-download re-parses is idempotent), and a naive
+                # unconditional SET would silently erase the hold the moment
+                # the same row is re-parsed clean (validation.hold=False ->
+                # is_unit_confirmed=True), defeating the entire quarantine
+                # mechanism. The CASE below is a one-way ratchet:
+                #   - already 0 (held)      -> stays 0, no matter what the
+                #                              incoming row's own flag says.
+                #   - currently 1 (cleared) -> takes the incoming value, so
+                #                              a genuinely ambiguous re-parse
+                #                              (validation.hold=True, e.g. a
+                #                              layout regression that starts
+                #                              emitting min>max) can still
+                #                              LOWER 1 -> 0 on this same
+                #                              write -- only RAISING 0 -> 1
+                #                              is blocked here.
+                # The only way to release an existing hold is the explicit,
+                # single-row, parameterized data_quality.clear_outlier_hold()
+                # -- never an incidental side effect of re-ingesting.
                 conn.execute(
                     sa.text(
                         """UPDATE PriceObservations
@@ -756,7 +823,10 @@ def upsert_harti_price_observations(
                                CropId = COALESCE(CropId, :crop_id),
                                UnitRaw = :unit_raw,
                                UnitConversionFactor = :unit_conversion_factor,
-                               IsUnitConfirmed = :is_unit_confirmed
+                               IsUnitConfirmed = CASE
+                                   WHEN IsUnitConfirmed = 0 THEN 0
+                                   ELSE :is_unit_confirmed
+                               END
                            WHERE CONVERT(varchar(36), MarketId) = :market_id
                              AND ExternalCommodityName = :ext_commodity_name
                              AND ExternalCommodityId IS NULL
