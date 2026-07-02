@@ -49,14 +49,20 @@ CROP MAP:
   "Luffa"               → "Ridge Gourd"
   "Snake Gourd"         → "Snake Gourd"
 
-MARKET MAP (R1.1 P1):
-  parser.ParsedPrice.market_name values ("Dambulla", "Pettah", "Narahenpita")
-  are resolved against the DB Markets dimension BY NAME (never a hardcoded
-  GUID) — see _build_market_map().  Seeded rows (migration
-  AddMultiMarketAndPointInTimeData): Dambulla Dedicated Economic Centre
-  (MKT00000001), "Pettah (HARTI wholesale)" (MKT00000004), "Narahenpita
-  (HARTI retail)" (MKT00000005).  A parsed market_name that does not
-  resolve is WARN-skipped, never invented.
+MARKET MAP (R1.1 P1 + R1.1 P2):
+  parser.ParsedPrice.market_name values ("Dambulla", "Pettah", "Narahenpita",
+  "Thambuttegama", "Keppetipola") are resolved against the DB Markets
+  dimension BY NAME (never a hardcoded GUID) — see _build_market_map().
+  Seeded rows (migration AddMultiMarketAndPointInTimeData): Dambulla
+  Dedicated Economic Centre (MKT00000001), Keppetipola Dedicated Economic
+  Centre (MKT00000002), Thambuttegama Dedicated Economic Centre
+  (MKT00000003), "Pettah (HARTI wholesale)" (MKT00000004), "Narahenpita
+  (HARTI retail)" (MKT00000005).  Note Keppetipola/Thambuttegama use their
+  plain DEC name (same pattern as Dambulla) — unlike Pettah/Narahenpita they
+  do NOT carry a "(HARTI wholesale/retail)" suffix, because (like Dambulla)
+  they are seeded as their own first-class DEC market rows, not
+  HARTI-only aliases of a market that also has other sources. A parsed
+  market_name that does not resolve is WARN-skipped, never invented.
 
 PRICE COLUMNS (PriceObservations):
   HARTI rows ALWAYS populate MinPrice/MaxPrice and ALWAYS leave
@@ -101,10 +107,22 @@ _HARTI_PRODUCT_IDS: dict[str, int] = {
 # exact Markets.Name string seeded by the AddMultiMarketAndPointInTimeData
 # migration. Resolution happens BY NAME via a DB query in _build_market_map()
 # — GUIDs are never hardcoded here.
+#
+# Thambuttegama / Keppetipola (ClickUp 86cahef44, R1.1 P2): DB names verified
+# live against the Markets table (MKT00000002 / MKT00000003) — "Thambuttegama
+# Dedicated Economic Centre" / "Keppetipola Dedicated Economic Centre". Note
+# these DB names differ in spelling from the parser's canonical market_name
+# keys and from HARTI's own PDF header text (parser key "Thambuttegama" [one
+# fewer "th" than HARTI's PDF spelling "Thambuththegama"] matches the DB
+# row's spelling, which was seeded independently of HARTI's bulletin text) —
+# this dict is exactly the name-alias mapping that bridges that spelling gap,
+# same role it already plays for Pettah->"Peliyagoda"-family HARTI headers.
 _PARSER_MARKET_TO_DB_NAME: dict[str, str] = {
     "Dambulla":     "Dambulla Dedicated Economic Centre",
     "Pettah":       "Pettah (HARTI wholesale)",
     "Narahenpita":  "Narahenpita (HARTI retail)",
+    "Thambuttegama": "Thambuttegama Dedicated Economic Centre",
+    "Keppetipola":  "Keppetipola Dedicated Economic Centre",
 }
 
 # --------------------------------------------------------------------------

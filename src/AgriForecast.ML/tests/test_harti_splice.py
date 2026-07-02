@@ -477,19 +477,51 @@ class TestParserOnCachedPDF:
         return [r for r in self._parse() if r.market_name == "Dambulla"]
 
     def test_six_crops_returned(self):
-        """parse_pdf() now emits rows for every locatable target market
-        (Dambulla + Pettah for this PDF; Narahenpita's header is not present
-        in 2019-format bulletins and is WARN-skipped) -- 6 crops x 2 markets."""
+        """parse_pdf() now emits rows for every locatable target market with
+        actual price data (Dambulla + Pettah + Thambuttegama for this PDF).
+        Narahenpita's header is not present in 2019-format bulletins and is
+        WARN-skipped. Keppetipola's header IS present in this PDF (9-column
+        format, "a Kappetipola" cell-split spelling) and its column IS
+        located, but every crop's Keppetipola cell is '-' (market closed /
+        no data that day) so it legitimately emits zero rows -- a located
+        column with no data is a different, expected case from a
+        not-located column (see test_keppetipola_column_located_but_empty_
+        this_pdf below) -- 6 crops x 3 markets-with-data."""
         rows = self._parse()
         labels = [r.harti_label for r in rows]
-        assert len(rows) == 12, (
-            "Expected 12 rows (6 crops x 2 locatable markets) from 2019-01-01 "
+        assert len(rows) == 18, (
+            "Expected 18 rows (6 crops x 3 markets with data) from 2019-01-01 "
             "PDF, got %d: %s" % (len(rows), labels)
         )
         markets = {r.market_name for r in rows}
-        assert markets == {"Dambulla", "Pettah"}, (
-            "Expected only Dambulla+Pettah markets (Narahenpita header absent "
-            "in this PDF format), got %s" % markets
+        assert markets == {"Dambulla", "Pettah", "Thambuttegama"}, (
+            "Expected Dambulla+Pettah+Thambuttegama markets (Narahenpita header "
+            "absent in this PDF format; Keppetipola column located but empty "
+            "for every crop that day), got %s" % markets
+        )
+
+    def test_keppetipola_column_located_but_empty_this_pdf(self):
+        """R1.1 P2 regression: Keppetipola's header IS present and located in
+        this PDF (9-column format) but every crop cell in that column is '-'
+        (market closed) -- proves the distinction between 'column not
+        located' (WARN, market absent from output) and 'column located but
+        every cell empty' (no WARN needed, market absent from output for a
+        different, legitimate reason: no data that day, not a layout miss)."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            import pdfplumber
+            from agriforecast_ml.harti.parser import _find_english_veg_page, _locate_market_column
+            with pdfplumber.open(str(SAMPLE_PDF)) as pdf:
+                _, table = _find_english_veg_page(pdf)
+        col = _locate_market_column(table, "Keppetipola")
+        assert col is not None, "Keppetipola header should be located (9-column format)"
+        assert col == 7
+
+        rows = self._parse()
+        assert "Keppetipola" not in {r.market_name for r in rows}, (
+            "Keppetipola column is located but has no price data in this "
+            "specific PDF -- must emit zero rows for it, not fabricate data"
         )
 
     def test_dambulla_six_crops_returned(self):

@@ -81,10 +81,52 @@ _SINGLE_RE = re.compile(r"^([\d,]+(?:\.\d+)?)$")
 # "Peliyagod" (missing trailing 'a', seen 2026-02-17).  If a market's header
 # text drifts to something NOT in this list, that is a hard skip (WARN) --
 # no positional fallback is ever taken (risk R1, PRD  2.6).
+#
+# Thambuttegama / Keppetipola (ClickUp 86cahef44, R1.1 P2) -- both header-
+# text-verified across a stratified sample spanning the full corpus
+# (harti_multimarket_audit.md Sec 8):
+#   Thambuttegama column exists from the very start of the corpus
+#   (2015-06-22, the 7-column format already carries "Thambuththegama").
+#   Observed header spellings over 11 years:
+#     "Thambuththegama"  -- 2015-2016 and again 2025-02 onward (clean format)
+#     "T'thegama"         -- 2017-03-08 .. 2017-04-06 only (abbreviated format)
+#     "Thambuththegam"    -- 2019-01-01 (a pdfplumber cell-split artifact;
+#                             the trailing "a" bleeds into the NEXT cell,
+#                             e.g. "a Kappetipola")
+#     "hambuththegam"     -- 2022-06 .. 2024-04 (the leading "T" bleeds
+#                             BACKWARD into the Norochchole cell, producing
+#                             "NorochcholeT" -- a genuine pdfplumber
+#                             table-extraction artifact from missing cell
+#                             borders in that era's PDF export, not a HARTI
+#                             relabelling)
+#   Keppetipola's column is NOT present in the original 7-column format --
+#   it is introduced between 2017-03-07 (last observed 7-column PDF) and
+#   2017-03-08 (first observed 9-column PDF with a Keppetipola column).
+#   Observed header spellings:
+#     "Kappetipola"   -- 2017-03-08 .. 2022-06-16 (missing leading "e")
+#     "aKappetipola"  -- 2022-06-02 .. 2022-06-16 (cell-bleed variant of the
+#                         above, "a" bled in from the Thambuttegama cell)
+#     "aKeppetipola"  -- 2023-07-21 .. 2024-04-28 (cell-bleed variant, HARTI
+#                         corrected the spelling to "Keppetipola" but the
+#                         bleed-through "a" persists)
+#     "Keppetipola"   -- 2025-02-02 onward (clean, corrected spelling)
+#   Substring-safety verified (script-checked, not just by inspection): none
+#   of these new aliases is a substring of any Dambulla/Pettah/Narahenpita
+#   alias or of any OTHER market's header text in this bulletin (Kandy,
+#   Meegoda, Norochchole/NorochcholeT, Nuwaraeliya, Bandarawela, Veyangoda)
+#   -- only intra-market substring relationships exist (e.g. "Kappetipola"
+#   is a substring of "aKappetipola", both mapping to the same market),
+#   which is safe by construction.
 _MARKET_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "Dambulla":     ("Dambulla",),
     "Pettah":       ("Pettah", "Peliyagoda", "Peliyagod"),
     "Narahenpita":  ("Narahenpita",),
+    "Thambuttegama": (
+        "Thambuththegama", "T'thegama", "Thambuththegam", "hambuththegam",
+    ),
+    "Keppetipola": (
+        "Kappetipola", "Keppetipola", "aKappetipola", "aKeppetipola",
+    ),
 }
 
 # Header text that marks an arrivals/volume column, if the bulletin ever
@@ -240,13 +282,18 @@ def _parse_arrivals_cell(cell: object) -> float | None:
 
 # Markets extracted from every PDF, in emission order.  Dambulla stays first
 # so existing per-PDF ordering (and the Dambulla-only splice/loader path) is
-# unaffected by the new markets appended after it.
-_TARGET_MARKETS: tuple[str, ...] = ("Dambulla", "Pettah", "Narahenpita")
+# unaffected by the new markets appended after it.  Thambuttegama and
+# Keppetipola (ClickUp 86cahef44, R1.1 P2) are appended after the R1.1 P1
+# trio for the same reason -- existing ordering/back-compat is preserved.
+_TARGET_MARKETS: tuple[str, ...] = (
+    "Dambulla", "Pettah", "Narahenpita", "Thambuttegama", "Keppetipola",
+)
 
 
 def parse_pdf(pdf_path: Path, date_str: str) -> list[ParsedPrice]:
     """Parse one HARTI PDF, return a list of ParsedPrice for target crops
-    across all locatable target markets (Dambulla, Pettah, Narahenpita).
+    across all locatable target markets (Dambulla, Pettah, Narahenpita,
+    Thambuttegama, Keppetipola).
 
     Market-closed rows (cell == "-") are NOT returned — the caller should
     treat absence as a market-closed / no-data signal, consistent with the

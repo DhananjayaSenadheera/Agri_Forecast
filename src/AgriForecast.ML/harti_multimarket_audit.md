@@ -359,3 +359,201 @@ passed + the same 17 flakes). Net new passing tests from this task: **45**
 (42 in the new file + 3 net additions in the extended splice file, after
 accounting for 2 assertions that were corrected rather than merely added
 to).
+
+---
+
+## 8. R1.1 P2 (ClickUp 86cahef44) — Thambuttegama and Keppetipola added
+
+**Date of this extension:** 2026-07-02 (same day, follow-up task).
+**Scope:** implement the HARTI-PDF fallback recommendation from
+`DEC_portal_probe_2026-07.md` — wire Thambuttegama and Keppetipola into
+`_TARGET_MARKETS` / `_MARKET_HEADER_ALIASES` (`parser.py`) and
+`_PARSER_MARKET_TO_DB_NAME` (`loader.py`), extend test coverage, and confirm
+against the live DB.
+
+### 8.1 DB name verification (live query)
+
+Queried the live `Markets` table directly (creds via
+`src/AgriForecast.ML/.env`) rather than assuming the migration file is
+still what's actually deployed:
+
+```
+Id=b2a20001-...-000000000002  MarketCode=MKT00000002  Name='Keppetipola Dedicated Economic Centre'   District='Badulla'       MarketType=2  IsActive=True
+Id=b2a20001-...-000000000003  MarketCode=MKT00000003  Name='Thambuttegama Dedicated Economic Centre'  District='Anuradhapura'  MarketType=2  IsActive=True
+```
+
+Both rows use their plain DEC name (no `"(HARTI wholesale)"`-style suffix,
+matching Dambulla's own pattern — they are first-class DEC markets, not
+HARTI-only aliases of a market with other sources) — confirmed and pinned
+in `loader._PARSER_MARKET_TO_DB_NAME` and a dedicated regression test
+(`test_seeded_market_names_for_new_markets_match_migration`).
+
+### 8.2 Header alias evidence — spelling variants across the corpus
+
+Re-scanned the raw header row (`table[1]`) of all 28 PDFs in the original
+stratified sample (§3) plus a handful of extra binary-search PDFs used to
+pin the exact Keppetipola introduction date. Findings:
+
+**Thambuttegama** — column exists in the table from the very first cached
+PDF (`harti_2015-06-22.pdf`, the original 7-column format). Observed
+spellings over 11 years, all now in `_MARKET_HEADER_ALIASES["Thambuttegama"]`:
+
+| Spelling | Observed window (sample) |
+|---|---|
+| `Thambuththegama` | 2015-06-22 → (at least) 2017-01-31, then again 2025-02-02 → 2026-06-25 |
+| `T'thegama` | 2017-03-08 → 2017-04-06 only (abbreviated header format) |
+| `Thambuththegam` | 2019-01-01 (cell-split artifact: the trailing "a" bleeds into the NEXT cell, producing "a Kappetipola") |
+| `hambuththegam` | 2022-06-02 → 2024-04-28 (cell-bleed artifact: the leading "T" bleeds BACKWARD into the Norochchole cell, producing "NorochcholeT" — a pdfplumber table-extraction quirk from missing cell borders in that era's PDF export, not a HARTI relabelling) |
+
+**Keppetipola** — column does NOT exist in the original 7-column format.
+Binary-searched the exact introduction date using cached PDFs:
+`harti_2017-03-01.pdf` (7 columns, no Keppetipola) →
+`harti_2017-03-07.pdf` (7 columns, no Keppetipola) →
+**`harti_2017-03-08.pdf` (9 columns, "Kappetipola" present)**. So the
+column is introduced precisely between **2017-03-07 and 2017-03-08**.
+Observed spellings from that point on, all now in
+`_MARKET_HEADER_ALIASES["Keppetipola"]`:
+
+| Spelling | Observed window (sample) |
+|---|---|
+| `Kappetipola` | 2017-03-08 → 2022-06-16 (missing leading "e" — this was HARTI's own spelling for ~5 years, not a parse error) |
+| `aKappetipola` | 2022-06-02 → 2022-06-16 (cell-bleed variant of the above; the "a" bled in from the Thambuttegama cell, same NorochcholeT-family artifact) |
+| `aKeppetipola` | 2023-07-21 → 2024-04-28 (cell-bleed variant; HARTI corrected the spelling to "Keppetipola" mid-corpus but the bleed-through "a" persisted) |
+| `Keppetipola` | 2025-02-02 → 2026-06-25 (clean, corrected spelling, bleed artifact gone) |
+
+### 8.3 Substring-safety verification
+
+Re-ran the pairwise substring-safety script (same method as the original
+probe) across the FULL alias set (existing + new) and against every other
+market's header text seen in the bulletin (`Kandy`, `Meegoda`,
+`Norochchole`/`NorochcholeT`, `Nuwaraeliya`, `Bandarawela`, `Veyangoda`):
+
+- **Zero cross-market collisions.** Every substring relationship found is
+  within the same market's own alias family (e.g. `"Kappetipola"` is a
+  substring of `"aKappetipola"` — both map to Keppetipola, which is safe by
+  construction since `_locate_market_column` only needs ONE alias per
+  market to hit).
+- No new alias matches any non-target market header (`Kandy`, `Meegoda`,
+  `Norochchole`, `NorochcholeT`, `Nuwaraeliya`, `Bandarawela`, `Veyangoda`).
+- This is now a permanent regression test
+  (`test_no_new_alias_is_substring_of_a_different_markets_alias`,
+  `test_new_aliases_do_not_match_other_bulletin_headers` in
+  `test_harti_multimarket.py`), not just a one-off check.
+
+### 8.4 28-PDF stratified sample re-run (same PDFs as §3) — per-market row counts
+
+Re-ran the exact same 28-PDF sample through the extended `parse_pdf()`:
+
+| Market | Total rows (28-PDF sample) | Notes |
+|---|---|---|
+| Dambulla | 162 (6/PDF × 27 parseable PDFs) | unchanged from §3 |
+| Pettah | 162 (6/PDF × 27 parseable PDFs) | unchanged from §3 |
+| Narahenpita | 0 | unchanged — column absent corpus-wide (§1/§2) |
+| **Thambuttegama** | **162** (6/PDF × 27 parseable PDFs) | **full 6/6 crop coverage on every single sampled PDF** — this market has data for every target crop whenever its column exists |
+| **Keppetipola** | **36** (2/PDF on 18 of 27 PDFs, 0/PDF on 9 PDFs — see below) | column located from 2017-03-08 onward, but only **Beans** and **Capsicum** consistently carry price data in this 28-PDF sample; the other 4 target crops (Ladies Fingers, Bitter Gourd, Snake Gourd, Luffa) show `-` (market closed / no data) at Keppetipola on every sampled date, including in the pre-2017 PDFs where the column doesn't exist at all |
+
+`harti_2022-11-26.pdf` still contributes 0 rows to every market (the
+pre-existing, unrelated "No English veg page found" issue from §4 — not
+touched by this change).
+
+**Important distinction proven by this re-run (and now test-covered, see
+§8.6):** a market's column can be **located but empty** (Keppetipola on
+most crops/dates: header found, cell is `-`) versus **not located at all**
+(Keppetipola on any pre-2017-03-08 PDF: header genuinely absent). Both
+correctly produce zero output rows for that (market, crop, date), but only
+the second logs a WARN — the first is legitimate "market closed that day,"
+not a parsing failure, and does not need a WARN (mirrors the existing
+zero-price/`-`-cell handling for every other market).
+
+### 8.5 Hand spot-checks — 4 total, 2 per new market, different years
+
+**Thambuttegama — 2015 (7-column format) vs 2026 (10-column format):**
+
+`harti_2015-06-22.pdf`, header `[..., 'Dambulla\nMarket', 'Meegoda\nMarket', 'Norochchole\nMarket', 'Thambuththegama\nMarket']` → Thambuttegama col **6**:
+```
+Beans raw row:     [..., '190.00 - 210.00' (Dambulla, col 3), ..., '210.00 - 220.00' (Thambuttegama, col 6)]
+Capsicum raw row:  [..., '160.00 - 180.00' (Dambulla, col 3), ..., '170.00 - 190.00' (Thambuttegama, col 6)]
+```
+Parsed: `Thambuttegama/Beans (210.0, 220.0)`, `Thambuttegama/Capsicum (170.0, 190.0)`. **Match: exact.** Both differ from Dambulla's own values in the same row — no column swap.
+
+`harti_2026-06-24.pdf`, header `[..., 'Dambulla\nMarket', 'Meegoda\nMarket', 'Norochchole\nMarket', 'Thambuththegama\nMarket', 'Keppetipola\nMarket', ...]` → Thambuttegama col **6**:
+```
+Beans raw row:     [..., '350- 400' (Dambulla, col 3), ..., '400 - 480' (Thambuttegama, col 6), '380- 420' (Keppetipola, col 7), ...]
+Capsicum raw row:  [..., '280- 320' (Dambulla, col 3), ..., '280 - 350' (Thambuttegama, col 6), '250- 300' (Keppetipola, col 7), ...]
+```
+Parsed: `Thambuttegama/Beans (400.0, 480.0)`, `Thambuttegama/Capsicum (280.0, 350.0)`. **Match: exact.** Distinct from both Dambulla and Keppetipola in the same row.
+
+**Keppetipola — 2017 (first appearance, "Kappetipola" spelling) vs 2026 (clean "Keppetipola" spelling):**
+
+`harti_2017-03-27.pdf`, header `[..., 'Dambulla\nMarket', 'Meegoda\nMarket', 'Norochchole\nMarket', "T'thegama\nMarket", 'Kappetipola\nMarket', 'Nuwaraeliya\nMarket']` → Keppetipola col **7**:
+```
+Beans raw row:     [..., '130.00 -150.00' (Dambulla, col 3), ..., '150.00 -170.00' (Keppetipola, col 7)]
+Capsicum raw row:  [..., '160.00 -180.00' (Dambulla, col 3), ..., '160.00 -170.00' (Keppetipola, col 7)]
+```
+Parsed: `Keppetipola/Beans (150.0, 170.0)`, `Keppetipola/Capsicum (160.0, 170.0)`. **Match: exact.** Note Capsicum's Dambulla (160-180) and Keppetipola (160-170) overlap but are not identical ranges — correctly read from two distinct cells, not a coincidental swap.
+
+`harti_2026-06-24.pdf` (same PDF as the Thambuttegama 2026 spot-check above), header `[..., 'Thambuththegama\nMarket', 'Keppetipola\nMarket', ...]` → Keppetipola col **7**:
+```
+Beans raw row:     [..., '350- 400' (Dambulla, col 3), '400 - 480' (Thambuttegama, col 6), '380- 420' (Keppetipola, col 7), ...]
+Capsicum raw row:  [..., '280- 320' (Dambulla, col 3), '280 - 350' (Thambuttegama, col 6), '250- 300' (Keppetipola, col 7), ...]
+```
+Parsed: `Keppetipola/Beans (380.0, 420.0)`, `Keppetipola/Capsicum (250.0, 300.0)`. **Match: exact.** All three markets (Dambulla/Thambuttegama/Keppetipola) give three distinct Beans prices and three distinct Capsicum prices from the same row — proves no pairwise column collision on a real, current-format PDF.
+
+### 8.6 Coverage window summary (precise)
+
+| Market | Column exists from | Column exists to (end of corpus) | Crop-level data coverage |
+|---|---|---|---|
+| Thambuttegama | 2015-06-22 (start of cached corpus — may exist earlier, not verifiable from this cache) | 2026-06-27 (end of cached corpus) | **Full — all 6 target crops populated on every sampled PDF** where the column exists (162/162 in the 28-PDF sample) |
+| Keppetipola | 2017-03-08 (pinned exactly: absent 2017-03-07, present 2017-03-08) | 2026-06-27 (end of cached corpus) | **Partial — only Beans and Capsicum consistently populated** in the 28-PDF sample (36 rows = 2 crops × 18 of 27 parseable post-2017 PDFs; the other 4 target crops show `-`/no-data at Keppetipola on every sampled date). This is a genuine market-activity gap (few crops trade through Keppetipola), not a parsing limitation — the column is correctly located every time it exists. |
+
+**Implication for the ML/feature layer:** Keppetipola should be treated as
+thin/cold-start for 4 of the 6 target crops even after this extension — the
+column exists but rarely carries data for Ladies Fingers, Bitter Gourd,
+Snake Gourd, or Luffa in the sample checked here. A full-corpus (not just
+28-PDF sample) crop-level coverage count for Keppetipola would be needed
+before deciding whether to route those crop×market combinations to a
+fallback — flagged here for whoever picks up the feature-store wiring, not
+resolved in this task.
+
+### 8.7 Test coverage added (this extension)
+
+`tests/test_harti_multimarket.py` — extended from 42 to **68 tests**
+(+26 net): `TestColumnOrderShuffle` extended with a 5-market shuffled-table
+case (`test_five_markets_map_to_distinct_columns_regardless_of_order`,
+`test_five_markets_prices_are_pairwise_distinct_no_cross_contamination`);
+new `TestThambuttegamaKeppetipola` class (24 tests) covering every real
+header spelling variant from §8.2 for both markets, substring-safety
+(§8.3) as permanent regression tests, the pre-2017 Keppetipola
+missing-column WARN-skip behaviour via the real `parse_pdf()` entrypoint,
+end-to-end parsing against the current clean 2025-format header, and
+loader market-name resolution (happy path + unresolved-market WARN-skip +
+the live-DB-verified name pin from §8.1).
+
+`tests/test_harti_splice.py` — the real-PDF `TestParserOnCachedPDF` class
+against `harti_2019-01-01.pdf` updated: `test_six_crops_returned` corrected
+from 12 rows (2 markets) to **18 rows (3 markets: Dambulla, Pettah,
+Thambuttegama)** — this specific PDF's Keppetipola column IS located (col
+7, "a Kappetipola" spelling) but every one of the 6 target crops shows `-`
+at that column on 2019-01-01, so it legitimately contributes zero rows;
+added `test_keppetipola_column_located_but_empty_this_pdf` to test-cover
+that exact located-but-empty distinction explicitly. Net: **41 → 42 tests**
+in the file (one existing assertion corrected in place for the new
+expected row/market count, one new test added).
+
+**Full suite after this extension:**
+`.venv/bin/python -m pytest -q` → **260 passed, 17 failed** (same 17
+pre-existing `tests/test_phase3.py` test-isolation flakes, reproduced in
+isolation and confirmed unrelated to HARTI/market code). Net new passing
+tests from this extension: **27** (26 in `test_harti_multimarket.py` + 1
+net in `test_harti_splice.py`), on top of the 233 passing baseline from
+§7 (233 + 27 = 260, matches exactly).
+
+### 8.8 Live-DB sanity check
+
+See the ClickUp task report for the full live-DB upsert/idempotency/cleanup
+run (2-3 real cached PDFs upserted via `upsert_harti_price_observations()`
+against the live SQL Server instance, verified landing under the correct
+new `MarketId`s, re-run for idempotency, then deleted and confirmed
+`PriceObservations` back to the pre-run row count) — not duplicated here to
+avoid this audit file drifting from the actual DB state; the procedure and
+evidence are recorded in the task's own report output.
