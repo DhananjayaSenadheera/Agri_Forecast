@@ -63,12 +63,19 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 builder.Services.AddAuthorization();
 
+// CORS is restricted to the origins listed under "Cors:AllowedOrigins" in
+// configuration (set per environment; see appsettings.Development.json).
+// Fail-closed: an empty/missing list means no cross-origin access at all —
+// never fall back to AllowAnyOrigin (security fix F-07).
+var corsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
+                  ?? Array.Empty<string>();
+
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowAllOrigins",
+    options.AddPolicy("ConfiguredOrigins",
         policy =>
         {
-            policy.AllowAnyOrigin()
+            policy.WithOrigins(corsOrigins)
                 .AllowAnyMethod()
                 .AllowAnyHeader();
         });
@@ -87,7 +94,7 @@ if (app.Environment.IsDevelopment())
     });
 }
 
-app.UseCors("AllowAllOrigins");
+app.UseCors("ConfiguredOrigins");
 app.MapOpenApi();
 app.UseMiddleware<GlobalExceptionMiddleware>();
 app.UseHttpsRedirection();
