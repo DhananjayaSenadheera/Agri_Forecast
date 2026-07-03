@@ -14,15 +14,133 @@ _MAHA_MONTHS = {10, 11, 12, 1, 2, 3}
 _PLANTING_SEASON_ENC = {"Year-round": 0, "Yala": 1, "Maha": 2}
 _FFILL_LIMIT = 5  # carry a known price across at most 5 non-trading days
 
+# Days-to-next-festival clip cap. Raw unclipped countdown is a slow ramp over the
+# whole inter-festival gap (~months), which would dominate tree splits with a
+# signal that is mostly "how far into the gap are we", not "is a festival near".
+# Clipping to [0, cap] makes the feature ~flat outside the demand-relevant window
+# and monotone inside it (trees are invariant to monotone encodings, so a clipped
+# linear countdown is the right XGBoost encoding -- no buckets/decay needed). Cap
+# is a fixed DOMAIN PRIOR (~a month), deliberately NOT tuned (1-2 events per CV
+# fold => tuning the window boundary is itself leakage; P4 makes it a learned HP).
+_FESTIVAL_CLIP_DAYS = 30
 
-def _is_festival(idx: pd.DatetimeIndex) -> np.ndarray:
-    """Fixed-date major SL festivals that spike food demand. Lunar festivals
-    (Vesak, Ramadan/Eid) vary yearly and are a TODO once a date table exists."""
-    m, d = idx.month, idx.day
-    avurudu = (m == 4) & (d >= 12) & (d <= 15)        # Sinhala & Tamil New Year
-    pongal = (m == 1) & (d >= 14) & (d <= 15)          # Thai Pongal
-    christmas = (m == 12) & (d >= 24) & (d <= 26)
-    return (avurudu | pongal | christmas).astype("int8")
+# The per-festival lead-up WINDOW length is NOT a Python constant: it is read
+# per-row from FestivalCalendarEntries.LeadUpDays (the .NET seed is the single
+# source of truth). This preserves the Avurudu convention -- the Apr 13 row
+# carries LeadUpDays=14 and anchors the window; the Apr 14 row carries
+# LeadUpDays=0 so the demand window is not double-counted. _FESTIVAL_CLIP_DAYS
+# above governs only the observation/harvest COUNTDOWN clip, a separate concern.
+
+# Per-festival lead-up booleans we surface (merged "any" is the primary signal;
+# these two are the highest-volume festivals worth an individual column).
+_LEADUP_FESTIVALS = {"AVURUDU": "InLeadupAvurudu", "CHRISTMAS": "InLeadupChristmas"}
+
+# Every festival feature column this module emits (asserted zero-filled when the
+# calendar is empty, and used by tests as the canonical name list).
+FESTIVAL_FEATURE_COLS = [
+    "HarvestInFestivalLeadup",
+    "DaysFromHarvestToNextFestival",
+    "DaysToNextFestivalAny",
+    "InLeadupAvurudu",
+    "InLeadupChristmas",
+]
+
+
+def _festival_windows(festivals: pd.DataFrame | None):
+    """Precompute, from load_festivals() output, the arrays a pure date->feature
+    lookup needs. Returns (event_dates_sorted, leadup_intervals) where:
+      event_dates_sorted : np.ndarray[datetime64[D]] of every festival Date (for
+                           "days to NEXT festival" -- the event itself, not its
+                           lead-up).
+      leadup_intervals   : dict[str|None, list[(start, end)]] closed windows
+                           [Date - LeadUpDays, Date]; key None = merged "any"
+                           festival, key = FestivalKey for per-festival booleans.
+                           Rows with LeadUpDays<=0 contribute no window (Apr 14).
+    A pure function of the calendar only -- no price data, no wall-clock.
+    """
+    events: list = []
+    windows: dict = {None: []}
+    if festivals is not None and not festivals.empty:
+        for r in festivals.itertuples():
+            d = pd.Timestamp(r.Date).normalize()
+            events.append(np.datetime64(d.date(), "D"))
+            lead = int(r.LeadUpDays)
+            if lead > 0:
+                start = np.datetime64((d - pd.Timedelta(days=lead)).date(), "D")
+                end = np.datetime64(d.date(), "D")
+                windows[None].append((start, end))
+                key = str(r.FestivalKey)
+                if key in _LEADUP_FESTIVALS:
+                    windows.setdefault(key, []).append((start, end))
+    events_arr = np.array(sorted(set(events)), dtype="datetime64[D]")
+    return events_arr, windows
+
+
+def _in_any_window(dates_d: np.ndarray, intervals: list) -> np.ndarray:
+    """Bool mask: is each date inside any closed [start, end] interval."""
+    mask = np.zeros(dates_d.shape[0], dtype=bool)
+    for start, end in intervals:
+        mask |= (dates_d >= start) & (dates_d <= end)
+    return mask
+
+
+def _days_to_next_event(dates_d: np.ndarray, events_arr: np.ndarray,
+                        clip: int) -> np.ndarray:
+    """For each date, whole days until the next festival Date >= it, clipped to
+    [0, clip]. NaN (encoded as clip) when no future event exists in the calendar
+    for that date. Pure: uses only the supplied dates + calendar."""
+    n = dates_d.shape[0]
+    if events_arr.size == 0:
+        return np.full(n, float(clip), dtype="float64")
+    idx = np.searchsorted(events_arr, dates_d, side="left")
+    out = np.full(n, float(clip), dtype="float64")
+    valid = idx < events_arr.size
+    diff = (events_arr[np.clip(idx, 0, events_arr.size - 1)] - dates_d).astype(
+        "timedelta64[D]").astype("float64")
+    out[valid] = diff[valid]
+    np.clip(out, 0.0, float(clip), out=out)
+    return out
+
+
+def _festival_features(observation_dates: pd.Series, harvest_dates: pd.Series,
+                       events_arr: np.ndarray, windows: dict) -> pd.DataFrame:
+    """Build all festival feature columns for aligned observation/harvest dates.
+
+    HARVEST-ANCHORED (load-bearing -- the label is harvest-time price):
+      HarvestInFestivalLeadup       : HarvestDate inside ANY festival lead-up window
+      DaysFromHarvestToNextFestival : clipped countdown from HarvestDate to next event
+    OBSERVATION-ANCHORED (secondary):
+      DaysToNextFestivalAny         : clipped countdown from ObservationDate
+      InLeadupAvurudu / InLeadupChristmas : ObservationDate inside that festival's window
+
+    Pure calendar function: no price aggregates, no now()/today(). NaT harvest
+    dates (crops with no GrowthPeriodDays) get 0 / clip so the columns stay numeric
+    and never NaN-poison the pooled model.
+    """
+    obs_d = pd.to_datetime(observation_dates).values.astype("datetime64[D]")
+    harv = pd.to_datetime(harvest_dates)
+    harv_valid = harv.notna().values
+    harv_d = harv.fillna(observation_dates.iloc[0] if len(observation_dates) else pd.Timestamp("2000-01-01"))
+    harv_d = pd.to_datetime(harv_d).values.astype("datetime64[D]")
+
+    out = pd.DataFrame(index=observation_dates.index)
+
+    # Harvest-anchored
+    h_in_leadup = _in_any_window(harv_d, windows.get(None, []))
+    h_in_leadup = h_in_leadup & harv_valid  # NaT harvest -> not in any window
+    out["HarvestInFestivalLeadup"] = h_in_leadup.astype("int8")
+    h_days = _days_to_next_event(harv_d, events_arr, _FESTIVAL_CLIP_DAYS)
+    h_days[~harv_valid] = float(_FESTIVAL_CLIP_DAYS)  # unknown harvest -> "far"
+    out["DaysFromHarvestToNextFestival"] = h_days
+
+    # Observation-anchored
+    out["DaysToNextFestivalAny"] = _days_to_next_event(obs_d, events_arr,
+                                                       _FESTIVAL_CLIP_DAYS)
+    out["InLeadupAvurudu"] = _in_any_window(
+        obs_d, windows.get("AVURUDU", [])).astype("int8")
+    out["InLeadupChristmas"] = _in_any_window(
+        obs_d, windows.get("CHRISTMAS", [])).astype("int8")
+    return out[FESTIVAL_FEATURE_COLS]
 
 
 def _weather_lookups(weather: pd.DataFrame):
@@ -74,7 +192,10 @@ def build_crop_features(crop_id, group: pd.DataFrame, meta: pd.Series,
     out["SinDoy"] = np.sin(2 * np.pi * doy / 365.25)
     out["CosDoy"] = np.cos(2 * np.pi * doy / 365.25)
     out["SeasonMaha"] = idx.month.isin(_MAHA_MONTHS).astype("int8")
-    out["IsFestival"] = _is_festival(idx)
+    # Festival features are attached in build_all() from the DB calendar
+    # (load_festivals) -- a national point-in-time signal, not derived here from
+    # hardcoded dates. The old _is_festival() month/day heuristic was deleted so
+    # there is only ONE festival definition (the seed table).
 
     # --- 4. Weather (point-in-time: use the LAST COMPLETE month, i.e. M-1) ---
     obs_period = idx.to_period("M")
@@ -240,10 +361,36 @@ def _attach_policy(result: pd.DataFrame, policy: pd.DataFrame | None) -> pd.Data
     return out
 
 
+def _attach_festivals(result: pd.DataFrame,
+                      festivals: pd.DataFrame | None) -> pd.DataFrame:
+    """National festival features from the DB calendar (load_festivals()).
+
+    Harvest-anchored + observation-anchored columns (see _festival_features).
+    National signal -> identical across crops for a given (ObservationDate,
+    HarvestDate). Empty/missing calendar -> every festival column zero-filled
+    (there is genuinely no festival signal, so 0 is correct, not NaN). Pure
+    calendar function: no now()/today(), no price aggregates.
+    """
+    events_arr, windows = _festival_windows(festivals)
+    if events_arr.size == 0:
+        for col in FESTIVAL_FEATURE_COLS:
+            if col == "DaysToNextFestivalAny" or col == "DaysFromHarvestToNextFestival":
+                result[col] = float(_FESTIVAL_CLIP_DAYS)
+            else:
+                result[col] = np.int8(0)
+        return result
+    feats = _festival_features(result["ObservationDate"], result["HarvestDate"],
+                               events_arr, windows)
+    for col in FESTIVAL_FEATURE_COLS:
+        result[col] = feats[col].values
+    return result
+
+
 def build_all(prices: pd.DataFrame, crops: pd.DataFrame, weather: pd.DataFrame,
               fx: pd.DataFrame | None = None,
               sentiment: pd.DataFrame | None = None,
-              policy: pd.DataFrame | None = None) -> pd.DataFrame:
+              policy: pd.DataFrame | None = None,
+              festivals: pd.DataFrame | None = None) -> pd.DataFrame:
     weather_by_month, rain_clim = _weather_lookups(weather)
     meta_by_crop = crops.set_index("CropId")
     frames = []
@@ -258,4 +405,5 @@ def build_all(prices: pd.DataFrame, crops: pd.DataFrame, weather: pd.DataFrame,
     result = _attach_fx(result, fx)
     result = _attach_sentiment(result, sentiment)
     result = _attach_policy(result, policy)
+    result = _attach_festivals(result, festivals)
     return result

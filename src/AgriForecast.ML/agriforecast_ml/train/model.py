@@ -209,6 +209,16 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
                    else f"DO NOT PROMOTE (best ML '{best_ml_name}' worse than "
                         f"'{best_baseline_name}') -> serve fallback")
         print(f"Gate: {verdict}")
+        # Festival-feature honesty (R1.1 P2): the festival columns
+        # (HarvestInFestivalLeadup / DaysFromHarvestToNextFestival /
+        # DaysToNextFestivalAny / InLeadupAvurudu / InLeadupChristmas) are added
+        # on a DOMAIN PRIOR + leakage-safety, NOT CV-proven lift. With only ~10
+        # festival EVENTS per festival in the whole corpus (and 1-2 per CV fold),
+        # per-festival price lift is statistically UNVERIFIABLE until post-P3.
+        # Success here = correctness + leakage-safety + Prophet-readiness, not a
+        # CV MAE improvement -- do not read fold noise as festival signal.
+        print("\nNote: festival features are domain-prior + leakage-safe, NOT "
+              "CV-proven (too few events until post-P3).")
 
     # Final quantile models on all labelled data (the pooled "model" kind).
     final = {q: make_model(a) for q, a in QUANTILES.items()}

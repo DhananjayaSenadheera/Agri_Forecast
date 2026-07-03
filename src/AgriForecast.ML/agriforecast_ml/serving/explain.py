@@ -29,7 +29,17 @@ _LABELS = {
     "PriceZScore90": "price vs its 90-day norm",
     "SeasonMaha": "Maha season",
     "PlantingSeasonEnc": "planting season",
+    # Legacy: the old hardcoded IsFestival column was removed from the feature
+    # store (R1.1 P2), but the CURRENTLY-PROMOTED model was trained with it in
+    # its feature_cols. Keep this label so live SHAP does not regress to a raw
+    # column name until the next retrain drops IsFestival from the contract.
     "IsFestival": "festival demand",
+    # Festival demand (from the national festival calendar).
+    "HarvestInFestivalLeadup": "harvest lands in a festival season",
+    "DaysFromHarvestToNextFestival": "days from harvest to the next festival",
+    "DaysToNextFestivalAny": "days until the next festival",
+    "InLeadupAvurudu": "Avurudu (New Year) demand",
+    "InLeadupChristmas": "Christmas demand",
     "MonthNum": "time of year",
     "DayOfYear": "time of year",
     "WeekOfYear": "time of year",

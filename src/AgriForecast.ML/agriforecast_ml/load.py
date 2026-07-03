@@ -86,6 +86,7 @@ _POLICY_COLS = ["Id", "PolicyType", "Title", "EffectiveFrom", "EffectiveTo",
                 "Direction", "Source", "ReferenceUrl"]
 _SENTIMENT_COLS = ["Date", "MeanSentiment", "ArticleCount",
                    "DroughtRatio", "FloodRatio", "PolicyRatio"]
+_FESTIVAL_COLS = ["FestivalKey", "Date", "LeadUpDays", "IsProvisional", "Source"]
 
 
 def load_policy_flags() -> pd.DataFrame:
@@ -117,6 +118,73 @@ def load_policy_flags() -> pd.DataFrame:
     df["PolicyType"] = df["PolicyType"].astype(int)
     df["Direction"] = df["Direction"].astype(int)
     return df.sort_values("EffectiveFrom").reset_index(drop=True)
+
+
+def load_festivals() -> pd.DataFrame:
+    """National festival calendar as point-in-time date rows for the feature build.
+
+    Reads FestivalCalendarEntries -- the SINGLE SOURCE OF TRUTH for festival dates
+    (mirrors load_policy_flags()/load_fx(): same engine, try/except -> empty-frame
+    degrade so a missing/empty table attaches all-zero festival features rather than
+    failing the build). There is deliberately NO static festival_days.py twin.
+
+    ASYMMETRY WITH POYA (deliberate): the Poya calendar stays Python-static
+    (agriforecast_ml/data/poya_days.py) because its ONLY consumer is data-quality
+    gap-suppression (is_poya / expected_market_closed) -- a QA concern that must run
+    with no DB and is not a model feature. Festivals ARE model features that as-of-
+    join against price history, so they live in the DB where the .NET seed/gazette-
+    update path owns them. Two consumers, two lifecycles => two homes.
+
+    Date is stored date-only (no time) so it can never carry a hidden "now" leakage.
+    CreatedAtUtc is an audit field and is deliberately NOT loaded -- it must never
+    become a feature. IsProvisional is passed through untouched (never upgraded).
+    LeadUpDays comes straight from the row so the Avurudu Apr-13-anchored / Apr-14=0
+    window convention is preserved without Python re-deriving it.
+
+    Returns columns [FestivalKey, Date, LeadUpDays, IsProvisional, Source] with Date
+    as datetime, sorted by Date ascending (ready for merge_asof and for
+    to_prophet_holidays()).
+    """
+    sql = """
+        SELECT FestivalKey, Date, LeadUpDays, IsProvisional, Source
+        FROM FestivalCalendarEntries
+    """
+    try:
+        df = pd.read_sql(sql, get_engine())
+    except Exception:
+        return pd.DataFrame(columns=_FESTIVAL_COLS)
+    if df.empty:
+        return pd.DataFrame(columns=_FESTIVAL_COLS)
+    df["FestivalKey"] = df["FestivalKey"].astype(str)
+    df["Date"] = pd.to_datetime(df["Date"])
+    df["LeadUpDays"] = df["LeadUpDays"].astype(int)
+    df["IsProvisional"] = df["IsProvisional"].astype(bool)
+    return df.sort_values("Date").reset_index(drop=True)
+
+
+def to_prophet_holidays(festivals: pd.DataFrame) -> pd.DataFrame:
+    """Reshape load_festivals() output into a Prophet-native holidays frame.
+
+    Pure calendar function (no DB, no wall-clock). Prophet expects
+    [holiday, ds, lower_window, upper_window] where the effect spans
+    [ds + lower_window, ds + upper_window]. Our lead-up window is
+    [Date - LeadUpDays, Date], so lower_window = -LeadUpDays and upper_window = 0.
+
+    This helper exists purely to prove Prophet-readiness of the calendar; NO
+    Prophet integration is wired here (XGBoost Model A is the only live consumer).
+
+    Empty in -> empty out with the right columns.
+    """
+    cols = ["holiday", "ds", "lower_window", "upper_window"]
+    if festivals is None or festivals.empty:
+        return pd.DataFrame(columns=cols)
+    out = pd.DataFrame({
+        "holiday": festivals["FestivalKey"].astype(str).values,
+        "ds": pd.to_datetime(festivals["Date"]).values,
+        "lower_window": -festivals["LeadUpDays"].astype(int).values,
+        "upper_window": 0,
+    })
+    return out[cols].reset_index(drop=True)
 
 
 def load_news_sentiment() -> pd.DataFrame:

@@ -1,5 +1,11 @@
 """Sri Lankan Poya calendar helpers (R1.1 P1 Step 5, ClickUp 86cahef64).
 
+NOTE (deliberate asymmetry with festivals): Poya stays Python-static here while
+the festival calendar lives in the DB (load.load_festivals). Reason: Poya's only
+consumer is QA gap-suppression (must run with no DB, not a model feature);
+festivals ARE model features that as-of-join price history, so the .NET seed owns
+their lifecycle. See load_festivals()'s docstring for the mirror of this note.
+
 Wraps the static ``agriforecast_ml.data.poya_days.POYA_DAYS`` table (see that
 module's docstring for provenance/confidence notes — dates need one-time
 human verification against an official source) with the two lookups
