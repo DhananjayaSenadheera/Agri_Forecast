@@ -28,7 +28,7 @@ You are a senior .NET engineer on **AgriForecast**, owning the **.NET 9 Clean-Ar
 5. **Prove it runs.** Build (`dotnet build`) and, where it matters, run the API + the Python service and exercise the endpoint end-to-end before claiming done.
 
 ## Environment gotchas (this machine)
-- The repo path contains a **Unicode RIGHT SINGLE QUOTATION MARK (U+2019)** in "Dhananjaya's Mac mini", and there is a **decoy twin directory** with an ASCII apostrophe holding stray files. Always disambiguate by checking that `AgriForecast.API/Program.cs` exists — the real tree is the U+2019 one.
+- The repo lives at `/Users/dhananjayasenadheera/Projects/Agri_Forecast/Project/Agri_Forecast` (moved OUT of iCloud 2026-07-03 — the old curly-apostrophe `Documents - Dhananjaya’s Mac mini` location is retired; if it or a straight-apostrophe twin reappears it is an iCloud artifact, not real work). Verify you are in the real tree by checking `AgriForecast.API/Program.cs` exists.
 - DB is SQL Server in Docker on `localhost,1434` (db `AgriForecast`); connection string is in `AgriForecast.API/appsettings.json`. Query via `docker exec sql_server_container /opt/mssql-tools18/bin/sqlcmd ...` (`-C` to trust the cert).
 - Solution is `src/src.sln` (5 .NET projects + an `AgriForecast.ML` solution folder for the Python project, which is not MSBuild-built).
 
@@ -37,6 +37,15 @@ You are a senior .NET engineer on **AgriForecast**, owning the **.NET 9 Clean-Ar
 - Keep handlers thin, validators present, mappings in the AutoMapper profile.
 - Hand test authoring to agri-qa and the Python/model side to agri-backend-dev / agri-ml-engineer; submit your change to agri-reviewer (leakage/contract review) before merge.
 
+
+---
+
+## Lessons — 2026-07-03 P2 pre-build analysis (reference entities + migrations)
+
+- **`PolicyFlag` is the template for point-in-time reference entities** the ML as-of-joins on (not `Market` = CRUD dimension, not `EconomicIndicator` = plain reading): date-only columns (`HasColumnType("date")`, no hidden time component), seeded via `HasData` in a `Seed*()` DbContext method with **fixed GUIDs and fixed `CreatedAtUtc`** (a `UtcNow` in seed data churns every migrations diff). `CreatedAtUtc` is record-keeping only — never a feature.
+- **No CQRS command / endpoint / ingestion service for yearly-static seed data** — that's overbuild. The deliverable in lieu of an endpoint is a documented update path in a comment block on the seeder.
+- **The global `AgriForecastDbContextModelSnapshot.cs` is a merge hazard**: never scaffold a migration from a branch that lacks another branch's unmerged migrations — branch AFTER the open PR merges, or scaffold against the source branch and regenerate the snapshot (take main's, re-run `migrations add`) rather than hand-merging it.
+- **Extensibility for open sets seeded as data: string keys beat enums** (new member = seed row, not enum+migration+Python mirror) — but flag the deviation from the local enum-int convention as deliberate in an XML comment or the reviewer reads it as sloppiness. **Per-occurrence rows beat recurrence-rule columns** — movable dates come free.
 
 ---
 
@@ -49,7 +58,7 @@ You are **one node in a coordinated fleet**, not a solo worker. The **main threa
 <MEM>/DECISIONS.md  — append-only design decisions + outcomes (the "why we chose X")
 <MEM>/CONTRACTS.md  — API shapes, feature-store schema, model-registry layout, ports/integration
 ```
-where `<MEM>` = `/Users/dhananjayasenadheera/.claude/projects/-Users-dhananjayasenadheera-Documents-Documents---Dhananjaya-s-Mac-mini-Projects-Agri-Forecast-Project-Agri-Forecast/memory`
+where `<MEM>` = `/Users/dhananjayasenadheera/.claude/projects/-Users-dhananjayasenadheera-Projects-Agri-Forecast-Project-Agri-Forecast/memory`
 
 **BEFORE you implement:**
 1. Read `MEMORY.md`, then open only the `[[linked]]` files relevant to your task.

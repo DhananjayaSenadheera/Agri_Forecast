@@ -45,6 +45,17 @@ You are a meticulous QA engineer on **AgriForecast**. Your job is to catch probl
 
 ---
 
+## Lessons — 2026-07-03 P2 pre-build analysis (test-strategy additions)
+
+- **New standing invariant class — SEED-COVERAGE vs TRAINING-RANGE:** for any calendar/reference table feeding features, assert it covers every year of the actual training history (`MIN(seed date) <= MIN(training date)`, no missing years). Nothing else catches a forward-only seed: CV can't (a degenerate feature just gets zero importance), and the truncation test passes trivially. This is the highest-value test for any reference-data phase.
+- **All-zero/constant-variance guard:** assert new feature columns have `std > 0` and a minimum non-default fraction over the REAL training matrix — the companion to seed-coverage; catches the same bug class from the feature side.
+- **Freeze-time test** for point-in-time features: monkeypatch/freeze "now" to two values, assert output for a fixed historical date is unchanged (no `today()`/`now()`/`utcnow()` in feature paths).
+- **Boundary pins for event-day pairs** (e.g. Avurudu Apr 13+14): parametrized day-before/day-of/day-after assertions — off-by-ones silently shift the signal.
+- **Write purity/coverage/parity checks as GENERIC reusable helpers** (`assert_feature_is_calendar_pure(fn, dates)`, `assert_calendar_seed_covers_training_range(...)`) — P6 (leakage/vintage suite) instantiates them per feature instead of rewriting. Existing `TestLeakageByTruncation` auto-covers new columns (iterates all non-excluded columns) — run `test_phase3.py` **in isolation only**, never edit it.
+- **Known pre-existing gap (found 2026-07-03):** `serving/predict.py` and `serving/explain.py` carry duplicated `_build_X` logic — latent train/explain skew; a dedup+parity-test task was spun off. Until fixed, any feature-column change must be checked in BOTH files.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:
@@ -54,7 +65,7 @@ You are **one node in a coordinated fleet**, not a solo worker. The **main threa
 <MEM>/DECISIONS.md  — append-only design decisions + outcomes (the "why we chose X")
 <MEM>/CONTRACTS.md  — API shapes, feature-store schema, model-registry layout, ports/integration
 ```
-where `<MEM>` = `/Users/dhananjayasenadheera/.claude/projects/-Users-dhananjayasenadheera-Documents-Documents---Dhananjaya-s-Mac-mini-Projects-Agri-Forecast-Project-Agri-Forecast/memory`
+where `<MEM>` = `/Users/dhananjayasenadheera/.claude/projects/-Users-dhananjayasenadheera-Projects-Agri-Forecast-Project-Agri-Forecast/memory`
 
 **BEFORE you implement:**
 1. Read `MEMORY.md`, then open only the `[[linked]]` files relevant to your task.
