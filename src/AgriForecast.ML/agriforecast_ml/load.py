@@ -5,6 +5,27 @@ import pandas as pd
 
 from .db import get_engine
 
+# Canonical datetime resolution for EVERY datetime column that leaves this module.
+#
+# pandas 3.0 made pd.merge_asof strict about join-key dtype resolution, and
+# pd.read_sql now returns datetime columns at whatever unit the driver reports
+# (datetime64[s], datetime64[us], ...). pd.to_datetime PRESERVES that unit, so a
+# price series read as [s] and an FX series read as [us] have incompatible
+# datetime64 dtypes and the as-of merges in features.py raise
+# "incompatible merge keys ... must be the same type".
+#
+# Every loader normalizes its datetime columns to this single unit so all
+# downstream consumers (as-of merges, period conversions, festival windows) see
+# consistent dtypes. This is a PURE dtype normalization: same wall-clock dates,
+# same values, no timezone/logic change (ns has more than enough range for the
+# 2015+ agricultural date domain).
+_CANON_DT = "datetime64[ns]"
+
+
+def _as_canon_dt(s: pd.Series) -> pd.Series:
+    """Parse to datetime and pin the resolution to _CANON_DT (leakage-inert)."""
+    return pd.to_datetime(s).astype(_CANON_DT)
+
 
 def load_prices() -> pd.DataFrame:
     # SPLICE / DEDUP RULE (enforced here, not in the DB):
@@ -39,7 +60,10 @@ def load_prices() -> pd.DataFrame:
     """
     df = pd.read_sql(sql, get_engine())
     df["CropId"] = df["CropId"].astype(str)
-    df["PriceDate"] = pd.to_datetime(df["PriceDate"])
+    # PriceDate is the SOURCE of ObservationDate/HarvestDate downstream, so pin it
+    # to the canonical unit here — this is where the as-of merge's LEFT key dtype
+    # is decided.
+    df["PriceDate"] = _as_canon_dt(df["PriceDate"])
     for col in ("MinPrice", "MaxPrice"):
         df[col] = df[col].astype(float)
     df["AvgPrice"] = (df["MinPrice"] + df["MaxPrice"]) / 2.0
@@ -66,7 +90,7 @@ def load_fx() -> pd.DataFrame:
     """
     sql = "SELECT Date, Value FROM EconomicIndicators WHERE IndicatorCode = 'USD_LKR'"
     df = pd.read_sql(sql, get_engine())
-    df["date"] = pd.to_datetime(df["Date"])
+    df["date"] = _as_canon_dt(df["Date"])
     df["fx_usd_lkr"] = df["Value"].astype(float)
     return df[["date", "fx_usd_lkr"]].sort_values("date").reset_index(drop=True)
 
@@ -113,8 +137,8 @@ def load_policy_flags() -> pd.DataFrame:
         return pd.DataFrame(columns=_POLICY_COLS)
     if df.empty:
         return pd.DataFrame(columns=_POLICY_COLS)
-    df["EffectiveFrom"] = pd.to_datetime(df["EffectiveFrom"])
-    df["EffectiveTo"] = pd.to_datetime(df["EffectiveTo"])  # NULL -> NaT
+    df["EffectiveFrom"] = _as_canon_dt(df["EffectiveFrom"])
+    df["EffectiveTo"] = _as_canon_dt(df["EffectiveTo"])  # NULL -> NaT
     df["PolicyType"] = df["PolicyType"].astype(int)
     df["Direction"] = df["Direction"].astype(int)
     return df.sort_values("EffectiveFrom").reset_index(drop=True)
@@ -156,7 +180,7 @@ def load_festivals() -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=_FESTIVAL_COLS)
     df["FestivalKey"] = df["FestivalKey"].astype(str)
-    df["Date"] = pd.to_datetime(df["Date"])
+    df["Date"] = _as_canon_dt(df["Date"])
     df["LeadUpDays"] = df["LeadUpDays"].astype(int)
     df["IsProvisional"] = df["IsProvisional"].astype(bool)
     return df.sort_values("Date").reset_index(drop=True)
@@ -211,7 +235,7 @@ def load_news_sentiment() -> pd.DataFrame:
         return pd.DataFrame(columns=_SENTIMENT_COLS)
     if df.empty:
         return pd.DataFrame(columns=_SENTIMENT_COLS)
-    df["Date"] = pd.to_datetime(df["Date"])
+    df["Date"] = _as_canon_dt(df["Date"])
     for col in ("MeanSentiment", "DroughtRatio", "FloodRatio", "PolicyRatio"):
         df[col] = df[col].astype(float)
     df["ArticleCount"] = df["ArticleCount"].astype(int)

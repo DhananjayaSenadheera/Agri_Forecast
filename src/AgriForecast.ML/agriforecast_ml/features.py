@@ -9,6 +9,19 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+# Canonical datetime resolution for merge_asof join keys. pandas 3.0 requires
+# both as-of keys to share the SAME datetime64 unit (read_sql may yield [s]/[us]
+# and pd.to_datetime preserves it). The load layer (load._as_canon_dt) already
+# normalizes every column to [ns]; pinning the keys here too makes the as-of
+# merges self-defending against any future dtype drift. Pure dtype normalization
+# -- same wall-clock dates, no direction/tolerance/logic change.
+_MERGE_DT = "datetime64[ns]"
+
+
+def _canon_key(s: pd.Series) -> pd.Series:
+    return pd.to_datetime(s).astype(_MERGE_DT)
+
+
 # Sri Lanka cultivation seasons (rough): Maha = Oct-Mar (NE monsoon), Yala = Apr-Sep.
 _MAHA_MONTHS = {10, 11, 12, 1, 2, 3}
 _PLANTING_SEASON_ENC = {"Year-round": 0, "Yala": 1, "Maha": 2}
@@ -251,6 +264,9 @@ def _attach_fx(result: pd.DataFrame, fx: pd.DataFrame | None) -> pd.DataFrame:
         result["FxUsdLkr"] = np.nan
         return result
     fx_sorted = fx[["date", "fx_usd_lkr"]].dropna(subset=["date"]).sort_values("date")
+    fx_sorted["date"] = _canon_key(fx_sorted["date"])
+    result = result.copy()
+    result["ObservationDate"] = _canon_key(result["ObservationDate"])
     merged = pd.merge_asof(
         result.sort_values("ObservationDate"),
         fx_sorted,
@@ -293,6 +309,9 @@ def _attach_sentiment(result: pd.DataFrame, sentiment: pd.DataFrame | None) -> p
         return result
     cols = ["Date"] + _SENTIMENT_FEATURES
     s_sorted = sentiment[cols].dropna(subset=["Date"]).sort_values("Date")
+    s_sorted["Date"] = _canon_key(s_sorted["Date"])
+    result = result.copy()
+    result["ObservationDate"] = _canon_key(result["ObservationDate"])
     merged = pd.merge_asof(
         result.sort_values("ObservationDate"),
         s_sorted,
