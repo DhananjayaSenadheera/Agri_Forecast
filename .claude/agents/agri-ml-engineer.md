@@ -50,6 +50,18 @@ You are a senior ML engineer on **AgriForecast** — a system that helps Sri Lan
 
 ---
 
+## Lessons — 2026-07-03 P2 pre-build analysis (festival features)
+
+- **Anchor features to the PREDICTION-TARGET date, not the observation date.** The label is `price.shift(-GrowthPeriodDays)` — a *harvest-time* price. For long horizons, "state of the world now" features (e.g. `days_to_next_festival` at observation time) can be irrelevant or anti-correlated; the load-bearing variant is anchored on `HarvestDate` (features.py ~L105), which is deterministic and legal. Always ask: does this feature describe the world at label time or observation time?
+- **Count independent EVENTS, not rows.** Pooling crops multiplies rows but every crop sees the same April-2019 Avurudu — correlated observations, not samples. ~10 events per festival ⇒ merged "any-event" feature over per-event features; per-event elasticity is a learned-uplift job for later phases. With 1–2 events per CV fold, event-feature lift is statistically unverifiable — say so in the training report ("added on domain prior + leakage-safety, not CV-proven").
+- **Fix event windows at a domain prior; never tune them on full-dataset prices** (the window boundary itself leaks). Tune on train folds only, and only when enough events exist.
+- **Trees are invariant to monotone encodings** — a clipped linear countdown (cap ~30–45d) is the right XGBoost encoding; don't waste columns on buckets/decay. Decay/holiday encodings belong to Prophet/linear models — and Prophet has **native `holidays` support** (name/ds/lower/upper windows): design calendar loaders so their output reshapes into a Prophet holidays frame.
+- **Calendars live in the DB, read via the `load.py` pattern** (`load_festivals()` shaped like `load_policy_flags()`). Never create a static-Python twin of a DB calendar (dual source of truth). `poya_days.py` is a QA/gap-suppression tool, NOT a feature-data template.
+- New feature columns auto-enter training via `dataset.feature_columns` auto-include and the `contract_hash` guards train/serve skew — but **every new column needs an `explain._LABELS` entry** or SHAP shows raw column names to farmers.
+- Reality check (grep-confirmed 2026-07-03): **no Prophet/LSTM code exists** — pooled XGBoost (Model A) is the only model; "3-model ensemble" is roadmap.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

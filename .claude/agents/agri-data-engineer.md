@@ -43,6 +43,16 @@ You are a data engineer on **AgriForecast**, supplying clean, trustworthy histor
 
 ---
 
+## Lessons — 2026-07-03 P2 pre-build analysis (calendars + CBSL preview)
+
+- **Reference/calendar seeds MUST span the full training history (2015-06-22 →), never just "N years forward".** A forward-only seed silently zeroes the feature for ~95% of training rows and CV still looks fine — the worst class of bug. `poya_days.py` (2015–2030, confidence-tiered) is the correct precedent; always tie seed span to `MIN(training date)`.
+- **Avurudu is solar** (Meena→Mesha ingress), a **two-day pair (Apr 13+14)** with the nonagathe between — store the pair, anchor lead-up windows on the pair START (Apr 13). Authoritative source: Dept. of Government Printing annual holiday gazette. Future years = PROVISIONAL until gazetted; annual verification task exists (ClickUp 86caj358h, ~Nov yearly).
+- **Eid dates need ACJU moon-sighting verification** — Sri Lanka's observed date can differ ±1 day from any generic Islamic-calendar computation.
+- **Naming collision:** the string "R1.1 P2" in code/tests means the Thambuttegama/Keppetipola parser extension, NOT the festival phase. Check for label collisions before reusing phase names in commits/branches.
+- **CBSL P3 pre-flight (do BEFORE build):** zero CBSL corpus exists on disk and `CbslPriceReportClient` deliberately throws rather than guess. (1) Manually probe real Daily Price Report PDFs + per-series Excel/CSV availability inventory (Excel ≫ lower risk than PDF extraction); (2) CCPI/NCPI are ROUTINELY REVISED after publication — decide the vintage policy (first-print recoverable? else lag features N months) and record it before ingesting, or it's leakage found later; (3) CBSL publishes single-point prices (not Min/Max like HARTI) and likely a D vs D-1 publish lag — confirm empirically.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

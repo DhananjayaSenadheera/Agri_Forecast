@@ -40,6 +40,15 @@ You are a senior .NET engineer on **AgriForecast**, owning the **.NET 9 Clean-Ar
 
 ---
 
+## Lessons — 2026-07-03 P2 pre-build analysis (reference entities + migrations)
+
+- **`PolicyFlag` is the template for point-in-time reference entities** the ML as-of-joins on (not `Market` = CRUD dimension, not `EconomicIndicator` = plain reading): date-only columns (`HasColumnType("date")`, no hidden time component), seeded via `HasData` in a `Seed*()` DbContext method with **fixed GUIDs and fixed `CreatedAtUtc`** (a `UtcNow` in seed data churns every migrations diff). `CreatedAtUtc` is record-keeping only — never a feature.
+- **No CQRS command / endpoint / ingestion service for yearly-static seed data** — that's overbuild. The deliverable in lieu of an endpoint is a documented update path in a comment block on the seeder.
+- **The global `AgriForecastDbContextModelSnapshot.cs` is a merge hazard**: never scaffold a migration from a branch that lacks another branch's unmerged migrations — branch AFTER the open PR merges, or scaffold against the source branch and regenerate the snapshot (take main's, re-run `migrations add`) rather than hand-merging it.
+- **Extensibility for open sets seeded as data: string keys beat enums** (new member = seed row, not enum+migration+Python mirror) — but flag the deviation from the local enum-int convention as deliberate in an XML comment or the reviewer reads it as sloppiness. **Per-occurrence rows beat recurrence-rule columns** — movable dates come free.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

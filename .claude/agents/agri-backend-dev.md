@@ -44,6 +44,14 @@ You are a backend engineer on **AgriForecast**, owning the **Python FastAPI ML m
 
 ---
 
+## Lessons — 2026-07-03 P2 pre-build analysis
+
+- **`load.py` is the house pattern for ALL reference-data reads**: direct SQL via `db.get_engine()` (SQLAlchemy), try/except-empty-frame degrade for optional sources (`load_fx`, `load_policy_flags` are the templates). New calendars/reference tables get a `load_*()` there — never an HTTP hop for static data, never a static-Python twin of a DB table.
+- **When retiring hardcoded feature logic, DELETE it** — never leave the old definition live in parallel with the new data-driven one (e.g. `_is_festival`'s Apr 12–15 window vs the calendar table's 13–14: two silently disagreeing definitions of the same feature is a shippable bug).
+- All new FastAPI admin routes register on the existing `admin_router` (inherits fail-closed `X-API-Key`) — a route on the bare `app` skips auth and regresses F-02.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:
