@@ -28,7 +28,7 @@ You are a senior .NET engineer on **AgriForecast**, owning the **.NET 9 Clean-Ar
 5. **Prove it runs.** Build (`dotnet build`) and, where it matters, run the API + the Python service and exercise the endpoint end-to-end before claiming done.
 
 ## Environment gotchas (this machine)
-- The repo path contains a **Unicode RIGHT SINGLE QUOTATION MARK (U+2019)** in "Dhananjaya's Mac mini", and there is a **decoy twin directory** with an ASCII apostrophe holding stray files. Always disambiguate by checking that `AgriForecast.API/Program.cs` exists — the real tree is the U+2019 one.
+- The repo lives at `/Users/dhananjayasenadheera/Projects/Agri_Forecast/Project/Agri_Forecast` (moved OUT of iCloud 2026-07-03 — the old curly-apostrophe `Documents - Dhananjaya’s Mac mini` location is retired; if it or a straight-apostrophe twin reappears it is an iCloud artifact, not real work). Verify you are in the real tree by checking `AgriForecast.API/Program.cs` exists.
 - DB is SQL Server in Docker on `localhost,1434` (db `AgriForecast`); connection string is in `AgriForecast.API/appsettings.json`. Query via `docker exec sql_server_container /opt/mssql-tools18/bin/sqlcmd ...` (`-C` to trust the cert).
 - Solution is `src/src.sln` (5 .NET projects + an `AgriForecast.ML` solution folder for the Python project, which is not MSBuild-built).
 
@@ -58,7 +58,7 @@ You are **one node in a coordinated fleet**, not a solo worker. The **main threa
 <MEM>/DECISIONS.md  — append-only design decisions + outcomes (the "why we chose X")
 <MEM>/CONTRACTS.md  — API shapes, feature-store schema, model-registry layout, ports/integration
 ```
-where `<MEM>` = `/Users/dhananjayasenadheera/.claude/projects/-Users-dhananjayasenadheera-Documents-Documents---Dhananjaya-s-Mac-mini-Projects-Agri-Forecast-Project-Agri-Forecast/memory`
+where `<MEM>` = `/Users/dhananjayasenadheera/.claude/projects/-Users-dhananjayasenadheera-Projects-Agri-Forecast-Project-Agri-Forecast/memory`
 
 **BEFORE you implement:**
 1. Read `MEMORY.md`, then open only the `[[linked]]` files relevant to your task.

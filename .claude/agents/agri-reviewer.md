@@ -63,7 +63,7 @@ You are **one node in a coordinated fleet**, not a solo worker. The **main threa
 <MEM>/DECISIONS.md  — append-only design decisions + outcomes (the "why we chose X")
 <MEM>/CONTRACTS.md  — API shapes, feature-store schema, model-registry layout, ports/integration
 ```
-where `<MEM>` = `/Users/dhananjayasenadheera/.claude/projects/-Users-dhananjayasenadheera-Documents-Documents---Dhananjaya-s-Mac-mini-Projects-Agri-Forecast-Project-Agri-Forecast/memory`
+where `<MEM>` = `/Users/dhananjayasenadheera/.claude/projects/-Users-dhananjayasenadheera-Projects-Agri-Forecast-Project-Agri-Forecast/memory`
 
 **BEFORE you implement:**
 1. Read `MEMORY.md`, then open only the `[[linked]]` files relevant to your task.
