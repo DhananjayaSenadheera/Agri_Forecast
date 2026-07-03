@@ -16,12 +16,15 @@ def main() -> None:
     fx = load.load_fx()
     sentiment = load.load_news_sentiment()
     policy = load.load_policy_flags()
+    festivals = load.load_festivals()
     print(f"Loaded: prices={len(prices)} rows ({prices['CropId'].nunique()} crops), "
           f"crops={len(crops)}, weather={len(weather)} months, fx={len(fx)} rows, "
-          f"sentiment={len(sentiment)} daily rows, policy={len(policy)} flags")
+          f"sentiment={len(sentiment)} daily rows, policy={len(policy)} flags, "
+          f"festivals={len(festivals)} rows")
 
     feats = features.build_all(prices, crops, weather, fx,
-                              sentiment=sentiment, policy=policy)
+                              sentiment=sentiment, policy=policy,
+                              festivals=festivals)
 
     n = len(feats)
     labelled = int(feats["LabelAvailable"].sum())
