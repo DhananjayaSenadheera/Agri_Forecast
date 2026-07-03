@@ -14,6 +14,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<WeatherRecord> WeatherRecords { get; set; }
     public DbSet<EconomicIndicator> EconomicIndicators { get; set; }
     public DbSet<PolicyFlag> PolicyFlags { get; set; }
+    public DbSet<FestivalCalendarEntry> FestivalCalendarEntries { get; set; }
     public DbSet<User> Users { get; set; }
     public DbSet<Market> Markets { get; set; }
     public DbSet<PriceObservation> PriceObservations { get; set; }
@@ -87,6 +88,27 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
         });
 
         SeedPolicyFlags(modelBuilder);
+
+        modelBuilder.Entity<FestivalCalendarEntry>(e =>
+        {
+            e.Property(x => x.FestivalKey).HasMaxLength(50).IsRequired();
+            e.Property(x => x.Source).HasMaxLength(300);
+            e.Property(x => x.LeadUpDays).IsRequired();
+            e.Property(x => x.IsProvisional).IsRequired();
+
+            // Date stored date-only (no time) — it is the point-in-time key the ML layer
+            // as-of-joins on, so it must never carry a hidden time (mirrors PolicyFlag).
+            e.Property(x => x.Date).HasColumnType("date").IsRequired();
+
+            // One row per (festival, date) — a festival cannot be seeded twice on the same day
+            // (idempotency / dedup at the DB level; mirrors EconomicIndicator's unique index).
+            e.HasIndex(x => new { x.FestivalKey, x.Date }).IsUnique();
+
+            // Primary read pattern is "which festivals fall near date D" → scans Date.
+            e.HasIndex(x => x.Date);
+        });
+
+        SeedFestivalCalendar(modelBuilder);
 
         modelBuilder.Entity<CropPrice>(e =>
         {
@@ -410,4 +432,122 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             }
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────
+    // FESTIVAL CALENDAR — manual annual update path (NO ingestion service / CQRS / endpoint).
+    //
+    // This is yearly-static reference data seeded via HasData with FIXED GUIDs and a FIXED
+    // CreatedAtUtc (a UtcNow here would churn the migrations diff every build). The DB table is
+    // the SINGLE SOURCE OF TRUTH — the Python feature layer reads it via load_festivals(); do
+    // NOT add a static festival-days twin.
+    //
+    // TO UPDATE (annual gazette check, ~November each year — ClickUp task 86caj358h):
+    //   1. Get the next year's holiday dates from the Department of Government Printing annual
+    //      holiday gazette (https://www.documents.gov.lk/).
+    //   2. Flip that year's AVURUDU / THAI_PONGAL rows from IsProvisional=true to false and set
+    //      the real gazette Source citation; correct the Date if the gazette differs from the
+    //      provisional estimate.
+    //   3. Extend the seed forward by one year (add new provisional rows) so the seed always
+    //      covers training-history-start (2015) .. current+N and never zeroes the feature for
+    //      historical training rows (the silent-bug trap: a forward-only seed leaves ~95% of
+    //      training rows with no festival signal while CV still looks fine).
+    //   4. Add a migration and apply it.
+    //
+    // NOT SEEDED (intentionally): EID_UL_FITR / EID_UL_ADHA / DEEPAVALI. Eid dates require ACJU
+    // moon-sighting verification and Deepavali requires per-year lunar verification — neither is
+    // verifiable offline. Add them as seed rows (same shape) once dates are gazette-confirmed.
+    //
+    // Seed span: 2015 (training history starts 2015-06-22) .. 2030 inclusive.
+    //   AVURUDU     — Sinhala & Tamil New Year, the Apr 13 (eve) + Apr 14 (day) PAIR each year.
+    //                 The lead-up window anchors on the Apr 13 row (LeadUpDays=14); the paired
+    //                 Apr 14 row carries LeadUpDays=0 so the demand window is not double-counted.
+    //                 2015–2026 confirmed (IsProvisional=false); 2027–2030 provisional.
+    //   CHRISTMAS   — Dec 25 each year, fixed date, IsProvisional=false for all (zero risk).
+    //   THAI_PONGAL — Jan 14 each year (occasionally Jan 15). Folded in deliberately: the old
+    //                 hardcoded Python _is_festival() covered Pongal and dropping it would lose
+    //                 signal. Marked provisional where the gazette date could not be cited here.
+    private static void SeedFestivalCalendar(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<FestivalCalendarEntry>().HasData(GetFestivalCalendarSeed());
+    }
+
+    // Deterministic, wall-clock-free seed rows. Exposed so tests assert on the exact rows that
+    // land in HasData (no EF-InMemory / DB round-trip needed, and one source of truth for both).
+    public static IReadOnlyList<FestivalCalendarEntry> GetFestivalCalendarSeed()
+    {
+        // Fixed recording timestamp — never UtcNow (would churn the migrations diff every build).
+        var seededAt = new DateTime(2026, 07, 03, 0, 0, 0, DateTimeKind.Utc);
+
+        // Inclusive seed span. Start = 2015 (training history begins 2015-06-22); end = 2030.
+        const int firstYear = 2015;
+        const int lastYear = 2030;
+
+        // AVURUDU / THAI_PONGAL confirmed against the gazette through this year; later = provisional.
+        const int lastConfirmedYear = 2026;
+
+        var rows = new List<FestivalCalendarEntry>();
+
+        for (var year = firstYear; year <= lastYear; year++)
+        {
+            var confirmed = year <= lastConfirmedYear;
+            var gazette = $"Department of Government Printing, Sri Lanka — annual holiday gazette {year}";
+
+            // ── AVURUDU (Sinhala & Tamil New Year): Apr 13 eve + Apr 14 day, every year. ──
+            // Apr 13 anchors the lead-up window (LeadUpDays=14).
+            rows.Add(new FestivalCalendarEntry
+            {
+                Id = FestivalId(0xA013, year),
+                FestivalKey = "AVURUDU",
+                Date = new DateTime(year, 04, 13),
+                LeadUpDays = 14,
+                IsProvisional = !confirmed,
+                Source = confirmed ? gazette : null,
+                CreatedAtUtc = seededAt
+            });
+            // Apr 14 is the paired day; LeadUpDays=0 so the window is not double-counted.
+            rows.Add(new FestivalCalendarEntry
+            {
+                Id = FestivalId(0xA014, year),
+                FestivalKey = "AVURUDU",
+                Date = new DateTime(year, 04, 14),
+                LeadUpDays = 0,
+                IsProvisional = !confirmed,
+                Source = confirmed ? gazette : null,
+                CreatedAtUtc = seededAt
+            });
+
+            // ── THAI_PONGAL: Jan 14 (folded in; provisional where not gazette-cited here). ──
+            rows.Add(new FestivalCalendarEntry
+            {
+                Id = FestivalId(0x7014, year),
+                FestivalKey = "THAI_PONGAL",
+                Date = new DateTime(year, 01, 14),
+                LeadUpDays = 14,
+                IsProvisional = !confirmed,
+                Source = confirmed ? gazette : null,
+                CreatedAtUtc = seededAt
+            });
+
+            // ── CHRISTMAS: Dec 25, fixed date — confirmed for all years (zero risk). ──
+            rows.Add(new FestivalCalendarEntry
+            {
+                Id = FestivalId(0xC025, year),
+                FestivalKey = "CHRISTMAS",
+                Date = new DateTime(year, 12, 25),
+                LeadUpDays = 14,
+                IsProvisional = false,
+                Source = "Fixed Gregorian date (Dec 25)",
+                CreatedAtUtc = seededAt
+            });
+        }
+
+        return rows;
+    }
+
+    // Deterministic fixed GUID per (festival tag, year): c3f30001-0000-0000-{tag}-00000000{yyyy}.
+    // Constant-folded at model build → EF snapshots literal GUIDs; stable across migrations.
+    // NOTE: {year:0000} embeds DECIMAL year digits in a hex GUID group — valid only because
+    // digits 0-9 are hex-safe by construction. Do not reuse this pattern with non-digit values.
+    private static Guid FestivalId(int tag, int year)
+        => Guid.Parse($"c3f30001-0000-0000-{tag:x4}-00000000{year:0000}");
 }
