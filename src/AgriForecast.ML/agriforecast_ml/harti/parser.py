@@ -37,14 +37,42 @@ Bitter Gourd name consolidation:
 """
 from __future__ import annotations
 
+import os
 import re
 import logging
 import warnings
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------
+# Parser DoS guard (ClickUp 86cahef8f / S2): wall-clock timeout per PDF.
+# --------------------------------------------------------------------------
+# A malicious or pathological PDF (deeply nested / degenerate table layout, a
+# decompression/parse bomb that slips past the 25 MB download cap because it is
+# small-on-disk but expensive-to-parse) could make pdfplumber/pdfminer spin for
+# a very long time and stall the whole ingestion pass. We bound each PDF's parse
+# with a wall-clock timeout; a PDF that blows the budget is treated exactly like
+# any other unparseable PDF (WARN, zero rows, move on) — never a hard failure.
+#
+# Configurable via AGRI_HARTI_PARSE_TIMEOUT_SECONDS. Default 120s is far more
+# than a real ~few-hundred-KB HARTI daily bulletin needs (they parse in well
+# under a second each), so a legitimate full-corpus CLI backfill is unaffected.
+# 0 (or negative) disables the timeout.
+_DEFAULT_PARSE_TIMEOUT_SECONDS = 120.0
+
+
+def _parse_timeout_seconds() -> float:
+    raw = os.getenv("AGRI_HARTI_PARSE_TIMEOUT_SECONDS")
+    if raw is None:
+        return _DEFAULT_PARSE_TIMEOUT_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        return _DEFAULT_PARSE_TIMEOUT_SECONDS
 
 # HARTI crop labels we care about.  Keys are the exact strings seen in PDFs;
 # value is the canonical HARTI label passed to the loader for CropId mapping.
@@ -305,7 +333,41 @@ def parse_pdf(pdf_path: Path, date_str: str) -> list[ParsedPrice]:
     locatable markets still parse normally.  If NO market column can be
     located at all, the whole PDF is skipped (WARN) exactly as before.
     Positional/index fallback is never used.
+
+    Parser DoS guard (S2): the parse body runs under a wall-clock timeout
+    (AGRI_HARTI_PARSE_TIMEOUT_SECONDS, default 120s). A PDF that exceeds the
+    budget is treated like any other unparseable PDF (WARN, empty result), so a
+    pathological/malicious document cannot stall the whole ingestion pass.
     """
+    timeout = _parse_timeout_seconds()
+    if timeout <= 0:
+        return _parse_pdf_impl(pdf_path, date_str)
+
+    # Run the parse in a worker thread and bound it with a wall-clock timeout.
+    # pdfminer/pdfplumber are pure-Python and release the GIL on I/O, so the
+    # watchdog stays responsive; on timeout we return empty (exactly like a parse
+    # error) and shut the executor down WITHOUT waiting for the runaway worker —
+    # using ``with ThreadPoolExecutor(...)`` would block on exit until the slow
+    # parse finished, defeating the timeout. The abandoned daemon-ish worker is
+    # left to unwind on its own / at interpreter teardown.
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(_parse_pdf_impl, pdf_path, date_str)
+    try:
+        result = future.result(timeout=timeout)
+        pool.shutdown(wait=False)
+        return result
+    except FutureTimeoutError:
+        logger.warning(
+            "[%s] Parse TIMEOUT after %.1fs on %s — skipping this PDF "
+            "(possible parser-DoS document); ingestion continues.",
+            date_str, timeout, pdf_path.name,
+        )
+        pool.shutdown(wait=False)
+        return []
+
+
+def _parse_pdf_impl(pdf_path: Path, date_str: str) -> list[ParsedPrice]:
+    """Actual parse body for one PDF (wrapped by ``parse_pdf`` for the timeout)."""
     results: list[ParsedPrice] = []
 
     try:

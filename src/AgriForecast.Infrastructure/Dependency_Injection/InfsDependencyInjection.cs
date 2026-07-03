@@ -60,6 +60,14 @@ public static class InfsDependencyInjection
 
             http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(30);
+        })
+        // SSRF hardening (S1): the DEC portal probes fixed JSON endpoints. Disable
+        // auto-redirect so a 3xx from the portal cannot silently bounce the request
+        // to an internal/arbitrary host; a redirect surfaces as a non-2xx and the
+        // client returns null (handled as a failed fetch), never followed blindly.
+        .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+        {
+            AllowAutoRedirect = false,
         });
         // Typed HttpClient over the Python ML service (POST /predict).
         services.AddHttpClient<IHarvestPredictionClient, HarvestPredictionClient>(http =>

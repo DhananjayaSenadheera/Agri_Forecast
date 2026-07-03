@@ -28,6 +28,8 @@ from urllib.parse import quote, urljoin
 import requests
 from bs4 import BeautifulSoup
 
+from ..netguard import DisallowedUrlError, assert_url_allowed, guarded_get
+
 logger = logging.getLogger(__name__)
 
 HARTI_BASE = "https://www.harti.gov.lk/"
@@ -69,9 +71,18 @@ def _download_capped(session: requests.Session, url: str) -> bytes:
 
     Checks the Content-Length header up front (when present) AND the actual number
     of streamed bytes, since the header is attacker-controllable / can be missing.
+
+    SSRF guard (S1): the GET goes through ``guarded_get``, so the initial URL AND
+    every redirect ``Location`` are validated against the scheme+host allowlist
+    and the private/loopback/link-local IP block (resolve-then-check) before the
+    request is issued. Auto-redirects are disabled at the requests layer; a 3xx to
+    an off-allowlist or private-IP host raises ``DisallowedUrlError`` instead of
+    being followed. The caller (``download_pdfs``) additionally runs
+    ``assert_url_allowed`` as a pre-flight so a disallowed URL is rejected as a
+    per-URL failure without opening a socket.
     """
-    with session.get(
-        url, headers=_HEADERS, timeout=_DOWNLOAD_TIMEOUT, stream=True
+    with guarded_get(
+        session, url, headers=_HEADERS, timeout=_DOWNLOAD_TIMEOUT, stream=True
     ) as resp:
         resp.raise_for_status()
 
@@ -130,7 +141,9 @@ def scrape_pdf_links(session: requests.Session) -> list[tuple[date, str]]:
     """Return [(date, relative_url), ...] for all vegetable-price PDFs on the
     HARTI listing page.  Only English PDFs in the /eng/ path are collected."""
     logger.info("Scraping HARTI listing page: %s", LISTING_URL)
-    resp = session.get(LISTING_URL, headers=_HEADERS, timeout=30)
+    # SSRF guard (S1): validate the listing URL + any redirect against the host
+    # allowlist / private-IP block before fetching.
+    resp = guarded_get(session, LISTING_URL, headers=_HEADERS, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -218,6 +231,21 @@ def download_pdfs(
         # URL-encode the path component to handle spaces etc.
         safe_path = quote(rel_url, safe="/")
         url = urljoin(HARTI_BASE, safe_path)
+
+        # SSRF guard (S1): the URL is built from a scraped listing link. Validate
+        # it against the scheme+host allowlist AND the private/loopback/link-local
+        # IP block (resolve-then-check) before we ever issue the request, so a
+        # poisoned absolute href that survived scraping is rejected here as a
+        # per-URL failure. _download_capped -> guarded_get re-runs the same
+        # validation on the request and on every redirect target, so a 3xx cannot
+        # escape it either.
+        try:
+            assert_url_allowed(url)
+        except DisallowedUrlError as exc:
+            logger.warning("[%s] Download URL blocked by SSRF allowlist: %s -- %s",
+                           date_str, url, exc)
+            n_fail += 1
+            continue
 
         try:
             time.sleep(delay)

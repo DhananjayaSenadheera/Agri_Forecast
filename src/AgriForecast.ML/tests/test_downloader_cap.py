@@ -65,6 +65,20 @@ from agriforecast_ml.harti.downloader import (  # noqa: E402
     PdfTooLargeError,
     download_pdfs,
 )
+from agriforecast_ml import netguard  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_dns(monkeypatch):
+    """Keep this suite network-free.
+
+    The download path now routes through the SSRF guard (guarded_get /
+    assert_url_allowed), whose private-IP check resolves the host via DNS. All
+    URLs in this file use the allowlisted ``www.harti.gov.lk`` host; stub its
+    resolution to a public IP so no real DNS lookup happens and the size-cap
+    behaviour under test is exercised exactly as before.
+    """
+    monkeypatch.setattr(netguard, "_resolve_ips", lambda host: ["8.8.8.8"])
 
 
 # ===========================================================================
@@ -87,6 +101,10 @@ def _make_mock_response(body: bytes, content_length=None, chunk_size=_STREAM_CHU
     resp.__enter__ = MagicMock(return_value=resp)
     resp.__exit__ = MagicMock(return_value=False)
     resp.raise_for_status = MagicMock(return_value=None)
+    # guarded_get inspects these to decide whether to follow a redirect; every
+    # response in this suite is a final (non-redirect) 2xx.
+    resp.is_redirect = False
+    resp.is_permanent_redirect = False
 
     headers = {}
     if content_length is not None:
@@ -343,7 +361,7 @@ class TestDownloadLoopResilience:
         """
         session = MagicMock()
 
-        def _get(url, headers=None, timeout=None, stream=None):
+        def _get(url, headers=None, timeout=None, stream=None, allow_redirects=None):
             for marker, resp in responses_by_marker.items():
                 if marker in url:
                     return resp
