@@ -156,10 +156,23 @@ def main() -> None:
     # Step 3: Load into DB (with splice rule + idempotent upsert)
     # ------------------------------------------------------------------ #
     log.info(
-        "Step 3: Loading into MarketPrices (dry_run=%s)...", args.dry_run
+        "Step 3: Loading into MarketPrices (Dambulla-only, back-compat; dry_run=%s)...",
+        args.dry_run,
     )
     counters = loader.upsert_harti_prices(parsed_rows, dry_run=args.dry_run)
     log.info("Step 3 complete: %s", counters)
+
+    # ------------------------------------------------------------------ #
+    # Step 3b: Load ALL markets (Dambulla, Pettah, Narahenpita) into
+    # PriceObservations — R1.1 P1 multi-market table. Additive to Step 3;
+    # no splice rule applies here (see loader.py docstring).
+    # ------------------------------------------------------------------ #
+    log.info(
+        "Step 3b: Loading into PriceObservations (all markets; dry_run=%s)...",
+        args.dry_run,
+    )
+    po_counters = loader.upsert_harti_price_observations(parsed_rows, dry_run=args.dry_run)
+    log.info("Step 3b complete: %s", po_counters)
 
     # ------------------------------------------------------------------ #
     # Step 4: QA checks
@@ -171,10 +184,15 @@ def main() -> None:
             log.info("--skip-qa: skipping QA checks")
         print("\nPipeline complete.")
         print(f"  Parsed rows  : {len(parsed_rows)}")
-        print(f"  Inserted     : {counters.get('inserted', 0)}")
-        print(f"  Updated      : {counters.get('updated', 0)}")
-        print(f"  Splice-skip  : {counters.get('skipped_splice', 0)}")
-        print(f"  No-crop-skip : {counters.get('skipped_no_crop', 0)}")
+        print(f"  MarketPrices (Dambulla only):")
+        print(f"    Inserted     : {counters.get('inserted', 0)}")
+        print(f"    Updated      : {counters.get('updated', 0)}")
+        print(f"    Splice-skip  : {counters.get('skipped_splice', 0)}")
+        print(f"    No-crop-skip : {counters.get('skipped_no_crop', 0)}")
+        print(f"  PriceObservations (all markets):")
+        print(f"    Inserted        : {po_counters.get('inserted', 0)}")
+        print(f"    Updated         : {po_counters.get('updated', 0)}")
+        print(f"    No-market-skip  : {po_counters.get('skipped_no_market', 0)}")
         return
 
     log.info("Step 4: Running QA checks...")
@@ -187,15 +205,38 @@ def main() -> None:
         log.error("QA FAILED: %s", exc)
         sys.exit(2)
 
+    # Step 4b: PriceObservations-scoped data-quality checks (R1.1 P1 Step 5,
+    # ClickUp 86cahef64). assert_no_source_duplicates is a hard-fail check
+    # (mirrors qa.assert_no_source_duplicates above, scoped to
+    # PriceObservations rather than the legacy MarketPrices table) — it must
+    # run every ingestion pass, not just be available to call manually.
+    # gap_report()/flag_price_outliers() are intentionally NOT called here:
+    # per their own contracts they return structured findings for manual
+    # ack / are meant to be run as a separate post-ingestion pass, not gate
+    # this pipeline's exit code.
+    from agriforecast_ml.data_quality import assert_no_source_duplicates
+    log.info("Step 4b: Running PriceObservations cross-source duplicate check...")
+    try:
+        n_checked = assert_no_source_duplicates(eng)
+        log.info("PriceObservations duplicate check PASSED — %d triples checked", n_checked)
+    except AssertionError as exc:
+        log.error("PriceObservations duplicate check FAILED: %s", exc)
+        sys.exit(2)
+
     print("\nPipeline summary:")
     print(f"  PDFs processed : {len(cached_pdfs)}")
     print(f"  Parsed rows    : {len(parsed_rows)}")
-    print(f"  Inserted       : {counters.get('inserted', 0)}")
-    print(f"  Updated        : {counters.get('updated', 0)}")
-    print(f"  Splice-skip    : {counters.get('skipped_splice', 0)}")
-    print(f"  No-crop-skip   : {counters.get('skipped_no_crop', 0)}")
-    print(f"  Total HARTI DB : {report['grand_total']}")
-    print(f"  Duplicate check: PASSED (0 overlaps with DEC)")
+    print(f"  MarketPrices (Dambulla only):")
+    print(f"    Inserted       : {counters.get('inserted', 0)}")
+    print(f"    Updated        : {counters.get('updated', 0)}")
+    print(f"    Splice-skip    : {counters.get('skipped_splice', 0)}")
+    print(f"    No-crop-skip   : {counters.get('skipped_no_crop', 0)}")
+    print(f"    Total HARTI DB : {report['grand_total']}")
+    print(f"    Duplicate check: PASSED (0 overlaps with DEC)")
+    print(f"  PriceObservations (all markets):")
+    print(f"    Inserted        : {po_counters.get('inserted', 0)}")
+    print(f"    Updated         : {po_counters.get('updated', 0)}")
+    print(f"    No-market-skip  : {po_counters.get('skipped_no_market', 0)}")
 
 
 if __name__ == "__main__":

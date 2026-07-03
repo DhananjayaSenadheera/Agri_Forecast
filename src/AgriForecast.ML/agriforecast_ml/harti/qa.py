@@ -10,6 +10,17 @@ Checks run after the loader completes:
    deleted).  The check mirrors load.py's filter so the two cannot drift.
 
 All output is printed + returned as structured dicts for programmatic use.
+
+SCOPE NOTE (R1.1 P1 Step 5, ClickUp 86cahef64): this module's checks are
+legacy-MarketPrices-scoped (Dambulla-only, no market dimension, no tiered
+gap severity, no Poya calendar). The newer, PriceObservations-scoped,
+multi-market data-quality checks (gap tiering INFO/WARNING/ERROR with Poya
+suppression, rolling-IQR outlier hold, the shared source-agnostic row
+validator, cross-source duplicate detection with a MarketId dimension, and
+generic macro point-in-time guards) live in ``agriforecast_ml.data_quality``
+and ``agriforecast_ml.poya`` instead of being folded into this file — this
+avoids extending a MarketPrices-shaped module with PriceObservations-shaped
+concerns. See data_quality.py's module docstring for the full picture.
 """
 from __future__ import annotations
 

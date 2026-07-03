@@ -14,4 +14,10 @@ public class DefaultSetting
     public string Eco_Prefix { get; set; }
     public int? Eco_Padding { get; set; }
     public int? Eco_Code { get; set; }
+
+    // MKT###### scheme for manually-created Markets (mirrors Crop_*/Eco_*).
+    // Seeded markets use fixed codes; this drives future CRUD-created markets.
+    public string Mkt_Prefix { get; set; }
+    public int? Mkt_Padding { get; set; }
+    public int? Mkt_Code { get; set; }
 }

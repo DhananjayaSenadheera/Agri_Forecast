@@ -15,6 +15,10 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<EconomicIndicator> EconomicIndicators { get; set; }
     public DbSet<PolicyFlag> PolicyFlags { get; set; }
     public DbSet<User> Users { get; set; }
+    public DbSet<Market> Markets { get; set; }
+    public DbSet<PriceObservation> PriceObservations { get; set; }
+    public DbSet<CommodityAlias> CommodityAliases { get; set; }
+    public DbSet<IngestionWatermark> IngestionWatermarks { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -37,6 +41,10 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             Eco_Code = 1,
             Eco_Padding = 8,
             Eco_Prefix = "ECO",
+            // Next manual market code = MKT00000007 (7 seeded markets occupy 1..6).
+            Mkt_Code = 7,
+            Mkt_Padding = 8,
+            Mkt_Prefix = "MKT",
         });
         
         modelBuilder.Entity<Crop>(e =>
@@ -96,6 +104,222 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 .IsUnique();
         });
 
+        modelBuilder.Entity<Market>(e =>
+        {
+            // 50 chars: fits both the MKT###### seed codes and the back-fill twins keyed
+            // 'ECOMAP-' + a 36-char GUID (= 43 chars); 20 was too narrow for the latter.
+            e.Property(x => x.MarketCode).HasMaxLength(50).IsRequired();
+            e.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            e.Property(x => x.District).HasMaxLength(100);
+            e.Property(x => x.MarketType).HasConversion<int>().IsRequired();
+
+            // MarketCode is the human-facing business key — unique.
+            e.HasIndex(x => x.MarketCode).IsUnique();
+        });
+
+        // Back-compat link: EconomicCenter -> Market (nullable, no cascade).
+        // Restrict so a Market can never be deleted out from under an EconomicCenter;
+        // existing rows stay valid because MarketId is nullable.
+        modelBuilder.Entity<EconomicCenter>(e =>
+        {
+            e.HasOne<Market>()
+                .WithMany()
+                .HasForeignKey(x => x.MarketId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<PriceObservation>(e =>
+        {
+            e.Property(x => x.ExternalCommodityName).HasMaxLength(200).IsRequired();
+            e.Property(x => x.Source).HasMaxLength(100).IsRequired();
+            e.Property(x => x.ObservedDate).HasColumnType("date");
+
+            // Prices decimal(10,2); arrivals decimal(12,2). All nullable.
+            e.Property(x => x.WholesalePrice).HasPrecision(10, 2);
+            e.Property(x => x.RetailPrice).HasPrecision(10, 2);
+            e.Property(x => x.MinPrice).HasPrecision(10, 2);
+            e.Property(x => x.MaxPrice).HasPrecision(10, 2);
+            e.Property(x => x.ArrivalsKg).HasPrecision(12, 2);
+
+            // Unit quarantine (R1.1 P1). UnitRaw nullable; UnitConversionFactor decimal(10,4)
+            // nullable; IsUnitConfirmed NOT NULL default false (fail-closed — rows are
+            // quarantined until ingestion confirms the unit). The 0-row table needs no back-fill.
+            e.Property(x => x.UnitRaw).HasMaxLength(50);
+            e.Property(x => x.UnitConversionFactor).HasPrecision(10, 4);
+            e.Property(x => x.IsUnitConfirmed).IsRequired().HasDefaultValue(false);
+
+            e.HasOne<Market>()
+                .WithMany()
+                .HasForeignKey(x => x.MarketId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasOne<Crop>()
+                .WithMany()
+                .HasForeignKey(x => x.CropId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // Idempotent upsert key. ExternalCommodityId is NULLABLE and SQL Server
+            // treats NULLs as EQUAL in a unique index, which would collapse all
+            // name-keyed (HARTI/CBSL) bulletins into one row. So we split into TWO
+            // filtered unique indexes:
+            //   * id-keyed sources (DEC) dedupe on ExternalCommodityId,
+            //   * name-keyed sources dedupe on ExternalCommodityName,
+            // guaranteeing at most one observation per commodity/market/date/source
+            // in either regime without a sentinel value.
+            e.HasIndex(x => new { x.MarketId, x.ExternalCommodityId, x.ObservedDate, x.Source })
+                .IsUnique()
+                .HasFilter("[ExternalCommodityId] IS NOT NULL")
+                .HasDatabaseName("UX_PriceObservations_MarketCommodityIdDateSource");
+
+            e.HasIndex(x => new { x.MarketId, x.ExternalCommodityName, x.ObservedDate, x.Source })
+                .IsUnique()
+                .HasFilter("[ExternalCommodityId] IS NULL")
+                .HasDatabaseName("UX_PriceObservations_MarketCommodityNameDateSource");
+
+            // Forecast read path: prices for a crop at a market over time.
+            e.HasIndex(x => new { x.MarketId, x.CropId, x.ObservedDate })
+                .HasDatabaseName("IX_PriceObservations_MarketCropDate");
+        });
+
+        modelBuilder.Entity<CommodityAlias>(e =>
+        {
+            e.Property(x => x.Alias).HasMaxLength(200).IsRequired();
+            e.Property(x => x.Source).HasMaxLength(100);
+            e.Property(x => x.Language).HasMaxLength(20);
+            e.Property(x => x.IsActive).IsRequired().HasDefaultValue(true);
+
+            // Restrict: a Crop can never be deleted while an alias still maps to it.
+            e.HasOne<Crop>()
+                .WithMany()
+                .HasForeignKey(x => x.CropId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // Ambiguity guard: one alias must not map to two crops. SQL Server treats NULLs
+            // as EQUAL in a unique index, which would collapse every global (Source IS NULL)
+            // alias into one row — so we split into TWO filtered unique indexes, exactly as
+            // PriceObservation splits its id/name-keyed dedup:
+            //   * source-scoped aliases dedupe on (Alias, Source) where Source IS NOT NULL,
+            //   * global aliases dedupe on (Alias) where Source IS NULL.
+            // Both are case-INSENSITIVE (SQL Server default collation) — desirable here, so
+            // "Beans"/"beans" cannot be inserted as two conflicting mappings.
+            e.HasIndex(x => new { x.Alias, x.Source })
+                .IsUnique()
+                .HasFilter("[Source] IS NOT NULL")
+                .HasDatabaseName("UX_CommodityAliases_AliasSource");
+
+            e.HasIndex(x => x.Alias)
+                .IsUnique()
+                .HasFilter("[Source] IS NULL")
+                .HasDatabaseName("UX_CommodityAliases_AliasGlobal");
+
+            // Resolution read path: look up active aliases by (Alias, Source).
+            e.HasIndex(x => new { x.Alias, x.Source, x.IsActive })
+                .HasDatabaseName("IX_CommodityAliases_AliasSourceActive");
+        });
+
+        modelBuilder.Entity<IngestionWatermark>(e =>
+        {
+            e.Property(x => x.Source).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Status).HasConversion<int>().IsRequired();
+            e.Property(x => x.LastMessage).HasMaxLength(1000);
+
+            // Vintage high-water mark stored date-only (no hidden time) — mirrors the
+            // date-only discipline on PriceObservation.ObservedDate / PolicyFlag effective dates.
+            e.Property(x => x.LastObservedDate).HasColumnType("date");
+
+            // One watermark per source — this is the business key the services resume on.
+            e.HasIndex(x => x.Source).IsUnique();
+        });
+
+        SeedMarkets(modelBuilder);
+
+    }
+
+    // Deterministic seed of the initial market dimension: three physical DEC hubs
+    // plus HARTI (Pettah wholesale, Narahenpita retail) and a CBSL national-aggregate
+    // pseudo-market. Fixed Ids + fixed timestamps keep the seed idempotent across migrations.
+    // Codes MKT00000001..MKT00000006 mirror the MKT###### scheme (DefaultSetting.Mkt_*).
+    //
+    // DEDUP TRAP (must be enforced downstream, NOT in schema): the seeded HARTI Pettah
+    // wholesale market (MKT00000004) and a future ECOMAP twin of a legacy Colombo/Pettah
+    // EconomicCenter could BOTH carry wholesale prices for the same location, double-counting
+    // it in any cross-market average. Likewise the CBSL row is a NationalAggregate — an
+    // already-averaged figure that must never be pooled with location-level markets.
+    // The canonical-mapping layer MUST resolve overlapping physical locations to a single
+    // market and exclude NationalAggregate markets from location-level aggregation BEFORE
+    // any cross-market aggregation ships. Tracked on the ClickUp canonical-mapping task.
+    private static void SeedMarkets(ModelBuilder modelBuilder)
+    {
+        var seededAt = new DateTime(2026, 07, 02, 0, 0, 0, DateTimeKind.Utc);
+
+        modelBuilder.Entity<Market>().HasData(
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000001"),
+                MarketCode = "MKT00000001",
+                Name = "Dambulla Dedicated Economic Centre",
+                District = (string?)"Matale",
+                MarketType = MarketType.DEC,
+                IsActive = true,
+                CreatedAt = seededAt,
+                UpdatedAt = seededAt
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000002"),
+                MarketCode = "MKT00000002",
+                Name = "Keppetipola Dedicated Economic Centre",
+                District = (string?)"Badulla",
+                MarketType = MarketType.DEC,
+                IsActive = true,
+                CreatedAt = seededAt,
+                UpdatedAt = seededAt
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000003"),
+                MarketCode = "MKT00000003",
+                Name = "Thambuttegama Dedicated Economic Centre",
+                District = (string?)"Anuradhapura",
+                MarketType = MarketType.DEC,
+                IsActive = true,
+                CreatedAt = seededAt,
+                UpdatedAt = seededAt
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000004"),
+                MarketCode = "MKT00000004",
+                Name = "Pettah (HARTI wholesale)",
+                District = (string?)"Colombo",
+                MarketType = MarketType.Wholesale,
+                IsActive = true,
+                CreatedAt = seededAt,
+                UpdatedAt = seededAt
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000005"),
+                MarketCode = "MKT00000005",
+                Name = "Narahenpita (HARTI retail)",
+                District = (string?)"Colombo",
+                MarketType = MarketType.Retail,
+                IsActive = true,
+                CreatedAt = seededAt,
+                UpdatedAt = seededAt
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000006"),
+                MarketCode = "MKT00000006",
+                Name = "CBSL national average (pseudo-market)",
+                District = (string?)null,
+                MarketType = MarketType.NationalAggregate,
+                IsActive = true,
+                CreatedAt = seededAt,
+                UpdatedAt = seededAt
+            }
+        );
     }
 
     // Real Sri Lankan national policies, captured point-in-time for the ML feature store.

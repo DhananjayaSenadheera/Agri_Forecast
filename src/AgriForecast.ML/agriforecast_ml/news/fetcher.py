@@ -27,6 +27,7 @@ from typing import TypedDict
 import feedparser
 
 from .feeds import FEEDS, FeedSpec
+from ..netguard import DisallowedUrlError, assert_host_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,19 @@ def fetch_feed(
     source = feed_spec["source"]
     url = feed_spec["url"]
     now_utc = datetime.now(timezone.utc)
+
+    # SSRF guard (S1): feedparser fetches the URL internally (and follows
+    # redirects) with no host restriction. Validate the feed URL's scheme + host
+    # against the ingestion allowlist before handing it to feedparser, so a
+    # stale/poisoned feed entry can't point the fetch at an off-allowlist host.
+    # (Host-only check — feedparser owns the socket, so we cannot re-validate its
+    # redirect chain; the allowlist on the configured URL is the enforceable
+    # control here.) A disallowed URL is skipped like any other bad feed.
+    try:
+        assert_host_allowed(url)
+    except DisallowedUrlError as exc:
+        logger.warning("[%s] Feed URL blocked by SSRF allowlist: %s", source, exc)
+        return []
 
     try:
         old_timeout = socket.getdefaulttimeout()

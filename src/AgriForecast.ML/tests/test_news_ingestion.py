@@ -131,7 +131,7 @@ class TestLanguageFilter:
         from agriforecast_ml.news import fetcher
         import feedparser
 
-        feed_spec = {"source": "fixture", "url": "unused", "category": "test"}
+        feed_spec = {"source": "fixture", "url": "https://economynext.com/feed/", "category": "test"}
         with open(FIXTURE_FEED, "rb") as f:
             raw = f.read()
 
@@ -173,7 +173,7 @@ class TestSummaryTruncation:
         from agriforecast_ml.news import fetcher
         import feedparser
 
-        feed_spec = {"source": "fixture", "url": "unused", "category": "test"}
+        feed_spec = {"source": "fixture", "url": "https://economynext.com/feed/", "category": "test"}
         with open(FIXTURE_FEED, "rb") as f:
             raw = f.read()
 

@@ -10,6 +10,8 @@ using AgriForecast.Infrastructure.Services.MarketPriceIngestion;
 using AgriForecast.Infrastructure.Services.WeatherIngestion;
 using AgriForecast.Infrastructure.Services.EconomicIngestion;
 using AgriForecast.Infrastructure.Services.NewsIngestion;
+using AgriForecast.Infrastructure.Services.HartiIngestion;
+using AgriForecast.Infrastructure.Services.CbslIngestion;
 using AgriForecast.Infrastructure.Services.Recommendation;
 using AgriForecast.Infrastructure.Security;
 
@@ -38,6 +40,12 @@ public static class InfsDependencyInjection
         services.AddScoped<IForecastingService, ForecastingService>();
         services.AddScoped<IRecommendationService, RecommendationService>();
 
+        // R1.1 P1 Step 6: per-source ingestion watermark store + the CBSL ingestion service.
+        // (The HARTI + CBSL typed HttpClients are registered further down alongside the other
+        // typed clients.)
+        services.AddScoped<IIngestionWatermarkRepository, IngestionWatermarkRepository>();
+        services.AddScoped<ICbslPriceReportIngestionService, CbslPriceReportIngestionService>();
+
         // Auth: user store, password hashing, and JWT issuance.
         services.AddScoped<IUserRepository, UserRepository>();
         services.AddScoped<IPasswordHasher, PasswordHasher>();
@@ -52,6 +60,14 @@ public static class InfsDependencyInjection
 
             http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(30);
+        })
+        // SSRF hardening (S1): the DEC portal probes fixed JSON endpoints. Disable
+        // auto-redirect so a 3xx from the portal cannot silently bounce the request
+        // to an internal/arbitrary host; a redirect surfaces as a non-2xx and the
+        // client returns null (handled as a failed fetch), never followed blindly.
+        .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+        {
+            AllowAutoRedirect = false,
         });
         // Typed HttpClient over the Python ML service (POST /predict).
         services.AddHttpClient<IHarvestPredictionClient, HarvestPredictionClient>(http =>
@@ -80,6 +96,35 @@ public static class InfsDependencyInjection
 
             http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+        });
+        // HARTI multi-market bulletin ingestion: typed HttpClient over the same ML service,
+        // triggering the Python HARTI pipeline via POST /admin/ingest-harti (orchestrated by the
+        // Ingestion Worker). The pipeline can (re)parse a large PDF corpus + run data-quality
+        // hooks, so it needs a long timeout — much longer than /predict (override via
+        // MlService:HartiIngestTimeoutSeconds, default 1800 = 30 min for a full backfill; the
+        // daily incremental pass is far shorter).
+        services.AddHttpClient<IHartiBulletinIngestionService, HartiBulletinIngestionService>(http =>
+        {
+            var baseUrl = configuration["MlService:BaseUrl"];
+
+            if (string.IsNullOrWhiteSpace(baseUrl))
+                throw new InvalidOperationException("Missing MlService:BaseUrl");
+
+            var timeoutSeconds = configuration.GetValue<int?>("MlService:HartiIngestTimeoutSeconds") ?? 1800;
+
+            http.BaseAddress = new Uri(baseUrl);
+            http.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+        });
+        // CBSL daily price report: typed HttpClient skeleton. The service is feature-flagged OFF
+        // (Disabled watermark) until a Python CBSL parser exists, so no CBSL BaseUrl is required
+        // yet; the client is registered so the seam is real and DI-resolvable. BaseAddress is set
+        // from MarketPriceSources:Cbsl:BaseUrl when present (optional today).
+        services.AddHttpClient<ICbslPriceReportClient, CbslPriceReportClient>(http =>
+        {
+            var baseUrl = configuration["MarketPriceSources:Cbsl:BaseUrl"];
+            if (!string.IsNullOrWhiteSpace(baseUrl))
+                http.BaseAddress = new Uri(baseUrl);
+            http.Timeout = TimeSpan.FromSeconds(60);
         });
         // Weather provider is swappable via WeatherSource:Provider (default: OpenMeteo - free, keyless).
         var weatherProvider = configuration["WeatherSource:Provider"] ?? "OpenMeteo";

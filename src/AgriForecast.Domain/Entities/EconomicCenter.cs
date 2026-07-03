@@ -7,6 +7,12 @@ public class EconomicCenter
     public string Name { get; private set; } = string.Empty;
     public string Location { get; set; }
     public string Description { get; set; }
+
+    // Back-compat link to the promoted Market dimension. Nullable so existing rows
+    // remain valid and no existing code path is forced to populate it; the multi-market
+    // migration back-fills it by mapping each EconomicCenter to its Market twin.
+    public Guid? MarketId { get; set; }
+
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 

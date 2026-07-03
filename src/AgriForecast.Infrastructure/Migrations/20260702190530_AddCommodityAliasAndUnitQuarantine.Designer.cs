@@ -4,6 +4,7 @@ using AgriForecast.Infrastructure.Database;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AgriForecast.Infrastructure.Migrations
 {
     [DbContext(typeof(AgriForecastDbContext))]
-    partial class AgriForecastDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260702190530_AddCommodityAliasAndUnitQuarantine")]
+    partial class AddCommodityAliasAndUnitQuarantine
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -271,41 +274,6 @@ namespace AgriForecast.Infrastructure.Migrations
                         .IsUnique();
 
                     b.ToTable("EconomicIndicators");
-                });
-
-            modelBuilder.Entity("AgriForecast.Domain.Entities.IngestionWatermark", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("LastMessage")
-                        .HasMaxLength(1000)
-                        .HasColumnType("nvarchar(1000)");
-
-                    b.Property<DateOnly?>("LastObservedDate")
-                        .HasColumnType("date");
-
-                    b.Property<DateTime?>("LastSuccessUtc")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("Source")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("nvarchar(100)");
-
-                    b.Property<int>("Status")
-                        .HasColumnType("int");
-
-                    b.Property<DateTime>("UpdatedAtUtc")
-                        .HasColumnType("datetime2");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Source")
-                        .IsUnique();
-
-                    b.ToTable("IngestionWatermarks");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.Market", b =>

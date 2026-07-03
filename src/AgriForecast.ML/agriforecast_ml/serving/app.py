@@ -179,5 +179,77 @@ def ingest_news_endpoint(req: IngestNewsRequest):
     }
 
 
+class IngestHartiRequest(BaseModel):
+    """Orchestration knobs for the multi-market HARTI daily pass.
+
+    The .NET Worker sends its resume watermark (minus a late-arrival look-back
+    window, default 7 days) as ``sinceDate`` (ISO 'YYYY-MM-DD'); only bulletins
+    strictly AFTER it are fetched/parsed, so the daily pass does not re-scrape
+    the whole corpus while still re-scanning ~the last week to catch a bulletin
+    published late for an already-passed date (the upsert is idempotent, so the
+    re-scan is free). ``sinceDate`` null => full backfill. ``noDownload``/
+    ``dryRun`` are for offline reruns and tests.
+
+    FIRST-RUN BOOTSTRAP: a null ``sinceDate`` triggers a full ~3000-PDF backfill
+    that can run for many minutes and may exceed the Worker's HTTP timeout
+    (MlService:HartiIngestTimeoutSeconds, default 1800s), so the cold first run
+    may never complete over HTTP. The sanctioned first-time seed is to run the
+    CLI ``python ingest_harti.py`` once (it has NO HTTP timeout); after that this
+    endpoint only ever gets incremental, look-back-bounded ``sinceDate`` calls
+    from the Worker, which are fast.
+    """
+    sinceDate: Optional[str] = None
+    noDownload: bool = False
+    dryRun: bool = False
+
+
+@admin_router.post("/ingest-harti")
+def ingest_harti_endpoint(req: IngestHartiRequest):
+    """Run the multi-market HARTI ingestion pass in-process.
+
+    Internal admin endpoint orchestrated by the .NET Ingestion Worker (R1.1 P1
+    Step 6), consistent with /admin/ingest-news. Runs the same steps as
+    ingest_harti.py for the PriceObservations path (download-bounded-by-sinceDate
+    -> parse -> upsert), plus the data-quality hooks:
+      * assert_no_source_duplicates -> HARD FAIL: surfaced as a 502 so the Worker
+        logs it and does NOT advance its watermark.
+      * heal_price_observation_crops + flag_price_outliers + gap_report ->
+        post-pass summaries returned in the response (report-only; they never
+        gate the pass).
+
+    The heavy work module is imported lazily so any HARTI-module breakage can
+    never block serving startup or the /predict path.
+    """
+    try:
+        import ingest_harti_service
+    except Exception:  # pragma: no cover - import wiring guard
+        _log.exception("HARTI ingestion module unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="HARTI ingestion module unavailable.",
+        )
+
+    try:
+        return ingest_harti_service.run(
+            since_date=req.sinceDate,
+            no_download=req.noDownload,
+            dry_run=req.dryRun,
+        )
+    except AssertionError:
+        # Cross-source duplicate check failed — a data-integrity hard fail. Do NOT
+        # let the Worker advance its watermark; surface a structured 502.
+        _log.exception("HARTI ingestion: cross-source duplicate check FAILED")
+        raise HTTPException(
+            status_code=502,
+            detail="HARTI ingestion failed data-quality gate (cross-source duplicates).",
+        )
+    except Exception:
+        _log.exception("HARTI ingestion failed")
+        raise HTTPException(
+            status_code=502,
+            detail="HARTI ingestion failed.",
+        )
+
+
 # Register the protected admin routes (must come after the routes are declared).
 app.include_router(admin_router)

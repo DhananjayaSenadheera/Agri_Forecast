@@ -2,6 +2,8 @@ using AgriForecast.Infrastructure.Services.MarketPriceIngestion;
 using AgriForecast.Infrastructure.Services.WeatherIngestion;
 using AgriForecast.Infrastructure.Services.EconomicIngestion;
 using AgriForecast.Infrastructure.Services.NewsIngestion;
+using AgriForecast.Infrastructure.Services.HartiIngestion;
+using AgriForecast.Infrastructure.Services.CbslIngestion;
 
 namespace AgriForecast.Ingestion;
 
@@ -97,6 +99,36 @@ public class Worker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "An error occurred during news ingestion");
+        }
+
+        // R1.1 P1 Step 6: HARTI multi-market bulletin ingestion. Fail-isolated exactly like the
+        // blocks above — a HARTI failure NEVER aborts the pass; it is logged ERROR and the pass
+        // continues. The service itself also self-heals its watermark on failure (inner belt).
+        try
+        {
+            var harti = scope.ServiceProvider.GetRequiredService<IHartiBulletinIngestionService>();
+            _logger.LogInformation("HARTI ingestion started");
+            await harti.IngestAsync(stoppingToken);
+            _logger.LogInformation("HARTI ingestion finished");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "An error occurred during HARTI ingestion");
+        }
+
+        // R1.1 P1 Step 6: CBSL daily price report ingestion. Feature-flagged OFF by default
+        // (Disabled watermark, a deliberate no-op that is NOT a source failure). Still wrapped in
+        // its own try/catch so that, once enabled, a CBSL failure is isolated like every other source.
+        try
+        {
+            var cbsl = scope.ServiceProvider.GetRequiredService<ICbslPriceReportIngestionService>();
+            _logger.LogInformation("CBSL ingestion started");
+            await cbsl.IngestAsync(stoppingToken);
+            _logger.LogInformation("CBSL ingestion finished");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "An error occurred during CBSL ingestion");
         }
     }
 }

@@ -4,6 +4,7 @@ using AgriForecast.Infrastructure.Database;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AgriForecast.Infrastructure.Migrations
 {
     [DbContext(typeof(AgriForecastDbContext))]
-    partial class AgriForecastDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260702174842_AddMultiMarketAndPointInTimeData")]
+    partial class AddMultiMarketAndPointInTimeData
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -21,56 +24,6 @@ namespace AgriForecast.Infrastructure.Migrations
                 .HasAnnotation("Relational:MaxIdentifierLength", 128);
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
-
-            modelBuilder.Entity("AgriForecast.Domain.Entities.CommodityAlias", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("Alias")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("nvarchar(200)");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("datetime2");
-
-                    b.Property<Guid>("CropId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<bool>("IsActive")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bit")
-                        .HasDefaultValue(true);
-
-                    b.Property<string>("Language")
-                        .HasMaxLength(20)
-                        .HasColumnType("nvarchar(20)");
-
-                    b.Property<string>("Source")
-                        .HasMaxLength(100)
-                        .HasColumnType("nvarchar(100)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Alias")
-                        .IsUnique()
-                        .HasDatabaseName("UX_CommodityAliases_AliasGlobal")
-                        .HasFilter("[Source] IS NULL");
-
-                    b.HasIndex("CropId");
-
-                    b.HasIndex("Alias", "Source")
-                        .IsUnique()
-                        .HasDatabaseName("UX_CommodityAliases_AliasSource")
-                        .HasFilter("[Source] IS NOT NULL");
-
-                    b.HasIndex("Alias", "Source", "IsActive")
-                        .HasDatabaseName("IX_CommodityAliases_AliasSourceActive");
-
-                    b.ToTable("CommodityAliases");
-                });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.Crop", b =>
                 {
@@ -271,41 +224,6 @@ namespace AgriForecast.Infrastructure.Migrations
                         .IsUnique();
 
                     b.ToTable("EconomicIndicators");
-                });
-
-            modelBuilder.Entity("AgriForecast.Domain.Entities.IngestionWatermark", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("LastMessage")
-                        .HasMaxLength(1000)
-                        .HasColumnType("nvarchar(1000)");
-
-                    b.Property<DateOnly?>("LastObservedDate")
-                        .HasColumnType("date");
-
-                    b.Property<DateTime?>("LastSuccessUtc")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("Source")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("nvarchar(100)");
-
-                    b.Property<int>("Status")
-                        .HasColumnType("int");
-
-                    b.Property<DateTime>("UpdatedAtUtc")
-                        .HasColumnType("datetime2");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Source")
-                        .IsUnique();
-
-                    b.ToTable("IngestionWatermarks");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.Market", b =>
@@ -602,11 +520,6 @@ namespace AgriForecast.Infrastructure.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
 
-                    b.Property<bool>("IsUnitConfirmed")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bit")
-                        .HasDefaultValue(false);
-
                     b.Property<Guid>("MarketId")
                         .HasColumnType("uniqueidentifier");
 
@@ -632,14 +545,6 @@ namespace AgriForecast.Infrastructure.Migrations
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
-
-                    b.Property<decimal?>("UnitConversionFactor")
-                        .HasPrecision(10, 4)
-                        .HasColumnType("decimal(10,4)");
-
-                    b.Property<string>("UnitRaw")
-                        .HasMaxLength(50)
-                        .HasColumnType("nvarchar(50)");
 
                     b.Property<decimal?>("WholesalePrice")
                         .HasPrecision(10, 2)
@@ -727,15 +632,6 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("WeatherRecords");
-                });
-
-            modelBuilder.Entity("AgriForecast.Domain.Entities.CommodityAlias", b =>
-                {
-                    b.HasOne("AgriForecast.Domain.Entities.Crop", null)
-                        .WithMany()
-                        .HasForeignKey("CropId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.CropPrice", b =>
