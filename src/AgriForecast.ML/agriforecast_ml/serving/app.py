@@ -13,7 +13,8 @@ import os
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..envfile import load_env_file
@@ -30,6 +31,35 @@ app = FastAPI(title="AgriForecast ML — Model A", version="1.0")
 _log = logging.getLogger(__name__)
 
 _ADMIN_API_KEY_ENV = "ML_ADMIN_API_KEY"
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Global backstop for any UNHANDLED exception in any route (P3, item 12).
+
+    Every route already wraps its work in try/except and raises HTTPException
+    with a fixed generic ``detail`` (never interpolating the exception). This
+    handler is the safety net for anything those guards miss — a bug in a new
+    route, or an error raised outside a route's try block. Without it an
+    unhandled exception falls through to Starlette's default 500, which in a
+    debug/dev configuration can leak a traceback / internal file paths.
+
+    Contract:
+    - Full exception (with traceback) is logged server-side only, tagged with
+      the request method + path for triage. Request bodies and headers are
+      NEVER logged — they can carry the admin ``X-API-Key``.
+    - The client always receives a fixed generic 500 body. The exception, its
+      type, and any path/URL are NEVER echoed to the caller.
+
+    NOTE: FastAPI/Starlette route ``HTTPException`` through their own handler
+    earlier in the stack, so this ``except Exception``-style handler does NOT
+    intercept HTTPException — 401/502/503 raised in routes keep their intended
+    status + detail. (Proven in the serving auth/error-leak test suite.)
+    """
+    _log.exception(
+        "Unhandled exception serving %s %s", request.method, request.url.path
+    )
+    return JSONResponse(status_code=500, content={"detail": "Internal server error."})
 
 
 def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
