@@ -6,6 +6,7 @@ using AgriForecast.Domain.Interfaces;
 using AgriForecast.Infrastructure.ExternalSources.DTOs;
 using AgriForecast.Infrastructure.ExternalSources.Interfaces;
 using AgriForecast.Infrastructure.Services.CbslIngestion;
+using AgriForecast.Infrastructure.Services.CbslMacroIngestion;
 using AgriForecast.Infrastructure.Services.HartiIngestion;
 using FluentAssertions;
 using Microsoft.Extensions.Configuration;
@@ -325,5 +326,108 @@ public class IngestionServiceTests
             _onCall();
             return Task.FromResult<IReadOnlyList<CbslDailyPriceReportDto>>(Array.Empty<CbslDailyPriceReportDto>());
         }
+    }
+
+    // ── CBSL MACRO (P3, 86cahefbh): disabled by default is a no-op that makes no HTTP call and is
+    //    NOT a failure ─────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CbslMacro_DefaultDisabled_IsNoOp_MakesNoHttpCall_AndIsNotAFailure()
+    {
+        var wms = new FakeWatermarkRepository();
+        // Any HTTP call in the disabled path would be a bug: throw so the test fails loudly if hit.
+        var handler = new StubHttpMessageHandler(_ => throw new InvalidOperationException("must not call ML when disabled"));
+
+        var svc = new CbslMacroIngestionService(
+            ClientFrom(handler),
+            Config(),   // MacroSources:CbslMacro:Enabled unset => false
+            wms,
+            NullLogger<CbslMacroIngestionService>.Instance);
+
+        await svc.IngestAsync(CancellationToken.None);
+
+        handler.Calls.Should().Be(0, "the disabled path must not touch the Python seam");
+        var wm = wms.Peek(CbslMacroIngestionService.SourceKey)!;
+        wm.Status.Should().Be(IngestionSourceStatus.Disabled);
+        wm.Status.Should().NotBe(IngestionSourceStatus.Failed, "a disabled source is never a failure");
+    }
+
+    // ── CBSL MACRO: enabled path calls the seam, sends the admin key, and records per-series
+    //    watermarks from perSeriesCoverage ─────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CbslMacro_Enabled_CallsSeam_SendsApiKey_AndRecordsPerSeriesWatermarks()
+    {
+        var wms = new FakeWatermarkRepository();
+
+        var handler = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK, """
+            {"status":"ok",
+             "artifactsFetched":4,"artifactsSkipped":1,
+             "rowsInserted":6,"rowsUpdated":2,"rowsSkippedInvalid":0,
+             "perSeriesCoverage":{"CCPI_BASE2021":3,"FOOD_INFLATION_YOY":3}}
+            """));
+
+        var svc = new CbslMacroIngestionService(
+            ClientFrom(handler),
+            Config(("MacroSources:CbslMacro:Enabled", "true"), ("MlService:AdminApiKey", "secret-key")),
+            wms,
+            NullLogger<CbslMacroIngestionService>.Instance);
+
+        await svc.IngestAsync(CancellationToken.None);
+
+        // Seam hit once with the admin key on the P3 route.
+        handler.Calls.Should().Be(1);
+        handler.LastRequest!.RequestUri!.ToString().Should().EndWith("admin/ingest-cbsl-macro");
+        handler.LastRequest.Headers.GetValues("X-API-Key").Should().ContainSingle().Which.Should().Be("secret-key");
+
+        // Gating watermark advanced to Ok on success.
+        wms.Peek(CbslMacroIngestionService.SourceKey)!.Status.Should().Be(IngestionSourceStatus.Ok);
+
+        // One watermark per series, keyed CBSL_MACRO_<SeriesCode>, each Ok with its row count.
+        var ccpi = wms.Peek(CbslMacroIngestionService.SeriesSourcePrefix + "CCPI_BASE2021")!;
+        ccpi.Status.Should().Be(IngestionSourceStatus.Ok);
+        ccpi.LastMessage.Should().Contain("rows=3");
+        wms.Peek(CbslMacroIngestionService.SeriesSourcePrefix + "FOOD_INFLATION_YOY")!
+            .Status.Should().Be(IngestionSourceStatus.Ok);
+    }
+
+    // ── CBSL MACRO: enabled but no admin key fails LOUD (no HTTP call) ────────────────────────
+
+    [Fact]
+    public async Task CbslMacro_Enabled_Throws_WhenAdminKeyMissing()
+    {
+        var wms = new FakeWatermarkRepository();
+        var handler = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK, "{}"));
+
+        var svc = new CbslMacroIngestionService(
+            ClientFrom(handler),
+            Config(("MacroSources:CbslMacro:Enabled", "true"), ("MlService:AdminApiKey", "")),
+            wms,
+            NullLogger<CbslMacroIngestionService>.Instance);
+
+        var act = () => svc.IngestAsync(CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        handler.Calls.Should().Be(0, "no HTTP call must be made without an admin key");
+    }
+
+    // ── CBSL MACRO: enabled path fails SAFE on transport error (records failure, never throws) ──
+
+    [Fact]
+    public async Task CbslMacro_Enabled_HttpError_RecordsFailure_ButDoesNotThrow()
+    {
+        var wms = new FakeWatermarkRepository();
+        var handler = new StubHttpMessageHandler(_ => Json(HttpStatusCode.BadGateway, "boom"));
+
+        var svc = new CbslMacroIngestionService(
+            ClientFrom(handler),
+            Config(("MacroSources:CbslMacro:Enabled", "true"), ("MlService:AdminApiKey", "secret-key")),
+            wms,
+            NullLogger<CbslMacroIngestionService>.Instance);
+
+        // Must NOT throw — fail safe; the Worker's outer try/catch is a second belt.
+        await svc.IngestAsync(CancellationToken.None);
+
+        wms.Peek(CbslMacroIngestionService.SourceKey)!.Status.Should().Be(IngestionSourceStatus.Failed);
     }
 }

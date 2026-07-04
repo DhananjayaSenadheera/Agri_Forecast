@@ -4,6 +4,7 @@ using AgriForecast.Infrastructure.Services.EconomicIngestion;
 using AgriForecast.Infrastructure.Services.NewsIngestion;
 using AgriForecast.Infrastructure.Services.HartiIngestion;
 using AgriForecast.Infrastructure.Services.CbslIngestion;
+using AgriForecast.Infrastructure.Services.CbslMacroIngestion;
 
 namespace AgriForecast.Ingestion;
 
@@ -129,6 +130,21 @@ public class Worker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "An error occurred during CBSL ingestion");
+        }
+
+        // R1 P3 (86cahefbh): CBSL macro (CCPI/MEI vintage) ingestion. Feature-flagged OFF by default
+        // (Disabled gating watermark, a deliberate no-op that is NOT a source failure). Wrapped in
+        // its own try/catch so that, once enabled, a macro failure is isolated like every other source.
+        try
+        {
+            var cbslMacro = scope.ServiceProvider.GetRequiredService<ICbslMacroIngestionService>();
+            _logger.LogInformation("CBSL macro ingestion started");
+            await cbslMacro.IngestAsync(stoppingToken);
+            _logger.LogInformation("CBSL macro ingestion finished");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "An error occurred during CBSL macro ingestion");
         }
     }
 }

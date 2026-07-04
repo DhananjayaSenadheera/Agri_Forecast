@@ -12,6 +12,7 @@ using AgriForecast.Infrastructure.Services.EconomicIngestion;
 using AgriForecast.Infrastructure.Services.NewsIngestion;
 using AgriForecast.Infrastructure.Services.HartiIngestion;
 using AgriForecast.Infrastructure.Services.CbslIngestion;
+using AgriForecast.Infrastructure.Services.CbslMacroIngestion;
 using AgriForecast.Infrastructure.Services.Recommendation;
 using AgriForecast.Infrastructure.Security;
 
@@ -46,6 +47,9 @@ public static class InfsDependencyInjection
         // typed clients.)
         services.AddScoped<IIngestionWatermarkRepository, IngestionWatermarkRepository>();
         services.AddScoped<ICbslPriceReportIngestionService, CbslPriceReportIngestionService>();
+        // R1 P3 (86cahefbh): CBSL macro (CCPI/MEI vintage) ingestion service — thin, feature-flagged
+        // OFF skeleton over the Python /admin/ingest-cbsl-macro seam. Its typed HttpClient is
+        // registered further down alongside the other ML-service clients.
 
         // Auth: user store, password hashing, and JWT issuance.
         services.AddScoped<IUserRepository, UserRepository>();
@@ -126,6 +130,31 @@ public static class InfsDependencyInjection
             if (!string.IsNullOrWhiteSpace(baseUrl))
                 http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(60);
+        });
+        // R1 P3 (86cahefbh): CBSL macro ingestion — typed HttpClient over the same ML service,
+        // triggering the Python macro pipeline via POST /admin/ingest-cbsl-macro (orchestrated by
+        // the Ingestion Worker). BaseAddress = MlService:BaseUrl (the /admin/* seam lives on the ML
+        // service, same as HARTI/news). The pipeline scrapes + parses a small monthly PDF corpus, so
+        // a 60s timeout is comfortable (override via MlService:CbslMacroIngestTimeoutSeconds).
+        services.AddHttpClient<ICbslMacroIngestionService, CbslMacroIngestionService>(http =>
+        {
+            var baseUrl = configuration["MlService:BaseUrl"];
+
+            if (string.IsNullOrWhiteSpace(baseUrl))
+                throw new InvalidOperationException("Missing MlService:BaseUrl");
+
+            var timeoutSeconds = configuration.GetValue<int?>("MlService:CbslMacroIngestTimeoutSeconds") ?? 60;
+
+            http.BaseAddress = new Uri(baseUrl);
+            http.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+        })
+        // SSRF hardening (matches the Dambulla client): disable auto-redirect so a 3xx from the ML
+        // host cannot silently bounce an authenticated admin POST to an internal/arbitrary host — a
+        // redirect surfaces as a non-2xx and is handled as a failed pass, never followed blindly.
+        // (The recorded lesson notes the existing CBSL price-report client block lacks this.)
+        .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+        {
+            AllowAutoRedirect = false,
         });
         // Weather provider is swappable via WeatherSource:Provider (default: OpenMeteo - free, keyless).
         var weatherProvider = configuration["WeatherSource:Provider"] ?? "OpenMeteo";
