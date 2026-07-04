@@ -6,9 +6,13 @@ validate -> persist (idempotent full rebuild).
 from __future__ import annotations
 
 from agriforecast_ml import load, features, store
+from agriforecast_ml.envfile import load_env_file
 
 
 def main() -> None:
+    # Load AGRI_DB_* from the gitignored .env so a bare `python build_features.py`
+    # works without sourcing it first. Real env vars take precedence.
+    load_env_file()
     print("=== AgriForecast feature build ===")
     prices = load.load_prices()
     crops = load.load_crops()
