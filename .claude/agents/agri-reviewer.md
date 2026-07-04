@@ -54,6 +54,16 @@ You are a senior code reviewer on **AgriForecast**. You have **no edit/write acc
 
 ---
 
+## Lessons — 2026-07-04 P3 pre-build analysis (vintage/macro review checks)
+
+- **BLOCKING for any two-date (vintage) entity: the as-of join key must be `PublishedAt` (KnowledgeDate), never `ReferenceDate`.** Both are plausible DateTime columns; verify the actual `merge_asof(..., right_on=...)` argument, not the docstring. Also blocking: any backfill/default that sets `PublishedAt = ReferenceDate` for a lagged-publication series (anti-conservative → lookahead); the default must be `ReferenceDate + publication-lag prior`, imputed rows flagged.
+- **BLOCKING: outbound fetches must route through the netguard choke points** (`guarded_get`, capped download, parse timeout) — they are per-call-site, not global; grep every new `requests.get`/`pdfplumber.open` for bypasses. New FastAPI ingest routes must register on `admin_router` (inherits auth), never bare `app`.
+- **BLOCKING: dual-write / dual-definition of a series** — e.g. USD_LKR exists in `EconomicIndicator`; a second table claiming the same SeriesCode is the calendar-twin bug in DB form. Same for re-implementing features `_attach_policy` already emits.
+- Should-fix: YoY features must never span a base-year rebase (NaN at the seam, no silent splicing; base year in the series key); staleness cap present for monthly carried-forward values (P3 decision: ~60d → NaN); `ExistsAsync`/upsert keyed on the FULL unique triple `(SeriesCode, ReferenceDate, PublishedAt)`; new columns have `explain._LABELS` entries.
+- .NET: no role-based auth exists — an ingest trigger on a bare-`[Authorize]` controller is farmer-triggerable (blocking); Worker-wiring or Python admin_router only.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

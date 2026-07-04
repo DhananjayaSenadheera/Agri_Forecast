@@ -53,6 +53,18 @@ You are a data engineer on **AgriForecast**, supplying clean, trustworthy histor
 
 ---
 
+## Lessons — 2026-07-04 P3 pre-build analysis (CBSL macro — pre-flight DONE, supersedes the preview above)
+
+- **Pre-flight results (web-verified):** CBSL corpus is PDF-heavy, not Excel — Daily Price Report PDF-only daily (`price_report_YYYYMMDD_e.pdf`, ~D-1); CCPI monthly PDF press releases published ~last business day of the REFERENCE month with publish dates on the listing; NCPI is DCS-published ~21st of the FOLLOWING month. Correction to the preview: monthly first prints are effectively FINAL — **base-year rebasing (2013=100 → 2021=100) is the real revision risk**, not month-to-month revision. Vintage policy (user-decided): first-print + KnowledgeDate = real publication date; base year in the series key; no silent splicing.
+- **Listing-page existence/cadence probes are NOT extractability probes.** Before designing any parser, download and text-extract 2–3 real artifacts (the HARTI lesson). Existence ≠ parseability.
+- **Verify an indicator's OWNING AGENCY before bundling it into a source's ingestor** — DIESEL_PRICE_LKR is CPC/Ministry of Energy, not CBSL; NCPI is DCS, not CBSL. A "CBSL" service scraping prose mentions of another agency's number is the guessing-parser anti-pattern.
+- **Check cron timing against actual publication calendars** — the specced "~15th monthly" would have missed NCPI (~21st of next month) EVERY month. Also: "no new bulletin since watermark" = SUCCESS with zero rows, never an error; **per-series watermark rows** so one late series never fails another.
+- **PublishedAt resolution order:** PDF `/CreationDate` (authoritative, `harti/loader.py _parse_pdf_creation_date` precedent) → listing-page date (fallback) → conservative-LATE imputation (`ReferenceDate + per-series lag prior`); every imputed vintage flagged (`IsPublishedAtImputed`, sticky-down `IsUnitConfirmed` precedent). When in doubt pick LATER — over-conservative only delays a join, never leaks.
+- **Keep the SSRF allowlist single-apex** — prefer dropping a series over adding a second host (NCPI was cut rather than allowlisting statistics.gov.lk). eResearch portal = manual one-time backfill only (ASP.NET POST-backs).
+- Reuse, don't rewrite: `harti/downloader.py` `scrape_pdf_links` (permissive scrape + drop counters) and `_download_capped` are the CBSL templates.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

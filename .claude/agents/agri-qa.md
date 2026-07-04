@@ -52,7 +52,17 @@ You are a meticulous QA engineer on **AgriForecast**. Your job is to catch probl
 - **Freeze-time test** for point-in-time features: monkeypatch/freeze "now" to two values, assert output for a fixed historical date is unchanged (no `today()`/`now()`/`utcnow()` in feature paths).
 - **Boundary pins for event-day pairs** (e.g. Avurudu Apr 13+14): parametrized day-before/day-of/day-after assertions — off-by-ones silently shift the signal.
 - **Write purity/coverage/parity checks as GENERIC reusable helpers** (`assert_feature_is_calendar_pure(fn, dates)`, `assert_calendar_seed_covers_training_range(...)`) — P6 (leakage/vintage suite) instantiates them per feature instead of rewriting. Existing `TestLeakageByTruncation` auto-covers new columns (iterates all non-excluded columns) — run `test_phase3.py` **in isolation only**, never edit it.
-- **Known pre-existing gap (found 2026-07-03):** `serving/predict.py` and `serving/explain.py` carry duplicated `_build_X` logic — latent train/explain skew; a dedup+parity-test task was spun off. Until fixed, any feature-column change must be checked in BOTH files.
+- **Known pre-existing gap (found 2026-07-03):** `serving/predict.py` and `serving/explain.py` carry duplicated `_build_X` logic — latent train/explain skew; a dedup+parity-test task was spun off. Until fixed, any feature-column change must be checked in BOTH files. (Softened 2026-07-04: both build dynamically off `payload["feature_cols"]`, so new columns need no edit in either — the drift risk is behavioral handling, not missing columns; a parity test is still cheap insurance.)
+
+---
+
+## Lessons — 2026-07-04 P3 pre-build analysis (vintage/two-date test strategy)
+
+- **Two-date confusion tripwire is the highest-leverage test for vintage data:** any entity with both `ReferenceDate` and `PublishedAt` gets a test proving a value is NOT visible at `ReferenceDate` and IS visible at `PublishedAt` (make them weeks apart in the fixture). Both are plausible DateTime join keys; write this test against the FIRST draft of the attach function, before any other test.
+- **Publish-boundary pins** mirror the merge_asof boundary suite: visible at `PublishedAt = D`, invisible at `D-1`, and a later-published outlier-magnitude trap value must never appear at `D`. Always include a dtype-mismatch variant (`[s]` vs `[us]` join keys) — `pd.read_sql` reintroduces mixed units forever.
+- **Stricter coverage helper for vintage series:** `assert_first_vintage_precedes_training_start(...)` — year-set coverage misses a mid-year-start series; compare `MIN(PublishedAt)` per series against `MIN(training date)`.
+- **Rebase-seam guard is hermetic-only** — a base-year change is too rare to appear in live data; synthesize the seam and assert YoY is NaN across it, never a spliced number. Also assert flat carry-forward between vintages (no `.interpolate()`), NaN-not-0 when a series is absent (opposite of `_attach_policy`'s deliberate 0), and the staleness cap (>~60d-old vintage → NaN).
+- **Hermetic-first (~90%)**: all boundary/seam/staleness tests on synthetic frames (test_merge_asof_dtype.py precedent — zero DB calls); DB-gated tests only for real-matrix variance/coverage, via the `_db_or_skip()` pattern; develop new test files standalone before trusting full-suite counts (test_phase3 pollution).
 
 ---
 

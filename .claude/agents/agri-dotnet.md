@@ -49,6 +49,17 @@ You are a senior .NET engineer on **AgriForecast**, owning the **.NET 9 Clean-Ar
 
 ---
 
+## Lessons — 2026-07-04 P3 pre-build analysis (CBSL macro vintage)
+
+- **"Extends <existing entity>" in a spec means a SIBLING table, not EF inheritance.** `EconomicIndicator` is a live mapped table with a `(Date, IndicatorCode)` unique key and a `Value<=0` ctor guard — TPH/TPT off it would churn a shipped table, and its constraints are wrong for vintage data (YoY can be ≤0; vintages need a `(SeriesCode, ReferenceDate, PublishedAt)` triple key). Standalone table per the PolicyFlag precedent.
+- **One table owns a series.** `EconomicIndicator` owns daily USD_LKR (written by `EconomicIngestionService`, read as Python `FxUsdLkr`) — putting USD_LKR in a second table is a dual-write collision. Adjudicate ownership before writing either.
+- **Vintage entities: `PublishedAt` is date-only (`HasColumnType("date")`) and part of the unique key; `ExistsAsync` must key on the FULL unique triple** or a revised print is wrongly skipped as already-present. Guard `ReferenceDate <= PublishedAt` in the ctor.
+- **No admin-role auth exists in the .NET API** — every controller is bare `[Authorize]`, so an ingest-trigger endpoint would be farmer-triggerable. Ingestion triggers wire into the Worker (per-source try/catch) or the Python `admin_router`; never a bare-`[Authorize]` controller.
+- **A "backfill X on migration" checklist item is vestigial if the table is net-new** — verify whether legacy rows exist before carrying the item; the rule usually belongs in the ingestion fallback, not the migration.
+- `CbslPriceReportIngestionService`/`CbslPriceReportClient` = the template for not-yet-buildable sources: throw-don't-guess client + feature-flag Disabled state that is a documented no-op, never a false failure. Per-series `IngestionWatermark` rows so one late series never fails another.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

@@ -62,6 +62,18 @@ You are a senior ML engineer on **AgriForecast** — a system that helps Sri Lan
 
 ---
 
+## Lessons — 2026-07-04 P3 pre-build analysis (CBSL macro vintage)
+
+- **Vintage rows carry TWO dates; join on `PublishedAt`, NEVER `ReferenceDate`.** `ReferenceDate` = the period described; `PublishedAt` = when the world could know it. Backward as-of on `PublishedAt` is the leakage gate; `ReferenceDate` is audit-only and must be dropped before the model frame. Both are plausible-looking DateTime keys — a copy-paste from single-date `_attach_fx` can silently pick the wrong one.
+- **`PublishedAt = ReferenceDate` backfill is ANTI-conservative** (asserts a monthly index was knowable on its reference date when it publishes weeks later → lookahead). Correct default = `ReferenceDate + per-series publication-lag prior`; real release date when scrapeable; flag imputed vintages.
+- **Prefer the publisher's official YoY series over self-computed YoY from levels** — base-invariant across rebasing (CCPI/NCPI 2013=100 → 2021=100) with no silent splice. If deriving from levels: base year is part of the SeriesCode key; YoY spanning two bases = NaN, never spliced. LKR-level features (imports) drift with FX/inflation — use YoY %-change.
+- **Staleness cap on carried-forward monthly values** (P3 decision: newest vintage older than ~60d at ObservationDate → NaN). FX/sentiment carry forward uncapped — fine for ~daily series, wrong for monthly.
+- **Macro NaN means "not knowable", never 0** — deliberate contrast with `_attach_policy`'s 0-means-no-active-policy. Don't copy the policy fill.
+- **Check for already-shipped features before building**: P3's specced budget flags (`PolicyImportBanActive` etc.) already existed verbatim in `_attach_policy` (features.py:371-379). Also: national macro columns are identical across crops on a date → no cross-sectional signal; expected CV lift ≈ 0 — state it in the training report, don't promote on fold noise.
+- Latent debt found: policy/FX/sentiment columns are missing from `explain._LABELS` — SHAP shows farmers raw names; backfill labels whenever touching `_LABELS`.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:
