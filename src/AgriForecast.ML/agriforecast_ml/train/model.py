@@ -219,6 +219,17 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
         # CV MAE improvement -- do not read fold noise as festival signal.
         print("\nNote: festival features are domain-prior + leakage-safe, NOT "
               "CV-proven (too few events until post-P3).")
+        # Macro-feature honesty (R1.1 P3): the CBSL macro columns
+        # (MacroFoodInflationYoY / MacroFoodImportsYoY / MacroPolicyRateOPR) are
+        # added on leakage-safety (as-of on the PublishedAt vintage date, 60-day
+        # staleness cap, NaN-not-0) + a DOMAIN PRIOR, NOT CV-proven lift. They are
+        # NATIONAL series -- identical across crops on a given date -- so they
+        # carry NO cross-sectional signal and expected CV lift is ~0. Per-feature
+        # lift is statistically UNVERIFIABLE at the current ~13 months of history
+        # (1-2 macro vintages per CV fold). Do not read fold noise as macro signal
+        # or promote on it.
+        print("Note: macro features are national + leakage-safe, NOT CV-proven "
+              "(no cross-sectional signal; expected lift ~0).")
 
     # Final quantile models on all labelled data (the pooled "model" kind).
     final = {q: make_model(a) for q, a in QUANTILES.items()}

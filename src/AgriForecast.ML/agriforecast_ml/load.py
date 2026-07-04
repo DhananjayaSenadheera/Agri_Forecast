@@ -111,6 +111,8 @@ _POLICY_COLS = ["Id", "PolicyType", "Title", "EffectiveFrom", "EffectiveTo",
 _SENTIMENT_COLS = ["Date", "MeanSentiment", "ArticleCount",
                    "DroughtRatio", "FloodRatio", "PolicyRatio"]
 _FESTIVAL_COLS = ["FestivalKey", "Date", "LeadUpDays", "IsProvisional", "Source"]
+_MACRO_COLS = ["SeriesCode", "ReferenceDate", "PublishedAt", "Value",
+               "IsPublishedAtImputed"]
 
 
 def load_policy_flags() -> pd.DataFrame:
@@ -209,6 +211,56 @@ def to_prophet_holidays(festivals: pd.DataFrame) -> pd.DataFrame:
         "upper_window": 0,
     })
     return out[cols].reset_index(drop=True)
+
+
+def load_macro_series() -> pd.DataFrame:
+    """CBSL macro-series vintages (MacroSeriesPoints) for a point-in-time join.
+
+    Mirrors load_policy_flags()/load_fx()/load_news_sentiment(): same engine,
+    try/except -> empty-frame degrade so a missing/empty table attaches all-NaN
+    macro features rather than failing the build.
+
+    EACH ROW CARRIES TWO DATES:
+      - PublishedAt   = the vintage / KnowledgeDate: the first date the world
+                        could know this value. This is the ONLY leakage-safe
+                        join key (features.py _attach_macro merges as-of on it).
+      - ReferenceDate = the period the value describes (audit-only). A monthly
+                        index published weeks after its reference month is a
+                        classic lookahead trap if joined on ReferenceDate, so
+                        _attach_macro NEVER joins on it and drops it before the
+                        model frame. It is loaded here only for provenance.
+
+    IsPublishedAtImputed flags vintages whose PublishedAt was imputed from a
+    per-series publication-lag prior (real release date not scrapeable). Loaded
+    for audit; not itself a feature.
+
+    Both date columns are pinned to the canonical [ns] unit (like every other
+    loader) so the downstream as-of merge sees a consistent datetime64 dtype.
+    RetrievedAtUtc / Source are deliberately NOT loaded -- audit fields that must
+    never become features.
+
+    Returns [SeriesCode, ReferenceDate, PublishedAt, Value, IsPublishedAtImputed]
+    sorted by (SeriesCode, PublishedAt) ascending -- ready for a per-series
+    backward merge_asof on PublishedAt.
+    """
+    sql = """
+        SELECT SeriesCode, ReferenceDate, PublishedAt, Value, IsPublishedAtImputed
+        FROM MacroSeriesPoints
+    """
+    try:
+        df = pd.read_sql(sql, get_engine())
+    except Exception:
+        return pd.DataFrame(columns=_MACRO_COLS)
+    if df.empty:
+        return pd.DataFrame(columns=_MACRO_COLS)
+    df["SeriesCode"] = df["SeriesCode"].astype(str)
+    # BOTH date columns pinned to [ns] (the [ns] invariant): PublishedAt is the
+    # join key, ReferenceDate travels alongside for the two-date tripwire tests.
+    df["ReferenceDate"] = _as_canon_dt(df["ReferenceDate"])
+    df["PublishedAt"] = _as_canon_dt(df["PublishedAt"])
+    df["Value"] = df["Value"].astype(float)
+    df["IsPublishedAtImputed"] = df["IsPublishedAtImputed"].astype(bool)
+    return df.sort_values(["SeriesCode", "PublishedAt"]).reset_index(drop=True)
 
 
 def load_news_sentiment() -> pd.DataFrame:

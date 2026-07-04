@@ -21,14 +21,16 @@ def main() -> None:
     sentiment = load.load_news_sentiment()
     policy = load.load_policy_flags()
     festivals = load.load_festivals()
+    macro = load.load_macro_series()
     print(f"Loaded: prices={len(prices)} rows ({prices['CropId'].nunique()} crops), "
           f"crops={len(crops)}, weather={len(weather)} months, fx={len(fx)} rows, "
           f"sentiment={len(sentiment)} daily rows, policy={len(policy)} flags, "
-          f"festivals={len(festivals)} rows")
+          f"festivals={len(festivals)} rows, macro={len(macro)} vintages "
+          f"({macro['SeriesCode'].nunique() if len(macro) else 0} series)")
 
     feats = features.build_all(prices, crops, weather, fx,
                               sentiment=sentiment, policy=policy,
-                              festivals=festivals)
+                              festivals=festivals, macro=macro)
 
     n = len(feats)
     labelled = int(feats["LabelAvailable"].sum())
