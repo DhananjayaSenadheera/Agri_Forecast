@@ -73,6 +73,24 @@ _LABELS = {
     "MacroFoodInflationYoY": "food inflation rate",
     "MacroFoodImportsYoY": "food import trend",
     "MacroPolicyRateOPR": "central bank interest rate",
+    # Cross-market spread signals (P4 step 2, ClickUp 86caheffr). Per-market
+    # point-in-time prices for the feature-safe markets + derived cross-market
+    # summaries. The 5 feature-safe markets are named explicitly so SHAP shows a
+    # farmer a market name, never a raw Mkt<Slug>AvgPrice column.
+    "MktDambullaAvgPrice": "Dambulla market price",
+    "MktDambullaLag7": "Dambulla price 7 days ago",
+    "MktKeppetipolaAvgPrice": "Keppetipola market price",
+    "MktKeppetipolaLag7": "Keppetipola price 7 days ago",
+    "MktThambuttegamaAvgPrice": "Thambuttegama market price",
+    "MktThambuttegamaLag7": "Thambuttegama price 7 days ago",
+    "MktPettahAvgPrice": "Pettah market price",
+    "MktPettahLag7": "Pettah price 7 days ago",
+    "MktNarahenpitaAvgPrice": "Narahenpita market price",
+    "MktNarahenpitaLag7": "Narahenpita price 7 days ago",
+    "SpreadVsNational": "local price vs national average",
+    "MarketRankPct": "local price rank across markets",
+    "LeaderMarketLag7": "leading market price 7 days ago",
+    "NMarketsReporting": "number of markets reporting",
 }
 
 

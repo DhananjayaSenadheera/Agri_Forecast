@@ -6,6 +6,8 @@ only field allowed to look into the future, and exists for training only.
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -476,6 +478,200 @@ def _attach_macro(result: pd.DataFrame, macro: pd.DataFrame | None) -> pd.DataFr
     return out
 
 
+# --- Cross-market spread features (P4 step 2, ClickUp 86caheffr) --------------
+#
+# Per-market point-in-time price context onto the per-(crop, date) frame. These
+# are cross-market FEATURES, not a market-as-label reshape (that is P5). The
+# whole thing is computed OFFLINE into CropFeatureDaily; serving keeps reading
+# ONE row per (crop, date) -- there is NO per-request market fan-out.
+#
+# Column naming: per-market columns are Mkt<Slug>AvgPrice / Mkt<Slug>Lag7 for
+# each feature-safe market slug (Dambulla, Keppetipola, Thambuttegama, Pettah,
+# Narahenpita). A market with no data for a (crop, date) -- Poya/gap, or
+# Narahenpita which has zero rows today -- gets NaN (never 0): explicit
+# missingness. Only the 4 model crops with PriceObservations coverage
+# (Capsicum, Bitter Gourd, Ridge Gourd, Lady's Fingers) get non-NaN values; the
+# other 7 model crops are NaN by construction (no cross-market observations).
+#
+# "National" = UNWEIGHTED mean over the per-market AvgPrice columns that report
+# on that (crop, date) -- exactly the get_feature_safe_market_ids() set, never a
+# raw AVG over PriceObservations (Pettah/ECOMAP double-count trap). NaN (not 0)
+# when fewer than 2 markets report -> spread/rank features are NaN too.
+#
+# Reference market for the crop-vs-national spread = DAMBULLA, the primary
+# Dedicated Economic Centre whose price effectively anchors the harvest-price
+# label. spread_vs_national / market_rank_pct describe Dambulla's position among
+# the reporting feature-safe markets. (There is deliberately no "self market"
+# axis here -- that arrives with the market-as-label reshape in P5.)
+_SPREAD_REFERENCE_SLUG = "Dambulla"
+
+# Staleness cap for a carried-forward per-market price (days). Measured from the
+# live PriceObservations reporting-gap distribution over the 4 covered model
+# crops (34,138 consecutive-day gaps): p99.5 = 7d, p99.9 = 29d, 99.79% of gaps
+# <= 14d. A daily market series that has not reported a crop for >14 days has
+# effectively STOPPED reporting it (not a normal weekend/Poya gap), so carrying
+# its last price forward past 14 days would assert a stale price is still
+# current. Beyond the cap -> NaN ("not knowable"), never carried forever. This
+# is the daily-series analogue of _attach_macro's 60d cap for monthly vintages.
+_SPREAD_STALENESS_DAYS = 14
+
+# Non-per-market spread columns (fixed names; the per-market Mkt<Slug>* columns
+# are generated from the feature-safe slug list).
+_SPREAD_DERIVED_COLS = [
+    "SpreadVsNational",
+    "MarketRankPct",
+    "LeaderMarketLag7",
+    "NMarketsReporting",
+]
+
+
+def _asof_market_price(result: pd.DataFrame, sub: pd.DataFrame,
+                       left_date_col: str, out_col: str) -> pd.Series:
+    """Per-(crop) backward as-of merge of one market's daily AvgPrice onto result.
+
+    For each result row take the most recent AvgPrice of this market for the SAME
+    CropId with ObservedDate <= result[left_date_col]. Applies the staleness cap:
+    if the matched observation is more than _SPREAD_STALENESS_DAYS before the
+    left date, the value is NaN. Pure point-in-time: never an ObservedDate AFTER
+    the left date. Returns a Series aligned to result's (already sorted) index.
+    """
+    n = len(result)
+    if sub.empty:
+        return pd.Series(np.full(n, np.nan), index=result.index)
+    # Carry result's own index as a column so the as-of output can be realigned
+    # to the caller's row order (merge_asof requires a globally sorted left key
+    # and resets the index).
+    left = result[["CropId", left_date_col]].copy()
+    left["_orig_idx"] = result.index
+    left[left_date_col] = _canon_key(left[left_date_col])
+    right = sub[["CropId", "ObservedDate", "AvgPrice"]].copy()
+    right["ObservedDate"] = _canon_key(right["ObservedDate"])
+    left = left.sort_values(left_date_col)
+    right = right.sort_values("ObservedDate")
+    merged = pd.merge_asof(
+        left, right,
+        left_on=left_date_col, right_on="ObservedDate",
+        by="CropId", direction="backward",
+    )
+    vals = merged["AvgPrice"].to_numpy(dtype="float64")
+    obs = merged["ObservedDate"].to_numpy(dtype="datetime64[ns]")
+    ld = merged[left_date_col].to_numpy(dtype="datetime64[ns]")
+    age = (ld - obs) / np.timedelta64(1, "D")
+    too_stale = np.isnat(obs) | (age > _SPREAD_STALENESS_DAYS)
+    vals = np.where(too_stale, np.nan, vals)
+    return pd.Series(vals, index=merged["_orig_idx"].to_numpy()).reindex(result.index)
+
+
+def _attach_market_spread(result: pd.DataFrame,
+                          price_obs: pd.DataFrame | None,
+                          market_slugs: list | None) -> pd.DataFrame:
+    """Cross-market spread features via per-market point-in-time as-of merges.
+
+    Mirrors _attach_fx/_attach_macro's point-in-time discipline, extended to a
+    SET of markets. For each feature-safe market slug we as-of-merge (backward,
+    per CropId, staleness-capped) that market's daily AvgPrice at the observation
+    date (and 7 days earlier for the Lag7 leg). All derived columns
+    (spread/rank/leader/count) come from these already-as-of'd per-market columns
+    ONLY -- never from a fresh query -- so they inherit the same leakage gate.
+
+    Empty/missing PriceObservations (or no feature-safe markets) -> every spread
+    column NaN (per-market and derived). NaN, never 0: a missing market price is
+    "not knowable", not "zero rupees".
+    """
+    out = result.copy()
+    out["ObservationDate"] = _canon_key(out["ObservationDate"])
+    slugs = list(market_slugs) if market_slugs else []
+
+    # Per-market AvgPrice + 7-day-lagged AvgPrice columns (one pair per market).
+    avg_cols: list[str] = []
+    lag_cols: list[str] = []
+    if price_obs is None:
+        price_obs = pd.DataFrame(columns=["MarketSlug", "CropId", "ObservedDate", "AvgPrice"])
+
+    # Pre-compute the +7d observation date once (point-in-time: the price known
+    # 7 days before D -- backward as-of onto D-7 keeps the same leakage gate).
+    lag_date = (out["ObservationDate"] - pd.Timedelta(days=7))
+    out["_lag7_date"] = lag_date
+
+    for slug in slugs:
+        avg_col = f"Mkt{slug}AvgPrice"
+        lag_col = f"Mkt{slug}Lag7"
+        avg_cols.append(avg_col)
+        lag_cols.append(lag_col)
+        sub = price_obs[price_obs["MarketSlug"] == slug] if len(price_obs) else price_obs
+        out[avg_col] = _asof_market_price(out, sub, "ObservationDate", avg_col)
+        out[lag_col] = _asof_market_price(out, sub, "_lag7_date", lag_col)
+
+    out = out.drop(columns=["_lag7_date"])
+
+    # --- Derived cross-market summaries (from per-market columns ONLY) ---------
+    if avg_cols:
+        avg_mat = out[avg_cols].to_numpy(dtype="float64")  # (n_rows, n_markets)
+    else:
+        avg_mat = np.empty((len(out), 0), dtype="float64")
+
+    n_reporting = np.sum(~np.isnan(avg_mat), axis=1) if avg_mat.shape[1] else \
+        np.zeros(len(out), dtype="int64")
+    out["NMarketsReporting"] = n_reporting.astype("int64")
+
+    # National = unweighted mean over reporting markets; NaN when <2 report.
+    # nanmean of an all-NaN row (a non-covered crop) legitimately yields NaN but
+    # warns "Mean of empty slice" -- silence it, the NaN is the intended value.
+    enough = n_reporting >= 2
+    if avg_mat.shape[1]:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            national = np.nanmean(avg_mat, axis=1)
+    else:
+        national = np.full(len(out), np.nan)
+    national = np.where(enough, national, np.nan)
+
+    # spread_vs_national + rank use the REFERENCE market (Dambulla). Both are NaN
+    # when the reference market did not report, or when <2 markets report.
+    ref_col = f"Mkt{_SPREAD_REFERENCE_SLUG}AvgPrice"
+    ref = out[ref_col].to_numpy(dtype="float64") if ref_col in out.columns \
+        else np.full(len(out), np.nan)
+
+    spread = np.where(enough, ref - national, np.nan)
+    out["SpreadVsNational"] = spread
+
+    # market_rank_pct: fraction of reporting markets with AvgPrice <= reference,
+    # i.e. the reference market's percentile position among reporting markets.
+    # Vectorised over rows; only rows with >=2 reporting markets AND a reporting
+    # reference get a value.
+    if avg_mat.shape[1]:
+        le = np.where(np.isnan(avg_mat), np.nan, (avg_mat <= ref[:, None]).astype("float64"))
+        n_le = np.nansum(le, axis=1)
+        with np.errstate(invalid="ignore"):
+            rank_pct = n_le / n_reporting
+        ref_reports = ~np.isnan(ref)
+        rank_pct = np.where(enough & ref_reports, rank_pct, np.nan)
+    else:
+        rank_pct = np.full(len(out), np.nan)
+    out["MarketRankPct"] = rank_pct
+
+    # leader_market_lag7: the 7-day-lagged AvgPrice of whichever market has the
+    # HIGHEST current AvgPrice on this (crop, date). Point-in-time (both legs are
+    # as-of'd). NaN when <2 markets report or the leader has no Lag7.
+    if avg_cols:
+        lag_mat = out[lag_cols].to_numpy(dtype="float64")  # aligned to avg_cols
+        # argmax over current AvgPrice, ignoring NaN rows safely.
+        leader = np.full(len(out), np.nan)
+        has_any = np.any(~np.isnan(avg_mat), axis=1)
+        idx = np.full(len(out), -1, dtype="int64")
+        if avg_mat.shape[1]:
+            safe = np.where(np.isnan(avg_mat), -np.inf, avg_mat)
+            idx = np.argmax(safe, axis=1)
+        rows = np.arange(len(out))
+        picked = np.where(has_any, lag_mat[rows, idx], np.nan)
+        leader = np.where(enough, picked, np.nan)
+    else:
+        leader = np.full(len(out), np.nan)
+    out["LeaderMarketLag7"] = leader
+
+    return out
+
+
 def _attach_festivals(result: pd.DataFrame,
                       festivals: pd.DataFrame | None) -> pd.DataFrame:
     """National festival features from the DB calendar (load_festivals()).
@@ -506,7 +702,9 @@ def build_all(prices: pd.DataFrame, crops: pd.DataFrame, weather: pd.DataFrame,
               sentiment: pd.DataFrame | None = None,
               policy: pd.DataFrame | None = None,
               festivals: pd.DataFrame | None = None,
-              macro: pd.DataFrame | None = None) -> pd.DataFrame:
+              macro: pd.DataFrame | None = None,
+              price_obs: pd.DataFrame | None = None,
+              market_slugs: list | None = None) -> pd.DataFrame:
     weather_by_month, rain_clim = _weather_lookups(weather)
     meta_by_crop = crops.set_index("CropId")
     frames = []
@@ -526,4 +724,7 @@ def build_all(prices: pd.DataFrame, crops: pd.DataFrame, weather: pd.DataFrame,
     # staleness cap and NaN (never 0) for not-knowable, unlike policy's 0-fill.
     result = _attach_macro(result, macro)
     result = _attach_festivals(result, festivals)
+    # Cross-market spread context (P4 step 2): per-market point-in-time prices +
+    # derived spread/rank/leader summaries, computed OFFLINE into the store.
+    result = _attach_market_spread(result, price_obs, market_slugs)
     return result

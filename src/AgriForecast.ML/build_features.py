@@ -22,15 +22,20 @@ def main() -> None:
     policy = load.load_policy_flags()
     festivals = load.load_festivals()
     macro = load.load_macro_series()
+    price_obs = load.load_price_observations()
+    market_slugs = load.feature_safe_market_slugs()
     print(f"Loaded: prices={len(prices)} rows ({prices['CropId'].nunique()} crops), "
           f"crops={len(crops)}, weather={len(weather)} months, fx={len(fx)} rows, "
           f"sentiment={len(sentiment)} daily rows, policy={len(policy)} flags, "
           f"festivals={len(festivals)} rows, macro={len(macro)} vintages "
-          f"({macro['SeriesCode'].nunique() if len(macro) else 0} series)")
+          f"({macro['SeriesCode'].nunique() if len(macro) else 0} series), "
+          f"price_obs={len(price_obs)} rows over {len(market_slugs)} feature-safe "
+          f"markets {market_slugs}")
 
     feats = features.build_all(prices, crops, weather, fx,
                               sentiment=sentiment, policy=policy,
-                              festivals=festivals, macro=macro)
+                              festivals=festivals, macro=macro,
+                              price_obs=price_obs, market_slugs=market_slugs)
 
     n = len(feats)
     labelled = int(feats["LabelAvailable"].sum())
