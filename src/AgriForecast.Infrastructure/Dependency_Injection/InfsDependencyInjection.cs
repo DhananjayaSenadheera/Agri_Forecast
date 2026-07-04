@@ -36,6 +36,7 @@ public static class InfsDependencyInjection
         services.AddScoped<ICropPriceRepository, CropPriceRepository>();
         services.AddScoped<IWeatherRecordRepository, WeatherRecordRepository>();
         services.AddScoped<IEconomicIndicatorRepository, EconomicIndicatorRepository>();
+        services.AddScoped<IMacroSeriesPointRepository, MacroSeriesPointRepository>();
         services.AddScoped<IPolicyFlagRepository, PolicyFlagRepository>();
         services.AddScoped<IForecastingService, ForecastingService>();
         services.AddScoped<IRecommendationService, RecommendationService>();
