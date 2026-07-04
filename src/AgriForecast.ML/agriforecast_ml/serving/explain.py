@@ -8,7 +8,8 @@ can fall back to the static explanation.
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
+
+from .build_x import build_x as _build_X  # single source of truth (shared with predict.py)
 
 # Raw CropFeatureDaily column -> farmer-readable label.
 _LABELS = {
@@ -77,19 +78,6 @@ _LABELS = {
 
 def _label(col: str) -> str:
     return _LABELS.get(col, col)
-
-
-def _build_X(row, payload) -> pd.DataFrame:
-    """Recreate the exact 1-row model input frame (mirrors predict._model_quantiles)."""
-    cols = payload["feature_cols"]
-    categorical = payload["categorical"]
-    X = pd.DataFrame([{c: row.get(c) for c in cols}])
-    for c in cols:
-        if c in categorical:
-            X[c] = X[c].astype("category")
-        else:
-            X[c] = pd.to_numeric(X[c], errors="coerce").astype("float64")
-    return X
 
 
 def top_factors(row, payload, top_n: int = 5) -> list[dict]:

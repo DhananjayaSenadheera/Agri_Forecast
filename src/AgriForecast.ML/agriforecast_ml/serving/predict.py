@@ -16,6 +16,7 @@ from sqlalchemy import text
 from ..db import get_engine
 from ..registry import registry
 from . import explain
+from .build_x import build_x
 
 _log = logging.getLogger(__name__)
 
@@ -83,20 +84,11 @@ def _ml_servable() -> bool:
 
 
 def _build_X(row):
-    # Serving contract — missing features stay NaN, never 0.0. A missing
-    # sentiment column (MeanSentiment / DroughtRatio / FloodRatio / PolicyRatio)
-    # means "no news signal as of this date"; 0.0 is a *measured* VADER-neutral
-    # value, which is semantically different. Training (_attach_sentiment) leaves
-    # these NaN and XGBoost handles NaN natively (learned default split
-    # direction). So errors="coerce" below is deliberate — do NOT add .fillna(0).
-    cols = _PAYLOAD["feature_cols"]
-    X = pd.DataFrame([{c: row.get(c) for c in cols}])
-    for c in cols:
-        if c in _PAYLOAD["categorical"]:
-            X[c] = X[c].astype("category")
-        else:
-            X[c] = pd.to_numeric(X[c], errors="coerce").astype("float64")
-    return X
+    # Single source of truth for the serve-time input frame lives in
+    # serving/build_x.py (shared with explain.py so coercion / NaN discipline
+    # can never drift between the predict and SHAP paths). See that module for
+    # the deliberate NaN-never-0 serving contract.
+    return build_x(row, _PAYLOAD)
 
 
 def _residual_offset(crop_id: str) -> float:
