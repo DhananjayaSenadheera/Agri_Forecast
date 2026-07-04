@@ -489,13 +489,8 @@ class TestTimeline:
         missing = required - set(r.keys())
         assert not missing, f"timeline response missing keys: {missing}"
 
-    def test_forecast_bands_widen_with_horizon(self):
-        """Each successive horizon must have a wider or equal band (lower <= previous lower,
-        upper >= previous upper), because uncertainty grows with horizon."""
-        r = self._call(months=12)
-        forecast = r["forecast"]
+    def _assert_bands_widen(self, forecast):
         assert len(forecast) >= 2, "Need at least two horizon points to compare band widths"
-
         for i in range(1, len(forecast)):
             prev_spread = forecast[i - 1]["upperBound"] - forecast[i - 1]["lowerBound"]
             curr_spread = forecast[i]["upperBound"]     - forecast[i]["lowerBound"]
@@ -503,6 +498,38 @@ class TestTimeline:
                 f"Band must widen (or stay equal) with horizon: "
                 f"h={forecast[i-1]['horizonMonths']} spread={prev_spread:.2f}, "
                 f"h={forecast[i]['horizonMonths']} spread={curr_spread:.2f} — NARROWED"
+            )
+
+    def test_forecast_bands_widen_with_horizon(self):
+        """Each successive horizon must have a wider or equal band (lower <= previous lower,
+        upper >= previous upper), because uncertainty grows with horizon."""
+        r = self._call(months=12)
+        self._assert_bands_widen(r["forecast"])
+
+    def test_forecast_bands_widen_degenerate_cold_start(self, monkeypatch):
+        """Cold-start degenerate case: a crop whose fallback quantiles collapse to a
+        single point (p10==p50==p90, e.g. a one-row crop). The band must NOT widen
+        (it stays a zero-width point at every horizon: sqrt-scaling of a zero gap is
+        still zero) — monotonicity must not blow up on the degenerate spread. Guards
+        the interval-widening code against divide-by / assumption-of-nonzero-gap."""
+        from agriforecast_ml.serving import predict as P
+        # A crop whose quantiles collapse to a single point (p10==p50==p90).
+        # min_history_obs=0 so the point-quantile per-crop entry is actually used
+        # (we are testing the widening math on a zero-width band, not the ladder).
+        degen_id = "11111111-1111-1111-1111-111111111111"
+        payload = dict(P._PAYLOAD or {})
+        fb = dict(payload.get("fallback") or {})
+        per = dict(fb.get("per_crop") or {})
+        per[degen_id] = {"p10": 200.0, "p50": 200.0, "p90": 200.0, "n_obs": 1}
+        fb = {**fb, "per_crop": per, "min_history_obs": 0}
+        payload = {**payload, "fallback": fb, "beats_baseline": False}  # force fallback path
+        monkeypatch.setattr(P, "_PAYLOAD", payload)
+        r = P.timeline(degen_id, AS_OF, months=12)
+        self._assert_bands_widen(r["forecast"])
+        for e in r["forecast"]:
+            assert e["lowerBound"] == e["predictedPrice"] == e["upperBound"] == 200.0, (
+                f"Degenerate single-row crop must stay a zero-width point at every "
+                f"horizon; h={e['horizonMonths']} got {e}"
             )
 
     def test_history_no_future_leakage(self):
@@ -860,3 +887,260 @@ class TestResidualServingPath:
             assert P._ml_servable() is False
         finally:
             P._PAYLOAD = old
+
+
+# ===========================================================================
+# 7. COLD-START FALLBACK LADDER  (P4 step 1 — ClickUp 86cahefhn)
+# ===========================================================================
+
+class TestFallbackLadder:
+    """Cold-start graceful-degradation: per-crop (n_obs >= threshold) -> category
+    -> global, with confidence rungs and additive response fields. Pure-payload
+    tests (monkeypatch _PAYLOAD) — no DB needed for the ladder/confidence logic."""
+
+    # GUIDs from the crop_categories map (fruit_veg = Brinjal/Capsicum/...).
+    FRUITVEG_ID = "b44bacdb-042f-4286-ac23-02bc4cac4486"   # Brinjal -> fruit_veg
+    ROOT_ID     = "b725df40-9475-4254-84bd-5d0c68339a60"   # Ginger  -> root
+    UNMAPPED_ID = "22222222-2222-2222-2222-222222222222"   # not in any category map
+
+    def _payload(self, per_crop=None, by_category=None, min_history=365):
+        return {
+            "fallback": {
+                "per_crop": per_crop or {},
+                "by_category": by_category or {},
+                "min_history_obs": min_history,
+                "global": {"p10": 10.0, "p50": 20.0, "p90": 30.0},
+            },
+            "beats_baseline": False,   # force the fallback path
+        }
+
+    def _patch(self, monkeypatch, payload):
+        from agriforecast_ml.serving import predict as P
+        monkeypatch.setattr(P, "_PAYLOAD", payload)
+        return P
+
+    def test_thick_crop_uses_own_quantiles_tier_crop(self, monkeypatch):
+        """A crop with n_obs >= threshold serves its OWN quantiles (tier 'crop')."""
+        pl = self._payload(per_crop={
+            self.FRUITVEG_ID: {"p10": 100.0, "p50": 150.0, "p90": 200.0, "n_obs": 2600}})
+        P = self._patch(monkeypatch, pl)
+        q, tier = P._resolve_fallback(self.FRUITVEG_ID, "Brinjal")
+        assert tier == "crop"
+        assert (q["p10"], q["p50"], q["p90"]) == (100.0, 150.0, 200.0)
+
+    def test_thin_crop_below_threshold_falls_to_category(self, monkeypatch):
+        """THE presence-only bug fix: a crop present in per_crop but with n_obs BELOW
+        the threshold must NOT use its own quantiles — it degrades to the category
+        rung and flags degraded (Low) confidence."""
+        pl = self._payload(
+            per_crop={self.FRUITVEG_ID: {"p10": 1.0, "p50": 1.0, "p90": 1.0, "n_obs": 5}},
+            by_category={"fruit_veg": {"p10": 50.0, "p50": 60.0, "p90": 70.0, "n_obs": 900}})
+        P = self._patch(monkeypatch, pl)
+        q, tier = P._resolve_fallback(self.FRUITVEG_ID, "Brinjal")
+        assert tier == "category", "thin crop must degrade past its own quantiles"
+        assert (q["p10"], q["p50"], q["p90"]) == (50.0, 60.0, 70.0)
+        # Fallback-served thin crop -> Low confidence (was 'Medium' under the bug).
+        assert P._confidence_for(model_served=False, tier=tier) == "Low"
+
+    def test_thin_crop_no_category_falls_to_global(self, monkeypatch):
+        """Thin crop whose category has no pooled entry -> global prior (Low)."""
+        pl = self._payload(
+            per_crop={self.ROOT_ID: {"p10": 1.0, "p50": 1.0, "p90": 1.0, "n_obs": 5}},
+            by_category={})  # no 'root' category quantiles
+        P = self._patch(monkeypatch, pl)
+        q, tier = P._resolve_fallback(self.ROOT_ID, "Ginger")
+        assert tier == "global"
+        assert (q["p10"], q["p50"], q["p90"]) == (10.0, 20.0, 30.0)
+
+    def test_unknown_crop_falls_to_global(self, monkeypatch):
+        """Unmapped/unknown crop (no per-crop, no category) -> global, Low."""
+        pl = self._payload(by_category={"fruit_veg": {"p10": 5, "p50": 6, "p90": 7, "n_obs": 9}})
+        P = self._patch(monkeypatch, pl)
+        q, tier = P._resolve_fallback(self.UNMAPPED_ID, None)
+        assert tier == "global"
+        assert P._confidence_for(model_served=False, tier=tier) == "Low"
+
+    def test_ladder_order_full(self, monkeypatch):
+        """Explicit ordering: same crop resolves crop -> category -> global as each
+        higher rung is progressively removed / made ineligible."""
+        # 1) thick per-crop present -> crop
+        pl = self._payload(
+            per_crop={self.FRUITVEG_ID: {"p10": 100, "p50": 150, "p90": 200, "n_obs": 2600}},
+            by_category={"fruit_veg": {"p10": 50, "p50": 60, "p90": 70, "n_obs": 900}})
+        P = self._patch(monkeypatch, pl)
+        assert P._resolve_fallback(self.FRUITVEG_ID, "Brinjal")[1] == "crop"
+        # 2) thin per-crop -> category
+        pl2 = self._payload(
+            per_crop={self.FRUITVEG_ID: {"p10": 100, "p50": 150, "p90": 200, "n_obs": 5}},
+            by_category={"fruit_veg": {"p10": 50, "p50": 60, "p90": 70, "n_obs": 900}})
+        P = self._patch(monkeypatch, pl2)
+        assert P._resolve_fallback(self.FRUITVEG_ID, "Brinjal")[1] == "category"
+        # 3) thin per-crop + no category -> global
+        pl3 = self._payload(
+            per_crop={self.FRUITVEG_ID: {"p10": 100, "p50": 150, "p90": 200, "n_obs": 5}},
+            by_category={})
+        P = self._patch(monkeypatch, pl3)
+        assert P._resolve_fallback(self.FRUITVEG_ID, "Brinjal")[1] == "global"
+
+    def test_configurable_threshold_via_payload(self, monkeypatch):
+        """Threshold is read from the payload (configurable), not hard-coded/env.
+        Lowering it lets a mid-history crop qualify as tier 'crop'."""
+        per = {self.FRUITVEG_ID: {"p10": 1, "p50": 2, "p90": 3, "n_obs": 300}}
+        cat = {"fruit_veg": {"p10": 5, "p50": 6, "p90": 7, "n_obs": 9}}
+        # threshold 365 -> 300 obs is thin -> category
+        P = self._patch(monkeypatch, self._payload(per, cat, min_history=365))
+        assert P._resolve_fallback(self.FRUITVEG_ID, "Brinjal")[1] == "category"
+        # threshold 100 -> 300 obs is adequate -> crop
+        P = self._patch(monkeypatch, self._payload(per, cat, min_history=100))
+        assert P._resolve_fallback(self.FRUITVEG_ID, "Brinjal")[1] == "crop"
+
+    # --- confidence rungs -------------------------------------------------
+    def test_confidence_rungs(self):
+        from agriforecast_ml.serving import predict as P
+        assert P._confidence_for(model_served=True,  tier="crop")     == "High"
+        assert P._confidence_for(model_served=False, tier="crop")     == "Medium"
+        assert P._confidence_for(model_served=True,  tier="category") == "Low"
+        assert P._confidence_for(model_served=False, tier="category") == "Low"
+        assert P._confidence_for(model_served=True,  tier="global")   == "Low"
+        assert P._confidence_for(model_served=False, tier="global")   == "Low"
+
+    def test_low_confidence_spelling_preserved(self):
+        """MlContract.cs fail-closed contract: 'Low' must keep its EXACT spelling."""
+        from agriforecast_ml.serving import predict as P
+        assert P._confidence_for(model_served=False, tier="global") == "Low"
+
+
+class TestNoFeatureRowForcesLowConfidence:
+    """Reviewer blocker (P4 step 1): a KNOWN crop with NO scoreable CropFeatureDaily
+    row as of the plant date must return confidence 'Low' — the pre-step-1 downgrade
+    the fallback refactor silently dropped. On the live v10 payload (per-crop
+    quantiles present, no n_obs) the tier resolves to 'crop' -> 'Medium', which would
+    over-trust a genuinely un-scoreable prediction. The clamp restores 'Low' while
+    fallbackTier still reports the real resolved tier.
+
+    Pure-payload + monkeypatched DB accessors (_latest_feature_row -> None,
+    _crop_meta stubbed) so no DB is needed. The schema-additivity test uses Brinjal,
+    which always HAS a row, so it masks this bug — these tests must not."""
+
+    FRUITVEG_ID = "b44bacdb-042f-4286-ac23-02bc4cac4486"   # Brinjal -> fruit_veg
+
+    def _patch_no_row(self, monkeypatch, payload):
+        from agriforecast_ml.serving import predict as P
+        monkeypatch.setattr(P, "_PAYLOAD", payload)
+        monkeypatch.setattr(P, "_latest_feature_row", lambda cid, pdate: None)
+        # row is None -> _crop_meta is consulted; stub it so no DB is hit.
+        monkeypatch.setattr(P, "_crop_meta", lambda cid: ("Brinjal", 90))
+        return P
+
+    def test_v10_shaped_payload_no_row_is_low(self, monkeypatch):
+        """v10-SHAPED payload: per-crop quantiles present, NO n_obs / by_category /
+        min_history_obs keys. Tier resolves to 'crop' (legacy trust), but with no
+        feature row the confidence MUST be 'Low' (was 'Medium' before the fix)."""
+        payload = {
+            "fallback": {
+                "per_crop": {self.FRUITVEG_ID: {"p10": 100.0, "p50": 150.0, "p90": 200.0}},
+                "global": {"p10": 10.0, "p50": 20.0, "p90": 30.0},
+            },
+            "beats_baseline": False,   # force the fallback path
+        }
+        P = self._patch_no_row(monkeypatch, payload)
+        r = P.predict_harvest(self.FRUITVEG_ID, date(2026, 1, 15))
+        assert r["confidence"] == "Low", (
+            f"no-feature-row prediction must be 'Low', got {r['confidence']!r}")
+        assert r["activePredictor"] == "crop_mean_fallback"
+        # fallbackTier still reports the REAL resolved tier (crop), not clamped.
+        assert r["fallbackTier"] == "crop"
+        assert "feature row" in r["confidenceReason"].lower()
+
+    def test_new_shaped_payload_no_row_is_low(self, monkeypatch):
+        """NEW-shaped payload (n_obs / by_category / min_history_obs present) with an
+        adequate-history crop -> tier 'crop'. Even so, no feature row -> 'Low'."""
+        payload = {
+            "fallback": {
+                "per_crop": {self.FRUITVEG_ID: {
+                    "p10": 100.0, "p50": 150.0, "p90": 200.0, "n_obs": 2600}},
+                "by_category": {"fruit_veg": {"p10": 50.0, "p50": 60.0, "p90": 70.0, "n_obs": 900}},
+                "min_history_obs": 365,
+                "global": {"p10": 10.0, "p50": 20.0, "p90": 30.0},
+            },
+            "beats_baseline": False,
+        }
+        P = self._patch_no_row(monkeypatch, payload)
+        r = P.predict_harvest(self.FRUITVEG_ID, date(2026, 1, 15))
+        assert r["fallbackTier"] == "crop", "tier should resolve to crop (thick history)"
+        assert r["confidence"] == "Low", (
+            f"no-feature-row must clamp even a 'crop'-tier crop to 'Low', "
+            f"got {r['confidence']!r}")
+        assert r["activePredictor"] == "crop_mean_fallback"
+
+
+class TestOldPayloadCompat:
+    """The PROMOTED v10 payload predates these fallback keys. Serving must degrade
+    gracefully when n_obs / min_history_obs / by_category are ABSENT (old-payload
+    compat, like the served_ml_kind default). A retrain is NOT part of this step."""
+
+    FRUITVEG_ID = "b44bacdb-042f-4286-ac23-02bc4cac4486"
+
+    def test_missing_min_history_obs_uses_default(self, monkeypatch):
+        from agriforecast_ml.serving import predict as P
+        payload = {"fallback": {"per_crop": {}, "global": {"p10": 1, "p50": 2, "p90": 3}},
+                   "beats_baseline": False}
+        monkeypatch.setattr(P, "_PAYLOAD", payload)
+        assert P._min_history_obs() == P._DEFAULT_MIN_HISTORY_OBS
+
+    def test_percrop_without_n_obs_treated_as_adequate(self, monkeypatch):
+        """Old per-crop entries have no n_obs key -> must keep legacy 'trust per-crop'
+        behavior (tier 'crop'), never fabricate a cold-start flag."""
+        from agriforecast_ml.serving import predict as P
+        payload = {
+            "fallback": {
+                "per_crop": {self.FRUITVEG_ID: {"p10": 100, "p50": 150, "p90": 200}},
+                "global": {"p10": 1, "p50": 2, "p90": 3},
+            },
+            "beats_baseline": False,
+        }
+        monkeypatch.setattr(P, "_PAYLOAD", payload)
+        q, tier = P._resolve_fallback(self.FRUITVEG_ID, "Brinjal")
+        assert tier == "crop"
+        assert (q["p10"], q["p50"], q["p90"]) == (100, 150, 200)
+
+    def test_missing_by_category_degrades_to_global(self, monkeypatch):
+        """No by_category map (old payload) + unknown crop -> global, no crash."""
+        from agriforecast_ml.serving import predict as P
+        payload = {"fallback": {"per_crop": {}, "global": {"p10": 1, "p50": 2, "p90": 3}},
+                   "beats_baseline": False}
+        monkeypatch.setattr(P, "_PAYLOAD", payload)
+        q, tier = P._resolve_fallback("33333333-3333-3333-3333-333333333333", None)
+        assert tier == "global"
+
+
+class TestResponseSchemaAdditivity:
+    """Every pre-existing response field must still be present with unchanged
+    spelling; the new fields are additive. DB-gated (calls the live payload)."""
+
+    PRE_EXISTING_PREDICT = {
+        "cropId", "cropName", "plantDate", "harvestDate", "growthPeriodDays",
+        "predictedPrice", "lowerBound", "upperBound", "confidence",
+        "activePredictor", "modelVersion", "explanation", "topFactors",
+    }
+    PRE_EXISTING_TIMELINE = {
+        "cropId", "cropName", "asOf", "activePredictor", "confidence",
+        "modelVersion", "explanation", "history", "forecast",
+    }
+
+    def test_predict_schema_additive(self):
+        from agriforecast_ml.serving.predict import predict_harvest
+        r = predict_harvest(BRINJAL_ID, PLANT_DATE)
+        assert self.PRE_EXISTING_PREDICT <= set(r.keys()), (
+            f"predict_harvest dropped a pre-existing field: "
+            f"{self.PRE_EXISTING_PREDICT - set(r.keys())}")
+        assert "confidenceReason" in r and "fallbackTier" in r
+        assert r["confidence"] in {"Low", "Medium", "High"}
+
+    def test_timeline_schema_additive(self):
+        from agriforecast_ml.serving.predict import timeline
+        r = timeline(BRINJAL_ID, AS_OF, 12)
+        assert self.PRE_EXISTING_TIMELINE <= set(r.keys()), (
+            f"timeline dropped a pre-existing field: "
+            f"{self.PRE_EXISTING_TIMELINE - set(r.keys())}")
+        assert "confidenceReason" in r and "fallbackTier" in r

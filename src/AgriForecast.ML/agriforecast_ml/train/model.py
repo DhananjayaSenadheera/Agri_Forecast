@@ -145,14 +145,59 @@ def purged_walk_forward(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, n_folds
     return fold_rows
 
 
+# Minimum count of labelled observations for a crop's OWN quantiles to be trusted
+# as an adequate-history (non-cold-start) prior. See DECISIONS.md 2026-07-04 for
+# the justification: the labelled frame is bimodal — 7 crops at 167-328 rows
+# (<1 seasonal year) and 4 HARTI-backed crops at ~2,635-2,691 rows (~11 years).
+# 365 (~one calendar year of daily rows) cleanly separates the two clusters with a
+# large margin and marks the floor at which per-crop quantiles can span a full
+# Yala+Maha seasonal cycle. Persisted into the payload (configurable there, not via
+# env) so serving reads it without a code change. PROPOSED default — owner signs off.
+_DEFAULT_MIN_HISTORY_OBS = 365
+
+
 def _crop_fallback(df: pd.DataFrame) -> dict:
-    """Per-crop harvest-price quantiles + global fallback — the deployable
-    baseline used when no ML model is good enough to promote."""
+    """Per-crop harvest-price quantiles + category + global fallback — the
+    deployable baseline ladder used when no ML model is good enough to promote,
+    and the graceful-degradation prior for thin / unknown crops.
+
+    Additive schema (old serving code degrades if any key is absent):
+      per_crop[cid]         : {p10,p50,p90, n_obs}   (n_obs = labelled row count)
+      by_category[cat]      : {p10,p50,p90, n_obs}   (pooled category quantiles)
+      global                : {p10,p50,p90}
+      min_history_obs       : int threshold for "adequate own history"
+    """
+    from ..serving.crop_categories import category_for
+
+    counts = df.groupby("CropId").size()
     q = df.groupby("CropId")["LabelHarvestPrice"].quantile([0.1, 0.5, 0.9]).unstack()
-    per_crop = {str(cid).lower(): {"p10": float(r[0.1]), "p50": float(r[0.5]), "p90": float(r[0.9])}
-                for cid, r in q.iterrows()}
+    per_crop = {}
+    names = df.groupby("CropId")["CropName"].first() if "CropName" in df.columns else {}
+    for cid, r in q.iterrows():
+        per_crop[str(cid).lower()] = {
+            "p10": float(r[0.1]), "p50": float(r[0.5]), "p90": float(r[0.9]),
+            "n_obs": int(counts.loc[cid]),
+        }
+
+    # Category-level quantiles: assign each labelled row a category, pool by it.
+    cat_series = df["CropId"].map(
+        lambda cid: category_for(str(cid).lower(),
+                                  names.get(cid) if hasattr(names, "get") else None))
+    by_category: dict[str, dict] = {}
+    if cat_series.notna().any():
+        tmp = df.assign(_cat=cat_series).dropna(subset=["_cat"])
+        cq = tmp.groupby("_cat")["LabelHarvestPrice"].quantile([0.1, 0.5, 0.9]).unstack()
+        ccnt = tmp.groupby("_cat").size()
+        for cat, r in cq.iterrows():
+            by_category[str(cat)] = {
+                "p10": float(r[0.1]), "p50": float(r[0.5]), "p90": float(r[0.9]),
+                "n_obs": int(ccnt.loc[cat]),
+            }
+
     g = df["LabelHarvestPrice"].quantile([0.1, 0.5, 0.9])
     return {"per_crop": per_crop,
+            "by_category": by_category,
+            "min_history_obs": _DEFAULT_MIN_HISTORY_OBS,
             "global": {"p10": float(g[0.1]), "p50": float(g[0.5]), "p90": float(g[0.9])}}
 
 
