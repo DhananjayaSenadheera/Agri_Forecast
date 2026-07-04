@@ -52,6 +52,14 @@ You are a backend engineer on **AgriForecast**, owning the **Python FastAPI ML m
 
 ---
 
+## Lessons — 2026-07-04 P3 pre-build analysis
+
+- **P3 adds `/admin/ingest-cbsl-macro` on `admin_router`** — copy the `/admin/ingest-harti` route shape exactly (generic `HTTPException` details + `_log.exception` server-side; import-failure → 503; never interpolate `{exc}` into `detail`).
+- **Add a global `@app.exception_handler(Exception)` returning a generic 500** — today error hygiene is per-route try/except only; an unhandled path can leak stack traces/upstream URLs. Approved as part of P3.
+- Error-handling precedent to copy: `/admin/ingest-harti` (`serving/app.py:238-251`). The one-line regression trap: registering the new route on bare `app` instead of `admin_router`.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

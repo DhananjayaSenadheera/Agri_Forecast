@@ -251,5 +251,55 @@ def ingest_harti_endpoint(req: IngestHartiRequest):
         )
 
 
+class IngestCbslMacroRequest(BaseModel):
+    """Orchestration knobs for the monthly CBSL macro pass.
+
+    Mirrors IngestHartiRequest's shape. ``noDownload``/``dryRun`` are for
+    offline reruns and tests. There is no ``sinceDate`` knob: both CBSL
+    listings (CCPI press releases, MEI packs) are small, bounded corpora
+    (tens of PDFs total) rather than HARTI's ~3000-PDF daily-bulletin corpus,
+    so a full re-scrape + idempotent re-upsert every pass is cheap and simple
+    — no incremental watermark plumbing needed here.
+    """
+    noDownload: bool = False
+    dryRun: bool = False
+
+
+@admin_router.post("/ingest-cbsl-macro")
+def ingest_cbsl_macro_endpoint(req: IngestCbslMacroRequest):
+    """Run the CBSL macro ingestion pass in-process.
+
+    Internal admin endpoint (P3, ClickUp 86cahefbh), consistent with
+    /admin/ingest-harti and /admin/ingest-news. Runs download -> parse ->
+    upsert for both CBSL sources (CCPI press releases + MEI packs) and
+    returns a structured summary (artifacts fetched/skipped, rows
+    inserted/updated, per-series coverage). "No new bulletin since watermark"
+    is a SUCCESS with zero rows, never an error.
+
+    The heavy work module is imported lazily so any CBSL-module breakage can
+    never block serving startup or the /predict path.
+    """
+    try:
+        import ingest_cbsl_macro
+    except Exception:  # pragma: no cover - import wiring guard
+        _log.exception("CBSL macro ingestion module unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="CBSL macro ingestion module unavailable.",
+        )
+
+    try:
+        return ingest_cbsl_macro.run(
+            no_download=req.noDownload,
+            dry_run=req.dryRun,
+        )
+    except Exception:
+        _log.exception("CBSL macro ingestion failed")
+        raise HTTPException(
+            status_code=502,
+            detail="CBSL macro ingestion failed.",
+        )
+
+
 # Register the protected admin routes (must come after the routes are declared).
 app.include_router(admin_router)

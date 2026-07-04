@@ -13,6 +13,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<CropPrice> CropPrices { get; set; }
     public DbSet<WeatherRecord> WeatherRecords { get; set; }
     public DbSet<EconomicIndicator> EconomicIndicators { get; set; }
+    public DbSet<MacroSeriesPoint> MacroSeriesPoints { get; set; }
     public DbSet<PolicyFlag> PolicyFlags { get; set; }
     public DbSet<FestivalCalendarEntry> FestivalCalendarEntries { get; set; }
     public DbSet<User> Users { get; set; }
@@ -67,6 +68,34 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
 
             // One reading per (date, indicator) — keeps ingestion idempotent at the DB level.
             e.HasIndex(x => new { x.Date, x.IndicatorCode }).IsUnique();
+        });
+
+        modelBuilder.Entity<MacroSeriesPoint>(e =>
+        {
+            e.Property(x => x.SeriesCode).HasMaxLength(50).IsRequired();
+            e.Property(x => x.Source).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Value).HasPrecision(18, 6);
+            e.Property(x => x.IsPublishedAtImputed).IsRequired();
+
+            // Both dates stored date-only (no time) — ReferenceDate is the period described and
+            // PublishedAt is the vintage/KnowledgeDate the ML layer as-of-joins on; neither may
+            // carry a hidden time (mirrors PolicyFlag / EconomicIndicator date discipline).
+            e.Property(x => x.ReferenceDate).HasColumnType("date").IsRequired();
+            e.Property(x => x.PublishedAt).HasColumnType("date").IsRequired();
+
+            // RetrievedAtUtc is a full datetime2 audit stamp (record-keeping only, never a feature).
+            e.Property(x => x.RetrievedAtUtc).IsRequired();
+
+            // One row per VINTAGE of a period: a revised print carries a new PublishedAt and is a
+            // distinct row, but the same (series, period, vintage) may not be inserted twice. Keeps
+            // ingestion idempotent at the DB level; matches ExistsAsync's triple key.
+            e.HasIndex(x => new { x.SeriesCode, x.ReferenceDate, x.PublishedAt }).IsUnique();
+
+            // As-of read path: "latest vintage of a series knowable as of date D" scans PublishedAt.
+            e.HasIndex(x => new { x.SeriesCode, x.PublishedAt });
+
+            // Reference-axis read path: all vintages of a series for a period window.
+            e.HasIndex(x => new { x.SeriesCode, x.ReferenceDate });
         });
 
         modelBuilder.Entity<PolicyFlag>(e =>

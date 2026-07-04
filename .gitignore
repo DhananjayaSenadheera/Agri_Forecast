@@ -19,6 +19,7 @@
 # Agent tooling
 .agents/
 run-daily.sh
+run-monthly.sh
 
 # Local per-dev override config (F-01). appsettings.json stays TRACKED but
 # secret-free (DefaultConnection = ""); the real DB password lives ONLY in

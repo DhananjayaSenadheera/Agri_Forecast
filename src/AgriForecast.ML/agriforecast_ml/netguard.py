@@ -64,6 +64,13 @@ logger = logging.getLogger(__name__)
 _DEFAULT_ALLOWED_HOSTS: tuple[str, ...] = (
     # HARTI daily-price bulletins (listing page + PDF assets).
     "harti.gov.lk",
+    # CBSL macro ingestion (ClickUp 86cahefbh / P3): CCPI press-release listing
+    # + Monthly Economic Indicators (MEI) pack listing + PDF assets, all served
+    # under this single apex. Deliberately NOT adding statistics.gov.lk (NCPI's
+    # DCS host) even though NCPI was probed — it was scope-cut (2026-07-04 P3
+    # decision) specifically so the allowlist stays single-apex; prefer
+    # dropping a series over adding a second host.
+    "cbsl.gov.lk",
     # News RSS feeds (see agriforecast_ml/news/feeds.py).
     "economynext.com",
     "lankabusinessonline.com",

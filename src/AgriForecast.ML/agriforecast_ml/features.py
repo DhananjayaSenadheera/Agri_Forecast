@@ -380,6 +380,102 @@ def _attach_policy(result: pd.DataFrame, policy: pd.DataFrame | None) -> pd.Data
     return out
 
 
+# CBSL macro-series vintage features (P3). Each maps a MacroSeriesPoints
+# SeriesCode -> the feature column name attached at observation time. National
+# signal -> identical across crops for a given ObservationDate (no cross-
+# sectional lift expected; added on leakage-safety + domain prior, not CV proof).
+#
+# CCPI_HEADLINE_YOY_BASE2021 is deliberately EXCLUDED: the spec lists three
+# columns and headline YoY carries no cross-sectional signal beyond food YoY on
+# this thin corpus -- not worth a 4th column. CCPI_BASE2021 (the raw index level)
+# is base-year-dependent (2013=100 vs 2021=100 rebasing splices silently) and is
+# NOT a feature -- YoY series are base-invariant, so we consume those instead.
+_MACRO_SERIES = {
+    "CCPI_FOOD_YOY_BASE2021": "MacroFoodInflationYoY",
+    "FOOD_IMPORTS_YOY": "MacroFoodImportsYoY",
+    "POLICY_RATE_OPR": "MacroPolicyRateOPR",
+}
+_MACRO_FEATURES = list(_MACRO_SERIES.values())
+
+# Staleness cap (user decision, 2026-07-04): a carried-forward monthly vintage
+# is only trusted for ~60 days. If the most recent vintage whose PublishedAt <=
+# ObservationDate is itself OLDER than this many days at the observation date,
+# the feature is set to NaN rather than carried forward indefinitely. Monthly
+# series carried forward uncapped would assert a stale reading is still current;
+# NaN ("not knowable / too stale") is the honest value. FX/sentiment carry
+# forward uncapped -- fine for ~daily series, wrong for these monthly ones.
+_MACRO_STALENESS_DAYS = 60
+
+
+def _attach_macro(result: pd.DataFrame, macro: pd.DataFrame | None) -> pd.DataFrame:
+    """CBSL macro-series columns via point-in-time (as-of, backward) merge on the
+    VINTAGE date (PublishedAt), per SeriesCode.
+
+    Mirrors _attach_fx, with three deliberate differences dictated by the P3
+    vintage spec:
+
+      1. JOIN KEY = PublishedAt, NEVER ReferenceDate. ReferenceDate is the period
+         the value describes; PublishedAt is when the world could know it. A
+         backward as-of on PublishedAt (ObservationDate >= PublishedAt) is the
+         leakage gate. ReferenceDate is audit-only and dropped before the frame.
+
+      2. STALENESS CAP: after the as-of match, if PublishedAt is more than
+         _MACRO_STALENESS_DAYS before ObservationDate the value is NaNed. Monthly
+         series must not be carried forward forever (contrast FX/sentiment).
+
+      3. MISSING / ABSENT -> NaN, NEVER 0. A macro NaN means "not knowable at D"
+         (before the first vintage, or too stale, or the series is absent),
+         deliberately UNLIKE _attach_policy where 0 means "no active policy".
+
+    National signal -> identical across crops for a given ObservationDate.
+    Empty/missing macro frame -> all macro columns NaN.
+    """
+    out = result.copy()
+    out["ObservationDate"] = _canon_key(out["ObservationDate"])
+    if macro is None or macro.empty:
+        for col in _MACRO_FEATURES:
+            out[col] = np.nan
+        return out
+
+    # as-of requires a sorted LEFT key, so the frame is re-sorted by
+    # ObservationDate and returned in that order (same behaviour as
+    # _attach_fx/_attach_sentiment; downstream keys on (CropId, ObservationDate)).
+    out = out.sort_values("ObservationDate").reset_index(drop=True)
+
+    for series_code, feat_col in _MACRO_SERIES.items():
+        sub = macro[macro["SeriesCode"] == series_code]
+        # ReferenceDate is NEVER a join key -- carried only for tests/audit, not
+        # merged in. We select PublishedAt (the vintage/knowledge date) + Value.
+        sub = (sub[["PublishedAt", "Value"]]
+               .dropna(subset=["PublishedAt"])
+               .sort_values("PublishedAt"))
+        if sub.empty:
+            # Series absent from this DB -> not knowable -> NaN, never 0.
+            out[feat_col] = np.nan
+            continue
+        right = sub.rename(columns={"PublishedAt": "_pub", "Value": feat_col})
+        right["_pub"] = _canon_key(right["_pub"])
+        merged = pd.merge_asof(
+            out[["ObservationDate"]],
+            right,
+            left_on="ObservationDate",
+            right_on="_pub",
+            direction="backward",
+        )
+        vals = merged[feat_col].to_numpy(dtype="float64")
+        # Staleness cap: age of the matched vintage at the observation date.
+        pub = merged["_pub"].to_numpy(dtype="datetime64[ns]")
+        obs = out["ObservationDate"].to_numpy(dtype="datetime64[ns]")
+        age_days = (obs - pub) / np.timedelta64(1, "D")
+        # No match at all (NaT pub) or too stale -> NaN. Operator is STRICT ">":
+        # exactly 60 days old is still visible; older than 60 is NaN.
+        too_stale = np.isnat(pub) | (age_days > _MACRO_STALENESS_DAYS)
+        vals = np.where(too_stale, np.nan, vals)
+        out[feat_col] = vals
+
+    return out
+
+
 def _attach_festivals(result: pd.DataFrame,
                       festivals: pd.DataFrame | None) -> pd.DataFrame:
     """National festival features from the DB calendar (load_festivals()).
@@ -409,7 +505,8 @@ def build_all(prices: pd.DataFrame, crops: pd.DataFrame, weather: pd.DataFrame,
               fx: pd.DataFrame | None = None,
               sentiment: pd.DataFrame | None = None,
               policy: pd.DataFrame | None = None,
-              festivals: pd.DataFrame | None = None) -> pd.DataFrame:
+              festivals: pd.DataFrame | None = None,
+              macro: pd.DataFrame | None = None) -> pd.DataFrame:
     weather_by_month, rain_clim = _weather_lookups(weather)
     meta_by_crop = crops.set_index("CropId")
     frames = []
@@ -424,5 +521,9 @@ def build_all(prices: pd.DataFrame, crops: pd.DataFrame, weather: pd.DataFrame,
     result = _attach_fx(result, fx)
     result = _attach_sentiment(result, sentiment)
     result = _attach_policy(result, policy)
+    # Macro vintages attach after policy: both are national point-in-time signals,
+    # but macro is an as-of merge on the VINTAGE date (PublishedAt) with a
+    # staleness cap and NaN (never 0) for not-knowable, unlike policy's 0-fill.
+    result = _attach_macro(result, macro)
     result = _attach_festivals(result, festivals)
     return result

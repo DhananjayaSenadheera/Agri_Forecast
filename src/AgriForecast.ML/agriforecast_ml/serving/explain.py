@@ -55,6 +55,23 @@ _LABELS = {
     "GrowthPeriodDays": "crop growth period",
     "HarvestWindowDays": "harvest window length",
     "CropId": "crop type",
+    # National FX signal (point-in-time as-of join).
+    "FxUsdLkr": "US dollar exchange rate",
+    # National news-sentiment signals (backfilled latent debt, 2026-07-04).
+    "MeanSentiment": "news sentiment",
+    "DroughtRatio": "drought news coverage",
+    "FloodRatio": "flood news coverage",
+    "PolicyRatio": "policy news coverage",
+    # Government-policy signals (backfilled latent debt, 2026-07-04).
+    "ActivePolicyNetDirection": "net effect of active policies",
+    "ActivePolicyCount": "number of active policies",
+    "PolicyImportBanActive": "import ban in effect",
+    "PolicyPriceCeilingActive": "price ceiling in effect",
+    "PolicyFertiliserSubsidyActive": "fertiliser subsidy in effect",
+    # CBSL macro-series signals (P3, vintage as-of join on publication date).
+    "MacroFoodInflationYoY": "food inflation rate",
+    "MacroFoodImportsYoY": "food import trend",
+    "MacroPolicyRateOPR": "central bank interest rate",
 }
 
 
