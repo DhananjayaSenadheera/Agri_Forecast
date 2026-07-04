@@ -64,6 +64,12 @@ You are a senior code reviewer on **AgriForecast**. You have **no edit/write acc
 
 ---
 
+## Lessons — 2026-07-04 P4 pre-build analysis (ensemble/cross-market red flags)
+
+- **P4 red flags to hunt:** mixing `MarketPrices` and `PriceObservations` per-row for the same market/day (measured ~7.3% disagreement in the DEC window); "national" computed as raw AVG instead of via `get_feature_safe_market_ids()`; any code assuming `ArrivalsKg` has data (0/52,755); `market_rank_pct` built from a raw same-calendar-day join instead of already-as-of'd per-market columns; shrinkage/category priors computed on full data instead of train-only per fold; per-horizon results replacing (rather than adding to) the flat `metadata["cv"]` schema; torch/tensorflow appearing in requirements; pickle side-cars outside the signed payload.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

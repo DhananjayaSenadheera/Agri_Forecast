@@ -66,6 +66,16 @@ You are a meticulous QA engineer on **AgriForecast**. Your job is to catch probl
 
 ---
 
+## Lessons — 2026-07-04 P4 pre-build analysis (test-strategy additions)
+
+- **`TestLeakageByTruncation` calls `build_all` with only 3 positional args — it does NOT auto-cover columns attached via optional kwargs** (fx/sentiment/policy/macro/festival/market). New attach-path columns need their own truncation-test instantiations passing the new frames explicitly. (Corrects the 2026-07-03 "auto-covers" note.)
+- **R3 "zero-out-current-festival → coefficient unchanged" is ill-defined for XGBoost** — operational version: persist the statistic as a standalone map (`residual_offsets` shape) and gate on recomputing it with the target festival masked.
+- **Per-horizon gating must be ADDITIVE to `metadata["cv"]`** (nested `by_horizon` blocks); the flat schema + existing gate-honesty tests must stay green; per-horizon baselines recomputed per bucket; refuse to claim a result for a bucket that can't meet the min-rows fold guard.
+- **Fold-corridor smoke test (P4 standard):** vs promoted per-fold MAEs, assert winning folds (1&3 for v10) don't regress >10% and fold-2's loss margin doesn't worsen — pre-merge smoke, NOT a promotion-gate change.
+- Reusable helpers: test_festivals.py `assert_calendar_covers_years` / `assert_columns_not_constant` / `assert_no_wall_clock` / `assert_as_of_parity`.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

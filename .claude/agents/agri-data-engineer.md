@@ -65,6 +65,16 @@ You are a data engineer on **AgriForecast**, supplying clean, trustworthy histor
 
 ---
 
+## Lessons — 2026-07-04 P4 pre-build analysis (cross-market data reality)
+
+- **`PriceObservations.ArrivalsKg` exists in schema but is 0/52,755 populated** — a stub, never build a feature on it. Arrivals live in HARTI's separate weekly bulletin (never ingested).
+- **Two-table splice measured:** HARTI-vs-HARTI rows identical (corr 1.0); DEC-window Dambulla vs MarketPrices only 12.6% exact match, ~7.3% median diff — never mix the two tables per-row for the same market/day.
+- **`gap_report()` groups by raw `ExternalCommodityName`** (e.g. "Luffa"), not resolved `Crop.Name` — translate before cross-referencing.
+- **Missingness conventions differ per table:** zero-price rows exist in MarketPrices (kept as market-closed signal) but NOT in PriceObservations.
+- Feature builds on PriceObservations must filter **`IsUnitConfirmed = 1`** (canonical.py docstring contract; 537 held rows corpus-wide).
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

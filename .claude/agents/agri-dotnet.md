@@ -60,6 +60,12 @@ You are a senior .NET engineer on **AgriForecast**, owning the **.NET 9 Clean-Ar
 
 ---
 
+## Lessons — 2026-07-04 P4 pre-build analysis
+
+- **P4 is Python-side; .NET impact = response-DTO additions only** (safe: the client is case-insensitive + unmapped-ignore). `marketId` on `/predict` + a market-keyed store = P5 — do not build early.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:
