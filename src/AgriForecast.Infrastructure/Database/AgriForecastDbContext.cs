@@ -8,6 +8,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
 {
     public DbSet<Crop> Crops { get; set; }
     public DbSet<CropCategory> CropCategories { get; set; }
+    public DbSet<CropAgronomyProfile> CropAgronomyProfiles { get; set; }
     public DbSet<EconomicCenter> EconomicCenters { get; set; }
     public DbSet<DefaultSetting> DefaultSettings { get; set; }
     public DbSet<MarketPrice> MarketPrices { get; set; }
@@ -81,6 +82,29 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 .WithMany()
                 .HasForeignKey(x => x.CropCategoryId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<CropAgronomyProfile>(e =>
+        {
+            e.ToTable("CropAgronomyProfiles");
+            e.HasKey(x => x.Id);
+
+            e.Property(x => x.DataSource).HasMaxLength(500);
+
+            // VerifiedOn is a curation record-date, stored date-only (no hidden time) —
+            // mirrors the date-only discipline used across the reference entities.
+            e.Property(x => x.VerifiedOn).HasColumnType("date");
+
+            // 1:1 with Crop. Unique CropId enforces one agronomy profile per crop. Restrict:
+            // a Crop can never be deleted while its profile references it (mirrors the
+            // CommodityAlias -> Crop Restrict FK; agronomy is owned reference data, not a
+            // detach-on-delete child).
+            e.HasOne<Crop>()
+                .WithMany()
+                .HasForeignKey(x => x.CropId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasIndex(x => x.CropId).IsUnique();
         });
 
         modelBuilder.Entity<WeatherRecord>(e =>
