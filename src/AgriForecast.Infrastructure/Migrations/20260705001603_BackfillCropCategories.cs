@@ -25,7 +25,7 @@ namespace AgriForecast.Infrastructure.Migrations
         private const string VegUp = "d4c40001-0000-0000-0000-000000000003";
         private const string VegLow = "d4c40001-0000-0000-0000-000000000004";
 
-        // FRT (25 distinct names)
+        // FRT (25 distinct names -> 26 crop rows: Crops.Name is non-unique, 'Passion' has 2 rows)
         private const string FruitNames =
             "N'Ambarella', N'Avacado', N'Banana - Abul', N'Banana - Ambun', " +
             "N'Banana - Kolikuttu', N'Banana - Sini', N'Coconut', N'Gooseberry', " +

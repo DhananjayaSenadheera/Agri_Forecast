@@ -13,8 +13,8 @@ public class CropCategoryRepository : ICropCategoryRepository
         _db = db;
     }
 
-    public async Task<bool> ExistsAsync(Guid id)
+    public async Task<bool> ExistsAsync(Guid id, CancellationToken ct = default)
     {
-        return await _db.CropCategories.AsNoTracking().AnyAsync(c => c.Id == id);
+        return await _db.CropCategories.AsNoTracking().AnyAsync(c => c.Id == id, ct);
     }
 }

@@ -6,5 +6,5 @@ namespace AgriForecast.Domain.Interfaces;
 public interface ICropCategoryRepository
 {
     // True if a CropCategory row with this Id exists (top-level or sub-category).
-    Task<bool> ExistsAsync(Guid id);
+    Task<bool> ExistsAsync(Guid id, CancellationToken ct = default);
 }
