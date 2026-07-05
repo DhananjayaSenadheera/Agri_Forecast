@@ -7,6 +7,7 @@ namespace AgriForecast.Infrastructure.Database;
 public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> options) : DbContext(options) 
 {
     public DbSet<Crop> Crops { get; set; }
+    public DbSet<CropCategory> CropCategories { get; set; }
     public DbSet<EconomicCenter> EconomicCenters { get; set; }
     public DbSet<DefaultSetting> DefaultSettings { get; set; }
     public DbSet<MarketPrice> MarketPrices { get; set; }
@@ -49,9 +50,37 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             Mkt_Prefix = "MKT",
         });
         
+        modelBuilder.Entity<CropCategory>(e =>
+        {
+            e.ToTable("CropCategories");
+            e.HasKey(x => x.Id);
+
+            e.Property(x => x.Code).HasMaxLength(50).IsRequired();
+            e.Property(x => x.Name).HasMaxLength(100).IsRequired();
+
+            // Self-FK for sub-categories. Restrict: a parent category can never be
+            // deleted while a child still references it.
+            e.HasOne<CropCategory>()
+                .WithMany()
+                .HasForeignKey(x => x.ParentId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // Code is the human-facing business key — unique.
+            e.HasIndex(x => x.Code).IsUnique();
+        });
+
+        SeedCropCategories(modelBuilder);
+
         modelBuilder.Entity<Crop>(e =>
         {
             e.Property(x => x.PlantingSeason).HasMaxLength(20);
+
+            // Optional grouping under a CropCategory. Restrict: a category can never be
+            // deleted while a crop still references it. Nullable until the later backfill.
+            e.HasOne<CropCategory>()
+                .WithMany()
+                .HasForeignKey(x => x.CropCategoryId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<WeatherRecord>(e =>
@@ -369,6 +398,63 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 IsActive = true,
                 CreatedAt = seededAt,
                 UpdatedAt = seededAt
+            }
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────
+    // CROP CATEGORIES — reference dimension, manual update path (NO ingestion / CQRS / endpoint).
+    //
+    // Fixed lowercase GUIDs + a FIXED CreatedAt keep the seed deterministic and idempotent
+    // across migrations (a UtcNow here would churn the diff every build). Mirrors the HARTI
+    // bulletin grouping: top-level Vegetable / Fruit, plus Up-country / Low-country Vegetable
+    // sub-categories whose ParentId points at Vegetable.
+    //
+    // NEVER HasData on Crop rows — crops are auto-provisioned at runtime with per-DB GUIDs.
+    // Assigning categories onto the existing crops is a separate name-keyed backfill (subtask 1.2),
+    // not seeded here.
+    //
+    // TO ADD A CATEGORY: add a seed row with a new fixed lowercase GUID + a unique Code, add a
+    // migration and apply it.
+    private static void SeedCropCategories(ModelBuilder modelBuilder)
+    {
+        var seededAt = new DateTime(2026, 07, 05, 0, 0, 0, DateTimeKind.Utc);
+
+        var vegetableId = Guid.Parse("d4c40001-0000-0000-0000-000000000001");
+        var fruitId = Guid.Parse("d4c40001-0000-0000-0000-000000000002");
+
+        modelBuilder.Entity<CropCategory>().HasData(
+            new CropCategory
+            {
+                Id = vegetableId,
+                Code = "VEG",
+                Name = "Vegetable",
+                ParentId = null,
+                CreatedAt = seededAt
+            },
+            new CropCategory
+            {
+                Id = fruitId,
+                Code = "FRT",
+                Name = "Fruit",
+                ParentId = null,
+                CreatedAt = seededAt
+            },
+            new CropCategory
+            {
+                Id = Guid.Parse("d4c40001-0000-0000-0000-000000000003"),
+                Code = "VEG-UP",
+                Name = "Up-country Vegetable",
+                ParentId = vegetableId,
+                CreatedAt = seededAt
+            },
+            new CropCategory
+            {
+                Id = Guid.Parse("d4c40001-0000-0000-0000-000000000004"),
+                Code = "VEG-LOW",
+                Name = "Low-country Vegetable",
+                ParentId = vegetableId,
+                CreatedAt = seededAt
             }
         );
     }

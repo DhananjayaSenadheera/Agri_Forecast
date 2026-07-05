@@ -22,6 +22,11 @@ public class Crop
     // How many days the crop keeps yielding once it matures (harvest spread).
     public int? HarvestWindowDays { get; set; }
 
+    // Groups this crop under a CropCategory (Vegetable / Fruit + sub-categories).
+    // Nullable: the 96 existing crops are backfilled by a later subtask, not here, so
+    // existing rows stay valid. Becomes required after that name-keyed backfill.
+    public Guid? CropCategoryId { get; set; }
+
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 
