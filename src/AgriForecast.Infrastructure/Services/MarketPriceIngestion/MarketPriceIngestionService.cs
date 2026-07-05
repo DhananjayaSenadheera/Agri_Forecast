@@ -16,6 +16,7 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
     private readonly IUnitofWorkRepository _unitofWorkRepository;
     private readonly IMarketPriceRepository _marketPriceRepository;
     private readonly ICropRepository _cropRepository;
+    private readonly IGenericRepository<CropAgronomyProfile> _agronomyProfileRepository;
     private const string SourceName = "DAMBULLA_DEC";
 
     // Default category for auto-provisioned crops = top-level Vegetable (fixed seed GUID).
@@ -33,7 +34,7 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         "banana", "mango", "papaya", "pineapple", "guava", "avocado", "avacado"
     };
 
-    public MarketPriceIngestionService(IDambullaApiClient client, IConfiguration config, ILogger<MarketPriceIngestionService> logger, IUnitofWorkRepository unitofWorkRepository, IMarketPriceRepository marketPriceRepository, ICropRepository cropRepository)
+    public MarketPriceIngestionService(IDambullaApiClient client, IConfiguration config, ILogger<MarketPriceIngestionService> logger, IUnitofWorkRepository unitofWorkRepository, IMarketPriceRepository marketPriceRepository, ICropRepository cropRepository, IGenericRepository<CropAgronomyProfile> agronomyProfileRepository)
     {
         _client = client;
         _config = config;
@@ -41,6 +42,7 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         _unitofWorkRepository = unitofWorkRepository;
         _marketPriceRepository = marketPriceRepository;
         _cropRepository = cropRepository;
+        _agronomyProfileRepository = agronomyProfileRepository;
     }
 
     public async Task IngestAsync(CancellationToken ct)
@@ -55,6 +57,13 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
             .GroupBy(c => c.ExternalProductId!.Value)
             .ToDictionary(g => g.Key, g => g.First().Id);
 
+        // Track which crops already have an agronomy profile so we can (a) self-heal any crop
+        // that somehow exists without one and (b) avoid double-staging a profile for a crop we
+        // just provisioned in this same pass. Loaded once; kept in sync as we create profiles.
+        var cropsWithProfile = (await _agronomyProfileRepository.GetAllAsync())
+            .Select(p => p.CropId)
+            .ToHashSet();
+
         // 2. Self-heal: auto-provision a crop for every product that already has price
         //    rows but no crop yet. Historic data ingested before a crop existed becomes
         //    forecastable without any manual catalog curation.
@@ -65,14 +74,33 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
             if (cropByProduct.ContainsKey(product.ExternalProductId))
                 continue;
 
-            var newCropId = await CreateCropForProductAsync(product.ExternalProductId, product.Name, ct);
+            var newCropId = await CreateCropForProductAsync(product.ExternalProductId, product.Name, cropsWithProfile, ct);
             cropByProduct[product.ExternalProductId] = newCropId;
             cropsAutoCreated++;
         }
-        if (cropsAutoCreated > 0)
+
+        // 2b. Self-heal agronomy profiles: a crop must never exist without a profile going
+        //     forward, but legacy/edge crops predating this rule may lack one. Stage a PENDING
+        //     profile for any such crop (matches how we self-heal missing crops above). Idempotent:
+        //     crops that already have a profile are skipped via cropsWithProfile.
+        int profilesHealed = 0;
+        foreach (var crop in crops)
+        {
+            if (cropsWithProfile.Contains(crop.Id))
+                continue;
+
+            await _agronomyProfileRepository.AddAsync(CropAgronomyProfile.CreatePending(crop.Id));
+            cropsWithProfile.Add(crop.Id);
+            profilesHealed++;
+        }
+
+        if (cropsAutoCreated > 0 || profilesHealed > 0)
         {
             await _unitofWorkRepository.CommitAsync();
-            _logger.LogInformation("Auto-created {CropsAutoCreated} crops from existing market products.", cropsAutoCreated);
+            if (cropsAutoCreated > 0)
+                _logger.LogInformation("Auto-created {CropsAutoCreated} crops from existing market products.", cropsAutoCreated);
+            if (profilesHealed > 0)
+                _logger.LogInformation("Self-healed {ProfilesHealed} missing agronomy profiles (pending).", profilesHealed);
         }
 
         // 3. Backfill CropId on existing rows now that every product has a crop.
@@ -119,7 +147,7 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
 
                     if (!cropByProduct.TryGetValue(p.ProductId, out var cropId))
                     {
-                        cropId = await CreateCropForProductAsync(p.ProductId, p.Product?.Name ?? "", ct);
+                        cropId = await CreateCropForProductAsync(p.ProductId, p.Product?.Name ?? "", cropsWithProfile, ct);
                         cropByProduct[p.ProductId] = cropId;
                         newCropsFromFeed++;
                     }
@@ -157,10 +185,12 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
             inserted, skipped, zeroSkipped, cropsAutoCreated, newCropsFromFeed, backfilled, failedProducts);
     }
 
-    // Creates and stages (not committed) a crop for an external market product.
-    // CropCode uses a deterministic source-derived scheme (e.g. DMB000026) so the
-    // background worker never races the API's incrementing crop-code counter.
-    private async Task<Guid> CreateCropForProductAsync(int externalProductId, string name, CancellationToken ct)
+    // Creates and stages (not committed) a crop for an external market product, plus its PENDING
+    // agronomy profile (a crop must never exist without one). CropCode uses a deterministic
+    // source-derived scheme (e.g. DMB000026) so the background worker never races the API's
+    // incrementing crop-code counter. cropsWithProfile is updated so the self-heal pass never
+    // double-stages a profile for a crop provisioned in this same run.
+    private async Task<Guid> CreateCropForProductAsync(int externalProductId, string name, HashSet<Guid> cropsWithProfile, CancellationToken ct)
     {
         var cropName = string.IsNullOrWhiteSpace(name) ? $"Product {externalProductId}" : name.Trim();
         var cropCode = $"DMB{externalProductId.ToString().PadLeft(6, '0')}";
@@ -172,9 +202,14 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
 
         await _cropRepository.Addasync(crop);
 
+        // Stage the PENDING (unverified, all-fields-NULL) agronomy profile alongside the crop, in
+        // the same commit scope as the caller's CommitAsync. Step-5 curation fills and verifies it.
+        await _agronomyProfileRepository.AddAsync(CropAgronomyProfile.CreatePending(crop.Id));
+        cropsWithProfile.Add(crop.Id);
+
         // Log the assigned category only — never the raw feed payload / request bodies / headers.
         _logger.LogInformation(
-            "Auto-provisioned crop {CropCode} (productId={ProductId}) assigned CropCategoryId={CropCategoryId}.",
+            "Auto-provisioned crop {CropCode} (productId={ProductId}) assigned CropCategoryId={CropCategoryId} (pending agronomy profile staged).",
             cropCode, externalProductId, crop.CropCategoryId);
 
         return crop.Id;

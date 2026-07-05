@@ -57,4 +57,27 @@ public class CropAgronomyProfile
 
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
+
+    // Provenance marker for profiles auto-created at crop registration (manual CRUD create OR
+    // ingestion auto-provision). Distinct from the value-copy migration's 'legacy-crops-table'
+    // so the two origins stay auditable. Kebab-case matches the legacy marker's style.
+    public const string PendingRegistrationSource = "pending-registration";
+
+    // Factory for the PENDING profile created alongside a newly-registered Crop (both the manual
+    // create handler and the ingestion auto-provision path). Deliberately unverified: all agronomy
+    // fields NULL, IsPerennial=false, IsVerified=false — Step-5 curation fills and verifies them.
+    // A crop must never exist without a profile going forward; this keeps that construction in one place.
+    public static CropAgronomyProfile CreatePending(Guid cropId)
+    {
+        return new CropAgronomyProfile
+        {
+            Id = Guid.NewGuid(),
+            CropId = cropId,
+            IsPerennial = false,
+            IsVerified = false,
+            DataSource = PendingRegistrationSource,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+    }
 }

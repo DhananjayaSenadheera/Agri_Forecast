@@ -1,5 +1,6 @@
 using AgriForecast.Application.common;
 using AgriForecast.Application.Mapper;
+using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Interfaces;
 using MediatR;
 using Microsoft.Extensions.Logging;
@@ -12,14 +13,17 @@ public class CropCreateCommandHandler : IRequestHandler<CropCreateCommand, Resul
     private ILogger<CropCreateCommandHandler> _logger;
     private readonly IUnitofWorkRepository _unitOfWork;
     private readonly ICropRepository _cropRepository;
+    private readonly IGenericRepository<CropAgronomyProfile> _agronomyProfileRepository;
 
     public CropCreateCommandHandler( CodeSettings codeSetting,
-        IUnitofWorkRepository unitOfWork, ILogger<CropCreateCommandHandler> logger, ICropRepository cropRepository)
+        IUnitofWorkRepository unitOfWork, ILogger<CropCreateCommandHandler> logger, ICropRepository cropRepository,
+        IGenericRepository<CropAgronomyProfile> agronomyProfileRepository)
     {
         _codeSetting = codeSetting;
         _unitOfWork = unitOfWork;
         _logger = logger;
         _cropRepository = cropRepository;
+        _agronomyProfileRepository = agronomyProfileRepository;
     }
     public async Task<Result<bool>> Handle(CropCreateCommand request, CancellationToken cancellationToken)
     {
@@ -41,8 +45,14 @@ public class CropCreateCommandHandler : IRequestHandler<CropCreateCommand, Resul
         var crop = dto.ToEntity();
         crop.CropCode = cropcode;
         await _cropRepository.Addasync(crop);
+
+        // A crop must never exist without an agronomy profile. Stage a PENDING (unverified,
+        // all-fields-NULL) profile in the SAME SaveChanges scope as the crop insert so the two
+        // commit atomically — Step-5 curation later fills and verifies it.
+        await _agronomyProfileRepository.AddAsync(CropAgronomyProfile.CreatePending(crop.Id));
+
         await _unitOfWork.CommitAsync();
-        _logger.LogInformation("Crop created successfully with Crop Code: {CropCode}", crop.CropCode);
+        _logger.LogInformation("Crop created successfully with Crop Code: {CropCode} (pending agronomy profile staged).", crop.CropCode);
         return Result<bool>.Success(true);
     }
 }
