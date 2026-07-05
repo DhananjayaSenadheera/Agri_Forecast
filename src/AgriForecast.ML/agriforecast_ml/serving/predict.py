@@ -19,6 +19,24 @@ from . import explain
 
 _log = logging.getLogger(__name__)
 
+# R2 Step 2.3: serving reads agronomy from CropAgronomyProfiles. Emit ONE
+# aggregate WARN (not per request) when an unverified profile drives a served
+# horizon, so the pre-Step-5 transition is visible. Step 5.3 makes this a hard
+# skip (IsVerified-strict exclusion).
+_unverified_warned = False
+
+
+def _warn_unverified_once() -> None:
+    global _unverified_warned
+    if not _unverified_warned:
+        _unverified_warned = True
+        _log.warning(
+            "Serving a forecast horizon from an UNVERIFIED agronomy profile "
+            "(IsVerified=0). Expected pre-Step-5; legacy-copied values. "
+            "Step 5.3 flips the exclusion predicate to IsVerified-strict."
+        )
+
+
 # Load the promoted payload once at import (serving is read-only).
 _PAYLOAD, _META = registry.load_promoted()
 
@@ -35,13 +53,35 @@ def _latest_feature_row(crop_id: str, plant_date: date):
 
 
 def _crop_meta(crop_id: str):
-    sql = text("SELECT Name, GrowthPeriodDays FROM Crops WHERE Id = :cid")
+    """Resolve (crop_name, growth_period_days) for the serving fallback path.
+
+    R2 Step 2.3 CUT-OVER: GrowthPeriodDays now comes from ``CropAgronomyProfiles``
+    (the source of truth), NOT ``Crops.GrowthPeriodDays`` (dropped in 2.4). LEFT
+    JOIN so a crop without a profile still returns its name with gp=None (the
+    caller then serves the crop-mean fallback with no harvest horizon).
+
+    A NULL/absent GrowthPeriodDays => this crop is excluded from ML forecasting
+    (the R2 exclusion predicate); the caller degrades to the crop-mean fallback.
+
+    IsVerified is read for visibility: if an unverified profile drives a served
+    horizon, WARN once (aggregate, module-level) so the pre-Step-5 transition is
+    visible. TODO(R2 Step 5.3): flip to IsVerified-strict (unverified => excluded).
+    """
+    sql = text("""
+        SELECT c.Name, p.GrowthPeriodDays, p.IsVerified
+        FROM Crops c
+        LEFT JOIN CropAgronomyProfiles p ON p.CropId = c.Id
+        WHERE c.Id = :cid
+    """)
     with get_engine().connect() as conn:
         df = pd.read_sql(sql, conn, params={"cid": crop_id})
     if not len(df):
         return None, None
     gp = df["GrowthPeriodDays"].iloc[0]
-    return df["Name"].iloc[0], (int(gp) if pd.notna(gp) else None)
+    gp = int(gp) if pd.notna(gp) else None
+    if gp is not None and df["IsVerified"].iloc[0] != True:  # noqa: E712
+        _warn_unverified_once()
+    return df["Name"].iloc[0], gp
 
 
 # ML kinds whose serving artifacts this module knows how to honor. A promoted

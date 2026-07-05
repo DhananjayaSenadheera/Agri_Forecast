@@ -5,8 +5,33 @@ validate -> persist (idempotent full rebuild).
 """
 from __future__ import annotations
 
+import warnings
+
 from agriforecast_ml import load, features, store
 from agriforecast_ml.envfile import load_env_file
+
+
+def _warn_unverified_profiles(crops) -> None:
+    """R2 Step 2.3: emit ONE aggregate WARN when unverified agronomy profiles
+    feed the feature build, so the pre-Step-5 transition is visible without
+    per-row noise. Only crops that actually forecast (GrowthPeriodDays known)
+    matter here -- the exclusion predicate drops the rest anyway.
+
+    TODO(R2 Step 5.3): the exclusion predicate flips to IsVerified-strict once
+    owner-approved profiles land; this WARN then becomes a hard skip.
+    """
+    if "IsVerified" not in crops.columns:
+        return
+    forecastable = crops["GrowthPeriodDays"].notna()
+    unverified = forecastable & (crops["IsVerified"] != True)  # noqa: E712 (NA-safe)
+    n = int(unverified.sum())
+    if n:
+        warnings.warn(
+            f"{n} forecastable crop(s) are using UNVERIFIED agronomy profiles "
+            f"(IsVerified=0). Expected pre-Step-5; values are the legacy copy. "
+            f"Step 5.3 flips the exclusion predicate to IsVerified-strict.",
+            stacklevel=2,
+        )
 
 
 def main() -> None:
@@ -16,6 +41,7 @@ def main() -> None:
     print("=== AgriForecast feature build ===")
     prices = load.load_prices()
     crops = load.load_crops()
+    _warn_unverified_profiles(crops)
     weather = load.load_weather()
     fx = load.load_fx()
     sentiment = load.load_news_sentiment()

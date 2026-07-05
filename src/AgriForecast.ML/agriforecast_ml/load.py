@@ -71,13 +71,65 @@ def load_prices() -> pd.DataFrame:
 
 
 def load_crops() -> pd.DataFrame:
+    """Crop identity + agronomy (growth period / harvest window / planting season).
+
+    R2 Step 2.3 CUT-OVER: agronomy now comes from ``CropAgronomyProfiles`` (the
+    source of truth per R2 Step 2.1), NOT the legacy ``Crops.GrowthPeriodDays /
+    PlantingSeason / HarvestWindowDays`` columns (those are dropped in 2.4 -- do
+    not read them again). ``Crops`` still owns crop IDENTITY (Id/CropCode/Name);
+    the profile is joined 1:1 for the three agronomy values.
+
+    LEFT JOIN so a crop that somehow lacks a profile row still appears with NULL
+    agronomy (it is then excluded from forecasting by the label/exclusion gate,
+    exactly like a NULL GrowthPeriodDays -- see build_features / features.py).
+
+    SEASON ENCODING (binding R2 convention): PlantingSeasonEnc is derived
+    downstream (features.py) from the profile month columns -- Yala populated => 1,
+    Maha populated => 2, all-NULL => Year-round/unknown. We emit the four month
+    columns + IsPerennial so features.py can derive it; ``PlantingSeason`` is a
+    RECONSTRUCTED legacy-compatible string kept ONLY so the encoder reproduces
+    today's exact per-crop values bit-for-bit (QA acceptance pin): the legacy
+    encoder mapped 'Year-round' -> 0 but NULL -> -1, and the 2.1 copy collapsed
+    both to all-NULL month columns, so the profile alone cannot separate them.
+    The one surviving discriminator is GrowthPeriodDays (the legacy 'Year-round'
+    crops are exactly the ones with a non-NULL growth period). Reconstruction:
+    all months NULL AND gp known => 'Year-round' (enc 0); all months NULL AND gp
+    NULL => None (enc -1, the legacy "unknown" state, and these crops are excluded
+    from training anyway). Once Step 5 populates real months, Yala/Maha win here
+    regardless of gp.
+
+    IsVerified is loaded for visibility (WARN-on-unverified in build_features /
+    serving). It is NOT yet part of the exclusion predicate -- all 96 profiles are
+    IsVerified=0 until Step 5. TODO(R2 Step 5.3): flip the forecasting-exclusion
+    predicate to IsVerified-strict once owner-approved profiles land.
+    """
     sql = """
-        SELECT Id AS CropId, CropCode, Name AS CropName,
-               GrowthPeriodDays, PlantingSeason, HarvestWindowDays
-        FROM Crops
+        SELECT c.Id AS CropId, c.CropCode, c.Name AS CropName,
+               p.GrowthPeriodDays, p.HarvestWindowDays,
+               p.YalaPlantingStartMonth, p.YalaPlantingEndMonth,
+               p.MahaPlantingStartMonth, p.MahaPlantingEndMonth,
+               p.IsPerennial, p.IsVerified
+        FROM Crops c
+        LEFT JOIN CropAgronomyProfiles p ON p.CropId = c.Id
     """
     df = pd.read_sql(sql, get_engine())
     df["CropId"] = df["CropId"].astype(str)
+    # Reconstruct the legacy-compatible PlantingSeason string so the downstream
+    # encoder stays bit-identical (see docstring). Month columns take precedence
+    # (future-proof for Step 5); today all months are NULL so this collapses to
+    # the gp-based Year-round/None split that matches legacy exactly.
+    yala_cols = ["YalaPlantingStartMonth", "YalaPlantingEndMonth"]
+    maha_cols = ["MahaPlantingStartMonth", "MahaPlantingEndMonth"]
+    has_yala = df[yala_cols].notna().any(axis=1)
+    has_maha = df[maha_cols].notna().any(axis=1)
+    season = pd.Series([None] * len(df), index=df.index, dtype=object)
+    # all-NULL months + a known growth period => legacy 'Year-round' (enc 0);
+    # all-NULL months + NULL gp => leave None (legacy NULL -> enc -1).
+    season = season.mask(df["GrowthPeriodDays"].notna() & ~has_yala & ~has_maha,
+                         "Year-round")
+    season = season.mask(has_maha, "Maha")   # Maha months populated (Step 5+)
+    season = season.mask(has_yala, "Yala")   # Yala wins if both somehow set
+    df["PlantingSeason"] = season
     return df
 
 
