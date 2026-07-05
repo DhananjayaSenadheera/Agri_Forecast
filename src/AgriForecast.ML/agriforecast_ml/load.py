@@ -81,6 +81,59 @@ def load_crops() -> pd.DataFrame:
     return df
 
 
+_CROP_CATEGORY_COLS = ["crop_id", "category_id", "category_code",
+                       "category_name", "parent_code"]
+
+
+def load_crop_categories() -> pd.DataFrame:
+    """Crop taxonomy: one row per crop with its category (and parent category).
+
+    The DB ``CropCategories`` table is the SOURCE OF TRUTH for crop taxonomy
+    (R2 Step 1). Consumers must NOT hardcode category maps in Python -- read this
+    loader (or the DB table) instead. The retired 11-GUID / 4-family static maps
+    are dead; do not resurrect them.
+
+    Joins Crops -> CropCategories -> parent CropCategories (LEFT, so a top-level
+    category has ``parent_code = None``). ``Crops.CropCategoryId`` is FK-backfilled
+    for all live crops; a crop whose category is somehow unmapped is dropped by the
+    inner join (it has no taxonomy to serve).
+
+    Mirrors load_policy_flags()/load_fx(): same engine, try/except -> typed
+    empty-frame degrade so a missing/empty CropCategories table yields an empty
+    taxonomy frame rather than failing the caller. GUID columns are lowercased so
+    the .NET<->Python boundary never misses on case (uppercase-GUID fallback miss
+    was a real bug).
+
+    Returns [crop_id, category_id, category_code, category_name, parent_code]:
+    crop_id/category_id lowercase str GUIDs, parent_code None for top-level
+    categories.
+    """
+    sql = """
+        SELECT c.Id           AS crop_id,
+               cat.Id         AS category_id,
+               cat.Code       AS category_code,
+               cat.Name       AS category_name,
+               parent.Code    AS parent_code
+        FROM Crops c
+        JOIN CropCategories cat ON cat.Id = c.CropCategoryId
+        LEFT JOIN CropCategories parent ON parent.Id = cat.ParentId
+    """
+    try:
+        df = pd.read_sql(sql, get_engine())
+    except Exception:
+        return pd.DataFrame(columns=_CROP_CATEGORY_COLS)
+    if df.empty:
+        return pd.DataFrame(columns=_CROP_CATEGORY_COLS)
+    # Lowercase the GUID columns (the .NET boundary emits mixed case).
+    df["crop_id"] = df["crop_id"].astype(str).str.lower()
+    df["category_id"] = df["category_id"].astype(str).str.lower()
+    df["category_code"] = df["category_code"].astype(str)
+    df["category_name"] = df["category_name"].astype(str)
+    # parent_code is NULL for top-level categories -> keep it as None, not "None".
+    df["parent_code"] = df["parent_code"].where(df["parent_code"].notna(), None)
+    return df.reset_index(drop=True)
+
+
 def load_fx() -> pd.DataFrame:
     """USD->LKR exchange-rate series for a point-in-time (as-of) join.
 

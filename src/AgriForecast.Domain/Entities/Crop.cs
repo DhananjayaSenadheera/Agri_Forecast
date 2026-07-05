@@ -34,7 +34,7 @@ public class Crop
     // Encapsulates the private-set Id and the created/updated timestamps that the
     // old CreateMap<Crop_CreateDto, Crop> profile populated. CropCode is assigned
     // by the create handler after construction (matches prior behaviour).
-    public static Crop CreateForManualEntry(string name, int? externalProductId, string? source)
+    public static Crop CreateForManualEntry(string name, int? externalProductId, string? source, Guid cropCategoryId)
     {
         return new Crop
         {
@@ -42,6 +42,7 @@ public class Crop
             Name = name,
             ExternalProductId = externalProductId,
             Source = source,
+            CropCategoryId = cropCategoryId,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };

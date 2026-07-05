@@ -62,7 +62,7 @@ public class MapperTests
     // CropMapper — update (conditional-copy guards, mutate-in-place, immutability)
     // ──────────────────────────────────────────────────────────────────────────────
 
-    private static Crop ExistingCrop() => Crop.CreateForManualEntry("Original", 1, "OriginalSource");
+    private static Crop ExistingCrop() => Crop.CreateForManualEntry("Original", 1, "OriginalSource", Guid.NewGuid());
 
     [Fact]
     public void Crop_ApplyTo_OverwritesNameEvenWhenSourceNameIsNull()
@@ -182,7 +182,7 @@ public class MapperTests
     [Fact]
     public void Crop_ToGetDto_CopiesAllExposedFieldsIncludingId()
     {
-        var crop = Crop.CreateForManualEntry("Carrot", 7, "Dambulla");
+        var crop = Crop.CreateForManualEntry("Carrot", 7, "Dambulla", Guid.NewGuid());
         crop.CropCode = "CR-001";
 
         var dto = crop.ToGetDto();
@@ -201,7 +201,7 @@ public class MapperTests
         // Reflection-based round-trip completeness guard: every public settable
         // property on Crop_GetDto must differ from a fresh default(Crop_GetDto)
         // when the source Crop has non-default values for the same-named field.
-        var crop = Crop.CreateForManualEntry("Carrot", 7, "Dambulla");
+        var crop = Crop.CreateForManualEntry("Carrot", 7, "Dambulla", Guid.NewGuid());
 
         var dto = crop.ToGetDto();
         var blank = new Crop_GetDto();
@@ -220,9 +220,9 @@ public class MapperTests
     {
         var crops = new[]
         {
-            Crop.CreateForManualEntry("A", 1, "s1"),
-            Crop.CreateForManualEntry("B", 2, "s2"),
-            Crop.CreateForManualEntry("C", 3, "s3")
+            Crop.CreateForManualEntry("A", 1, "s1", Guid.NewGuid()),
+            Crop.CreateForManualEntry("B", 2, "s2", Guid.NewGuid()),
+            Crop.CreateForManualEntry("C", 3, "s3", Guid.NewGuid())
         };
 
         var dtos = crops.ToGetDtoList();

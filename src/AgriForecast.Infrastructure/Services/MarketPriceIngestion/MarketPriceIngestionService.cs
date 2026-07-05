@@ -18,6 +18,21 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
     private readonly ICropRepository _cropRepository;
     private const string SourceName = "DAMBULLA_DEC";
 
+    // Default category for auto-provisioned crops = top-level Vegetable (fixed seed GUID).
+    // Fruit-by-keyword refinement bumps obvious fruits to top-level Fruit instead.
+    // (Seed GUIDs are the fixed reference-table GUIDs applied by migration 20260705001104.)
+    private static readonly Guid VegetableCategoryId = Guid.Parse("d4c40001-0000-0000-0000-000000000001");
+    private static readonly Guid FruitCategoryId = Guid.Parse("d4c40001-0000-0000-0000-000000000002");
+
+    // Conservative fruit keyword list. Melon variants are deliberately EXCLUDED: "watermelon"
+    // and other melons appear under vegetables in Sri Lankan market groupings, so keeping them
+    // as the Vegetable default avoids mis-classifying them as Fruit. Covers the common
+    // "avacado" misspelling seen in feed product names.
+    private static readonly string[] FruitKeywords =
+    {
+        "banana", "mango", "papaya", "pineapple", "guava", "avocado", "avacado"
+    };
+
     public MarketPriceIngestionService(IDambullaApiClient client, IConfiguration config, ILogger<MarketPriceIngestionService> logger, IUnitofWorkRepository unitofWorkRepository, IMarketPriceRepository marketPriceRepository, ICropRepository cropRepository)
     {
         _client = client;
@@ -150,7 +165,34 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         var cropName = string.IsNullOrWhiteSpace(name) ? $"Product {externalProductId}" : name.Trim();
         var cropCode = $"DMB{externalProductId.ToString().PadLeft(6, '0')}";
         var crop = Crop.CreateFromExternalSource(cropName, externalProductId, SourceName, cropCode);
+
+        // Assign a default CropCategory so auto-provisioned crops are never left uncategorised:
+        // top-level Vegetable, or top-level Fruit when the product name matches a fruit keyword.
+        crop.CropCategoryId = ResolveCategoryId(cropName);
+
         await _cropRepository.Addasync(crop);
+
+        // Log the assigned category only — never the raw feed payload / request bodies / headers.
+        _logger.LogInformation(
+            "Auto-provisioned crop {CropCode} (productId={ProductId}) assigned CropCategoryId={CropCategoryId}.",
+            cropCode, externalProductId, crop.CropCategoryId);
+
         return crop.Id;
+    }
+
+    // Maps an auto-provisioned crop name to a top-level CropCategory. Default is Vegetable;
+    // returns Fruit only when the (case-insensitive) name contains a fruit keyword. Melons are
+    // intentionally NOT fruit keywords (kept as Vegetable — see FruitKeywords remarks).
+    private static Guid ResolveCategoryId(string cropName)
+    {
+        var lower = cropName.ToLowerInvariant();
+        foreach (var keyword in FruitKeywords)
+        {
+            if (lower.Contains(keyword))
+            {
+                return FruitCategoryId;
+            }
+        }
+        return VegetableCategoryId;
     }
 }
