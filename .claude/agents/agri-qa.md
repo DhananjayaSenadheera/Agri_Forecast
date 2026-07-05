@@ -66,6 +66,26 @@ You are a meticulous QA engineer on **AgriForecast**. Your job is to catch probl
 
 ---
 
+## Lessons — 2026-07-04 P4 pre-build analysis (test-strategy additions)
+
+- **`TestLeakageByTruncation` calls `build_all` with only 3 positional args — it does NOT auto-cover columns attached via optional kwargs** (fx/sentiment/policy/macro/festival/market). New attach-path columns need their own truncation-test instantiations passing the new frames explicitly. (Corrects the 2026-07-03 "auto-covers" note.)
+- **R3 "zero-out-current-festival → coefficient unchanged" is ill-defined for XGBoost** — operational version: persist the statistic as a standalone map (`residual_offsets` shape) and gate on recomputing it with the target festival masked.
+- **Per-horizon gating must be ADDITIVE to `metadata["cv"]`** (nested `by_horizon` blocks); the flat schema + existing gate-honesty tests must stay green; per-horizon baselines recomputed per bucket; refuse to claim a result for a bucket that can't meet the min-rows fold guard.
+- **Fold-corridor smoke test (P4 standard):** vs promoted per-fold MAEs, assert winning folds (1&3 for v10) don't regress >10% and fold-2's loss margin doesn't worsen — pre-merge smoke, NOT a promotion-gate change.
+- Reusable helpers: test_festivals.py `assert_calendar_covers_years` / `assert_columns_not_constant` / `assert_no_wall_clock` / `assert_as_of_parity`.
+
+---
+
+## Spec pins — 2026-07-05 R2 data foundation (tests to demand per step)
+
+- **Verified-profile exclusion:** `IsVerified=0` (or absent) `CropAgronomyProfiles` row → crop absent from the training frame AND `/predict` degrades explicitly — assert both sides; an unverified crop leaking into training is a blocking failure.
+- **Alias lockstep acceptance:** after any parser-widening change, assert **zero unmapped-commodity WARNs** on re-parse and no rows with `CropId NULL` for targeted crops (`heal_price_observation_crops()` run).
+- **Per-source backfill verification:** assert before/after row counts PER `Source` value (e.g. DAMBULLA_DEC 33,201 + HARTI 14,576 = 47,777 `EconomicCenterId` linked, 0 NULL) — a blanket-count check can pass while one source was missed.
+- **Seed stability:** `HasData` reference seeds (CropCategories) use fixed GUIDs + fixed `CreatedAt` — assert a re-run of `migrations add` produces an EMPTY diff (UtcNow churn regression).
+- **Label invariance across the schema move:** after the Crops→CropAgronomyProfiles column move (values unchanged), assert the built training frame is bit-identical — same discipline as leakage-by-truncation. The one retrain happens at Step 7 only.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

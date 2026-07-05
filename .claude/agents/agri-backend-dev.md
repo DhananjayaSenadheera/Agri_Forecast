@@ -60,6 +60,24 @@ You are a backend engineer on **AgriForecast**, owning the **Python FastAPI ML m
 
 ---
 
+## Lessons — 2026-07-04 P4 pre-build analysis (serving path)
+
+- **`_build_X` was duplicated** (predict.py:85-99 vs explain.py:82-92) — consolidated into a shared helper in P4 step 0; keep it single-sourced, NaN-never-0 preserved.
+- **Serving reads ONE precomputed `CropFeatureDaily` row** (predict.py:26-34) — new feature families must be OFFLINE columns; never per-request market fan-out.
+- **.NET `HarvestPredictionClient` is case-insensitive + unmapped-ignore** (proven: topFactors/plantDate already unmapped) — ADDING response fields is safe; renaming/removing/retyping `confidence`/`activePredictor`/`predictedPrice`/bounds breaks it.
+- **Any new served kind needs BOTH `_SERVABLE_ML_KINDS`** (predict.py:50) **AND an artifact-presence branch in `_ml_servable`** (predict.py:58-82) — else silent fallback.
+- **SHAP is TreeExplainer-only** — Prophet/LSTM predictions ship empty topFactors (safe degrade, document, don't "fix").
+
+---
+
+## Spec pins — 2026-07-05 R2 data foundation (owner-approved plan; binding)
+
+- **`serving/crop_categories.py` reads the DB `CropCategories` table** (its docstring pre-authorizes DB as source of truth) — the hardcoded 11-GUID map is retired; never resurrect a static-Python twin of the table.
+- **Agronomy reads come from `CropAgronomyProfiles`** (1:1 with Crop), not `Crops` columns (being dropped). **Crops without a verified profile (`IsVerified=1`) are excluded from forecasting** — `/predict` must degrade explicitly for them (structured "not forecastable" response), never upgrade to a confident-looking fallback.
+- **`GrowthPeriodDays` from the profile defines the serving horizon** (harvest date) — same value the label was trained on; never source it from anywhere else.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

@@ -74,6 +74,26 @@ You are a senior ML engineer on **AgriForecast** — a system that helps Sri Lan
 
 ---
 
+## Lessons — 2026-07-04 P4 pre-build analysis (ensemble features / Prophet spike)
+
+- **P4 owner decisions:** cross-market FEATURES only, onto the per-(crop,date) frame — market-as-label reshape is P5. Learned festival uplift DEFERRED to the Prophet path (1–2 events/fold = unverifiable; collinear with P2 flags). LSTM deferred out of P4. Prophet = thin gated R&D spike: 1–2 crops, holidays-only via the unused `to_prophet_holidays()` (load.py:191), MAP not MCMC, beats seasonal-naive AND Model A or doesn't ship.
+- **Prophet/LSTM train on the daily `AvgPrice` series, NOT the harvest-price label** (`price.shift(-gp)`) — a parallel pipeline evaluated at matched horizons, never a drop-in third model.
+- **"National" for any cross-market feature = unweighted mean over `get_feature_safe_market_ids()`** (canonical.py:347, dead code until P4) — never raw AVG over PriceObservations (Pettah/ECOMAP double-count). NaN not 0 when <2 markets report.
+- **Only 4/11 model crops have PriceObservations coverage** (Capsicum, Bitter Gourd, Ridge Gourd, Lady's Fingers); the other 7 → NaN spread features by construction.
+- evaluate.py had MAE/RMSE/MAPE only — **directional accuracy added in P4 step 0**; report it alongside MAE in CV output.
+- **Multi-model payload:** optional `payload["components"]` map (`{tier: served_ml_kind, artifacts, horizon_days, per-component beats_baseline}`) inside the ONE signed pkl; Prophet artifact = `model_to_json` string; explicit seeds + hard iteration caps mandatory for any new trainer.
+
+---
+
+## Spec pins — 2026-07-05 R2 data foundation (owner-approved plan; binding)
+
+- **`GrowthPeriodDays` DEFINES the training label** (`price.shift(-GrowthPeriodDays)`) **and the serving horizon.** Its source of truth is moving to **`CropAgronomyProfiles`** (1:1 with Crop) — `load.py`/`features.py`/`serving/predict.py` read the profile table, not `Crops` columns. Changing a crop's VALUE silently changes its label → owner sign-off required per value, and retraining happens ONCE at plan Step 7, never per-step (value-preserving schema moves do not retrain).
+- **Crops without a VERIFIED profile (`IsVerified=1`) are EXCLUDED from forecasting** — this is the explicit, intended form of the old NULL-GrowthPeriodDays lockout (Beans/Snake Gourd), not a bug to "fix" by imputing a growth period.
+- **PlantingSeason encoding derives from the profile month columns** (Year-round=0 / Yala=1 / Maha=2), not from a stored string.
+- **Crop categories come from the DB `CropCategories` table** (read via the `load.py` pattern) — the hardcoded 11-GUID map in `serving/crop_categories.py` is retired; never resurrect a static twin.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

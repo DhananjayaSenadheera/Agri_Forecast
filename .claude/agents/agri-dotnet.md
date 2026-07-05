@@ -60,6 +60,22 @@ You are a senior .NET engineer on **AgriForecast**, owning the **.NET 9 Clean-Ar
 
 ---
 
+## Lessons — 2026-07-04 P4 pre-build analysis
+
+- **P4 is Python-side; .NET impact = response-DTO additions only** (safe: the client is case-insensitive + unmapped-ignore). `marketId` on `/predict` + a market-keyed store = P5 — do not build early.
+
+---
+
+## Spec pins — 2026-07-05 R2 data foundation (owner-approved plan; binding)
+
+- **NEVER `HasData` on `Crop` rows** — Crop GUIDs are per-database (auto-provisioned), so seeded GUIDs would collide or duplicate across environments. `HasData` is ONLY for fixed-GUID reference tables (e.g. `CropCategories`: fixed lowercase GUIDs + fixed `CreatedAt`, per the PolicyFlag precedent). Backfilling existing Crop rows = **name-keyed `migrationBuilder.Sql`** (`UPDATE ... WHERE Name IN (...)`), never seed data.
+- **`CropAgronomyProfiles` owns agronomy** (1:1 unique `CropId` FK): `GrowthPeriodDays`, `HarvestWindowDays`, Yala/Maha planting start/end month tinyints, `IsPerennial`, `DataSource` (citation), `VerifiedOn`, `IsVerified`. The three legacy `Crops` columns are being moved there and then DROPPED — never add agronomy fields back onto `Crops`. Registration flows (manual command + ingestion auto-provision) create a **pending profile (`IsVerified=0`)**, never a verified one.
+- **Backfills of historical rows are PER-SOURCE, never blanket** — one `UPDATE` per `Source` value with before/after row counts verified and reported (e.g. `MarketPrices.EconomicCenterId`: DAMBULLA_DEC and HARTI updated separately even when the target value is the same).
+- **`GrowthPeriodDays` defines the ML training label and serving horizon** (`price.shift(-GrowthPeriodDays)`). Changing a crop's VALUE requires explicit owner sign-off and triggers the one plan-level retrain (Step 7). Schema moves that preserve values do NOT retrain.
+- **CropCode is display-only and assign-once immutable** (`VEG######`/`FRT######` — prefix reflects category at registration, never re-issued, never re-coded on category change). ML keys on lowercase GUID `CropId`; no FK/index/join may use CropCode.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:
