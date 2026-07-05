@@ -74,8 +74,6 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
 
         modelBuilder.Entity<Crop>(e =>
         {
-            e.Property(x => x.PlantingSeason).HasMaxLength(20);
-
             // Optional grouping under a CropCategory. Restrict: a category can never be
             // deleted while a crop still references it. Nullable until the later backfill.
             e.HasOne<CropCategory>()

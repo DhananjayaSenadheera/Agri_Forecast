@@ -10,17 +10,10 @@ public class Crop
     public int? ExternalProductId { get; set; }
     public string? Source { get; set; }
 
-    // --- Agronomic metadata (drives harvest-time price forecasting) ---
-
-    // Days from planting to first harvest. The keystone field: it maps a farmer's
-    // planting date to the harvest date whose price we forecast. Null until curated.
-    public int? GrowthPeriodDays { get; set; }
-
-    // Typical Sri Lankan cultivation season: "Yala", "Maha", or "Year-round".
-    public string? PlantingSeason { get; set; }
-
-    // How many days the crop keeps yielding once it matures (harvest spread).
-    public int? HarvestWindowDays { get; set; }
+    // --- Agronomic metadata ---
+    // Agronomy (GrowthPeriodDays, PlantingSeason, HarvestWindowDays) moved to
+    // CropAgronomyProfiles (1:1) in R2 Step 2.1 and dropped from Crops in Step 2.4.
+    // CropAgronomyProfiles is the sole owner; never add agronomy fields back here.
 
     // Groups this crop under a CropCategory (Vegetable / Fruit + sub-categories).
     // Nullable: the 96 existing crops are backfilled by a later subtask, not here, so
