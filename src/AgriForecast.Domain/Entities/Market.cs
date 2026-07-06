@@ -21,12 +21,17 @@ public class Market
     public string? District { get; private set; }
     public MarketType MarketType { get; set; }
     public bool IsActive { get; set; }
+    // IsEconomicCenter folds the retiring EconomicCenters dimension into Markets (R2 D-DF3):
+    // a Dedicated Economic Centre is now just a Markets row with this flag set. NOT NULL,
+    // defaults false so every existing/ingestion-provisioned market is a plain market unless
+    // explicitly promoted. Public-set so a future economic-centre registration path can set it.
+    public bool IsEconomicCenter { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 
     // Factory for manual/CRUD-created markets. MarketCode is assigned by the create
     // handler after construction (mirrors EconomicCenter.CreateNew / Crop.CreateForManualEntry).
-    public static Market CreateNew(string name, string? district, MarketType marketType)
+    public static Market CreateNew(string name, string? district, MarketType marketType, bool isEconomicCenter = false)
     {
         if (string.IsNullOrWhiteSpace(name))
             throw new ArgumentException("Market name is required.", nameof(name));
@@ -38,6 +43,7 @@ public class Market
             District = district,
             MarketType = marketType,
             IsActive = true,
+            IsEconomicCenter = isEconomicCenter,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };
@@ -56,12 +62,13 @@ public class Market
     }
 
     // Mutate-in-place update used by an update handler on a tracked entity.
-    public void ApplyUpdate(string name, string? district, MarketType marketType, bool isActive)
+    public void ApplyUpdate(string name, string? district, MarketType marketType, bool isActive, bool isEconomicCenter = false)
     {
         Name = name;
         District = district;
         MarketType = marketType;
         IsActive = isActive;
+        IsEconomicCenter = isEconomicCenter;
         UpdatedAt = DateTime.UtcNow;
     }
 }

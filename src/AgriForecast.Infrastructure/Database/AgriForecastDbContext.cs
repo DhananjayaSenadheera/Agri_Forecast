@@ -215,6 +215,12 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.Property(x => x.District).HasMaxLength(100);
             e.Property(x => x.MarketType).HasConversion<int>().IsRequired();
 
+            // IsEconomicCenter folds the retiring EconomicCenters dimension into Markets
+            // (R2 D-DF3). NOT NULL, default false — existing rows and ingestion-provisioned
+            // markets stay plain markets until explicitly promoted; the Dambulla DEC row is
+            // flagged in the same migration via a MarketCode-keyed UPDATE.
+            e.Property(x => x.IsEconomicCenter).IsRequired().HasDefaultValue(false);
+
             // MarketCode is the human-facing business key — unique.
             e.HasIndex(x => x.MarketCode).IsUnique();
         });
