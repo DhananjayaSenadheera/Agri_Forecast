@@ -7,9 +7,9 @@ namespace AgriForecast.Infrastructure.Migrations
     /// <inheritdoc />
     /// <remarks>
     /// R2 D-DF3, subtask 3.2. Removes the four dummy demo EconomicCenters (ECO00000002–ECO00000005)
-    /// and their four twin "ECOMAP-*" Markets that the old EconomicCenters CRUD stack minted.
-    /// Code-keyed (EcoCode / MarketCode), never GUID- or HasData-keyed, so it is portable across
-    /// environments and stable if row Ids differ. The real Dambulla economic-centre row
+    /// and their twin "ECOMAP-*" Markets that the old EconomicCenters CRUD stack minted.
+    /// Keyed on the stable EcoCode business codes and the ECOMAP- MarketCode prefix (twin codes
+    /// embed per-DB GUIDs, so a prefix match is the portable key). The real Dambulla economic-centre row
     /// (MKT00000001, IsEconomicCenter=1) and the EconomicCenters TABLE itself are NOT touched —
     /// table retirement is a later subtask.
     ///
@@ -32,16 +32,14 @@ namespace AgriForecast.Infrastructure.Migrations
 DELETE FROM EconomicCenters
 WHERE EcoCode IN ('ECO00000002', 'ECO00000003', 'ECO00000004', 'ECO00000005');");
 
-            // 2. Then delete the four twin ECOMAP-* Markets (no longer referenced by any Eco row).
-            //    Keyed on the exact MarketCodes captured from the live DB.
+            // 2. Then delete the twin ECOMAP-* Markets (no longer referenced by any Eco row).
+            //    ECOMAP codes embed the source EconomicCenter's per-DB GUID (see
+            //    20260702174842_AddMultiMarketAndPointInTimeData), so exact-code keys are not
+            //    portable across environments — the prefix pattern is the stable key, matching
+            //    that migration's own Down().
             migrationBuilder.Sql(@"
 DELETE FROM Markets
-WHERE MarketCode IN (
-    'ECOMAP-0BFB602B-15B5-4998-9D80-C2C61F77D18D',
-    'ECOMAP-755691C5-1DD7-4540-9CAD-311F4298916F',
-    'ECOMAP-B3F27698-F4CF-4F24-87F1-16E518AD9F3B',
-    'ECOMAP-E1BAAE15-0EF3-4B35-B763-B119BFD82C3D'
-);");
+WHERE MarketCode LIKE 'ECOMAP-%';");
         }
 
         /// <inheritdoc />
