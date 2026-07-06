@@ -42,9 +42,6 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             Crop_Code = 1,
             Crop_Padding = 8,
             Crop_Prefix = "CROP",
-            Eco_Code = 1,
-            Eco_Padding = 8,
-            Eco_Prefix = "ECO",
             // Next manual market code = MKT00000007 (7 seeded markets occupy 1..6).
             Mkt_Code = 7,
             Mkt_Padding = 8,
@@ -194,6 +191,14 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
         {
             e.Property(x => x.AveragePrice).HasPrecision(18, 2);
             e.HasIndex(x => new { x.CropId, x.EconomicCenterId, x.Month }).IsUnique();
+
+            // R2 D-DF3: EconomicCenterId now references Markets (the EconomicCenters CRUD dimension
+            // retired; a Dedicated Economic Centre is a Markets row with IsEconomicCenter=1).
+            // Restrict so a Market can never be deleted out from under a CropPrice row.
+            e.HasOne(x => x.EconomicCenter)
+                .WithMany()
+                .HasForeignKey(x => x.EconomicCenterId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<MarketPrice>(e =>

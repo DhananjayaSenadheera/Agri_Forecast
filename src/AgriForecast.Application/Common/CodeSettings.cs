@@ -23,15 +23,18 @@ public class CodeSettings: Result<string>
         return cropCode;
     }
 
-    public async Task<string?> GetEcoCode()
+    // R2 D-DF3: GetEcoCode() was removed with the EconomicCenters CRUD retirement. Economic-centre
+    // registration is now "create a Market with IsEconomicCenter=true", coded via GetMktCode().
+    public async Task<string?> GetMktCode()
     {
         var defaultSetting = await _defaultSettingRepository.GetDefaultSetting();
-        var ecoCode = defaultSetting.Eco_Prefix + defaultSetting.Eco_Code.ToString()?.PadLeft((int)defaultSetting.Eco_Padding!, '0');
-        if (string.IsNullOrEmpty(ecoCode))
+        var mktCode = defaultSetting.Mkt_Prefix
+                      + defaultSetting.Mkt_Code.ToString()?.PadLeft((int)defaultSetting.Mkt_Padding!, '0');
+        if (string.IsNullOrEmpty(mktCode))
             return null;
-        defaultSetting.Eco_Code += 1;
+        defaultSetting.Mkt_Code += 1;
         _defaultSettingRepository.UpdateDefaultSetting(defaultSetting);
-        return ecoCode;
+        return mktCode;
     }
-    
+
 }
