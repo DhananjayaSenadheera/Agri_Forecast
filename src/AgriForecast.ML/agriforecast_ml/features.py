@@ -9,6 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .load import resolve_forecast_gp
+
 # Canonical datetime resolution for merge_asof join keys. pandas 3.0 requires
 # both as-of keys to share the SAME datetime64 unit (read_sql may yield [s]/[us]
 # and pd.to_datetime preserves it). The load layer (load._as_canon_dt) already
@@ -228,8 +230,13 @@ def build_crop_features(crop_id, group: pd.DataFrame, meta: pd.Series,
     ]
 
     # --- 5. Crop metadata ---
-    gp = meta["GrowthPeriodDays"]
-    gp = int(gp) if pd.notna(gp) else None
+    # R2 Step 5.3 exclusion predicate (IsVerified-STRICT): the crop earns a
+    # harvest horizon ONLY IF its profile is owner-verified AND has a usable
+    # GrowthPeriodDays. An unverified profile's legacy gp is NOT honored (gp=None
+    # here) -> no label below -> the crop is dropped from the trainable set,
+    # exactly like a NULL-gp crop. Routes through the shared load.resolve_forecast_gp
+    # so train (here) and serve (predict._crop_meta) apply one identical gate.
+    gp = resolve_forecast_gp(meta.get("IsVerified"), meta["GrowthPeriodDays"])
     out["GrowthPeriodDays"] = gp if gp is not None else np.nan
     out["PlantingSeasonEnc"] = _PLANTING_SEASON_ENC.get(meta["PlantingSeason"], -1)
     out["HarvestWindowDays"] = meta["HarvestWindowDays"] if pd.notna(meta["HarvestWindowDays"]) else np.nan

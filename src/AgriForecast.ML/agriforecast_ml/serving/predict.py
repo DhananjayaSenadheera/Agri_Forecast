@@ -14,27 +14,16 @@ import pandas as pd
 from sqlalchemy import text
 
 from ..db import get_engine
+from ..load import resolve_forecast_gp
 from ..registry import registry
 from . import explain
 
 _log = logging.getLogger(__name__)
 
-# R2 Step 2.3: serving reads agronomy from CropAgronomyProfiles. Emit ONE
-# aggregate WARN (not per request) when an unverified profile drives a served
-# horizon, so the pre-Step-5 transition is visible. Step 5.3 makes this a hard
-# skip (IsVerified-strict exclusion).
-_unverified_warned = False
-
-
-def _warn_unverified_once() -> None:
-    global _unverified_warned
-    if not _unverified_warned:
-        _unverified_warned = True
-        _log.warning(
-            "Serving a forecast horizon from an UNVERIFIED agronomy profile "
-            "(IsVerified=0). Expected pre-Step-5; legacy-copied values. "
-            "Step 5.3 flips the exclusion predicate to IsVerified-strict."
-        )
+# R2 Step 5.3: serving reads agronomy from CropAgronomyProfiles and applies the
+# IsVerified-STRICT exclusion predicate (unverified profile => no served horizon,
+# crop-mean fallback). The transitional _warn_unverified_once() helper is retired
+# — an unverified profile is now a hard skip, not a warned-through inclusion.
 
 
 # Load the promoted payload once at import (serving is read-only).
@@ -60,12 +49,13 @@ def _crop_meta(crop_id: str):
     JOIN so a crop without a profile still returns its name with gp=None (the
     caller then serves the crop-mean fallback with no harvest horizon).
 
-    A NULL/absent GrowthPeriodDays => this crop is excluded from ML forecasting
-    (the R2 exclusion predicate); the caller degrades to the crop-mean fallback.
-
-    IsVerified is read for visibility: if an unverified profile drives a served
-    horizon, WARN once (aggregate, module-level) so the pre-Step-5 transition is
-    visible. TODO(R2 Step 5.3): flip to IsVerified-strict (unverified => excluded).
+    R2 Step 5.3 exclusion predicate (IsVerified-STRICT): a crop resolves a served
+    harvest horizon ONLY IF its profile is owner-verified (``IsVerified == 1``)
+    AND has a usable GrowthPeriodDays. An unverified profile — even one holding a
+    legacy GrowthPeriodDays — returns gp=None here, so the caller degrades to the
+    crop-mean fallback with NO harvest horizon (identical to a NULL-gp or
+    profile-less crop). Routes through the shared ``load.resolve_forecast_gp`` so
+    serving applies the SAME gate the feature build uses (no train/serve skew).
     """
     sql = text("""
         SELECT c.Name, p.GrowthPeriodDays, p.IsVerified
@@ -77,10 +67,7 @@ def _crop_meta(crop_id: str):
         df = pd.read_sql(sql, conn, params={"cid": crop_id})
     if not len(df):
         return None, None
-    gp = df["GrowthPeriodDays"].iloc[0]
-    gp = int(gp) if pd.notna(gp) else None
-    if gp is not None and df["IsVerified"].iloc[0] != True:  # noqa: E712
-        _warn_unverified_once()
+    gp = resolve_forecast_gp(df["IsVerified"].iloc[0], df["GrowthPeriodDays"].iloc[0])
     return df["Name"].iloc[0], gp
 
 

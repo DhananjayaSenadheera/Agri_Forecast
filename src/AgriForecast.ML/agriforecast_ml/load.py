@@ -27,6 +27,52 @@ def _as_canon_dt(s: pd.Series) -> pd.Series:
     return pd.to_datetime(s).astype(_CANON_DT)
 
 
+def _is_verified(is_verified) -> bool:
+    """True iff the agronomy profile is owner-VERIFIED (IsVerified == 1/True).
+
+    NA-safe and dtype-tolerant: a missing profile (LEFT JOIN NULL), a Python
+    False, a numpy bool, or a 0/1 int all collapse to the right answer without
+    ever raising on ``pd.NA``. Anything that is not truthy-True => not verified.
+    """
+    if is_verified is None or is_verified is pd.NA:
+        return False
+    try:
+        if pd.isna(is_verified):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return bool(is_verified) is True
+
+
+def resolve_forecast_gp(is_verified, growth_period_days) -> int | None:
+    """R2 Step 5.3 exclusion predicate (IsVerified-STRICT) — single source of
+    truth for "does this crop get an ML harvest horizon at all?".
+
+    A crop is forecastable ONLY IF its ``CropAgronomyProfiles`` row is
+    owner-verified (``IsVerified == 1``) AND still carries a usable
+    ``GrowthPeriodDays``. Returns the integer growth period when forecastable,
+    else ``None`` (the caller then degrades to the crop-mean fallback with NO
+    harvest horizon — no label at train time, no served horizon at serve time).
+
+    This is the POST-flip rule. Before Step 5.3 an unverified profile with a
+    legacy GrowthPeriodDays was honored (gp-only predicate); it is now EXCLUDED
+    exactly like a NULL-GrowthPeriodDays crop. Both the feature-build exclusion
+    path (features.build_crop_features) and the serving fallback resolver
+    (serving/predict._crop_meta) route through here so train/serve cannot skew.
+    """
+    if not _is_verified(is_verified):
+        return None
+    if growth_period_days is None or pd.isna(growth_period_days):
+        return None
+    gp = int(growth_period_days)
+    # A non-positive growth period is not a usable horizon: price.shift(-gp)
+    # with gp<=0 yields a degenerate same-/future-day label, so treat it as
+    # unforecastable (defense-in-depth for bad/zero data — no gp<=0 rows today).
+    if gp <= 0:
+        return None
+    return gp
+
+
 def load_prices() -> pd.DataFrame:
     # SPLICE / DEDUP RULE (enforced here, not in the DB):
     #
@@ -98,10 +144,17 @@ def load_crops() -> pd.DataFrame:
     from training anyway). Once Step 5 populates real months, Yala/Maha win here
     regardless of gp.
 
-    IsVerified is loaded for visibility (WARN-on-unverified in build_features /
-    serving). It is NOT yet part of the exclusion predicate -- all 96 profiles are
-    IsVerified=0 until Step 5. TODO(R2 Step 5.3): flip the forecasting-exclusion
-    predicate to IsVerified-strict once owner-approved profiles land.
+    IsVerified is loaded and is now PART OF the exclusion predicate (R2 Step 5.3,
+    IsVerified-strict): a crop is forecastable ONLY IF its profile is
+    ``IsVerified == 1`` AND still carries a usable ``GrowthPeriodDays``. An
+    unverified profile — even one holding a legacy GrowthPeriodDays — is EXCLUDED
+    from ML forecasting exactly like a NULL-GrowthPeriodDays crop; the caller
+    degrades to the crop-mean fallback with no harvest horizon. This loader still
+    returns the RAW DB agronomy values (audit/visibility); the strict predicate
+    itself lives in ``resolve_forecast_gp`` and is applied by the feature-build
+    exclusion path (features.build_crop_features) and the serving fallback
+    resolver (serving/predict._crop_meta), the single shared gate for train/serve
+    skew safety.
     """
     sql = """
         SELECT c.Id AS CropId, c.CropCode, c.Name AS CropName,

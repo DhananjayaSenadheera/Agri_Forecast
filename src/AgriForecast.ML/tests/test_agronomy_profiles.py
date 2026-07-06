@@ -14,15 +14,17 @@ Two invariant classes pinned here (per gate 2.5 QA review):
       features.py gives {0: gp-known crops, -1: rest} (the training-frame
       {-1: 33555, 0: 13930} distribution derives from this 11-vs-85 split).
 
-  (B) Exclusion-predicate anchor -- pins the CURRENT (2026-07-05,
-      hub-adjudicated) forecasting-exclusion rule: a crop is forecastable iff
-      GrowthPeriodDays IS NOT NULL, REGARDLESS of IsVerified. An unverified
-      profile with known gp is forecastable; a NULL-gp profile (verified or
-      not) is not. Step 5.3 flips this to IsVerified-strict once owner-
-      approved DOA values land -- see the TODO markers in load.py / features.py
-      / build_features.py / serving/predict.py. TestExclusionPredicateAnchor
-      is deliberately named/commented so it goes RED the moment Step 5.3 lands
-      and must be rewritten (not silently left green) at that point.
+  (B) Exclusion predicate -- pins the R2 Step 5.3 IsVerified-STRICT rule
+      (REWRITTEN 2026-07-06 from the pre-flip anchor): a crop is forecastable
+      iff its profile is IsVerified=1 AND GrowthPeriodDays IS NOT NULL. An
+      unverified profile — even with a legacy gp — is EXCLUDED (no served
+      horizon, crop-mean fallback); a NULL-gp profile is excluded regardless of
+      the verified flag. The shared gate is load.resolve_forecast_gp, applied by
+      features.build_crop_features (train) and serving/predict._crop_meta
+      (serve). The predecessor class TestExclusionPredicateAnchorPreStep5_3
+      asserted the OLD gp-only predicate and was the deliberate RED-then-rewrite
+      anchor for this flip; TestExclusionPredicateIsVerifiedStrict below encodes
+      the new contract.
 
 Structured like test_merge_asof_dtype.py / test_macro_vintage.py: hermetic
 synthetic-frame tests first (no DB, no network), then DB-gated live-pin
@@ -130,27 +132,36 @@ def test_load_crops_sql_selects_profile_columns():
 
 
 # ===========================================================================
-# (B) Exclusion-predicate anchor -- pins TODAY's behavior; MUST break at Step 5.3.
+# (B) Exclusion predicate -- R2 Step 5.3 IsVerified-STRICT (rewritten from the
+#     pre-flip gp-only anchor, which necessarily went RED when the flip landed).
 # ===========================================================================
 
-class TestExclusionPredicateAnchorPreStep5_3:
-    """R2 Step 2.3 exclusion predicate (hub-adjudicated, CONTRACTS.md
-    2026-07-05): a crop is forecastable iff GrowthPeriodDays IS NOT NULL,
-    REGARDLESS of IsVerified.
+class TestExclusionPredicateIsVerifiedStrict:
+    """R2 Step 5.3 exclusion predicate (IsVerified-STRICT): a crop is
+    forecastable iff its agronomy profile is ``IsVerified == 1`` AND has a
+    usable GrowthPeriodDays. An unverified profile — even one holding a legacy
+    GrowthPeriodDays — is EXCLUDED exactly like a NULL-gp crop; a NULL-gp
+    profile is excluded regardless of the verified flag.
 
-    *** THIS CLASS IS A RED-THEN-GREEN ANCHOR FOR STEP 5.3. ***
-    When Step 5.3 flips the predicate to IsVerified-strict, the first test
-    below (unverified-but-known-gp IS forecastable) must FAIL -- that failure
-    is the expected signal that the flip landed. At that point rewrite this
-    class (do not just delete it) to assert the NEW predicate, and drop this
-    docstring's anchor language.
+    *** REWRITTEN AT R2 STEP 5.3 from the pre-flip anchor
+    (``TestExclusionPredicateAnchorPreStep5_3``). ***
+    The old anchor asserted the pre-flip gp-only predicate (unverified-but-gp
+    crop was INCLUDED / warned). The flip nulls an unverified profile's gp in
+    the shared gate (load.resolve_forecast_gp, applied by
+    features.build_crop_features), so that anchor necessarily went RED: an
+    unverified meta now yields gp=None -> no label. This class re-expresses the
+    NEW contract rather than re-greening the old assertion.
     """
 
     def _meta_row(self, gp, is_verified):
+        # IsVerified is now load-bearing: it flows into the exclusion predicate
+        # via meta.get("IsVerified") in build_crop_features. The pre-flip helper
+        # silently dropped this key, which is precisely why the old anchor breaks.
         return pd.Series({
             "CropCode": "TST000001",
             "CropName": "TestCrop",
             "GrowthPeriodDays": gp,
+            "IsVerified": is_verified,
             "PlantingSeason": "Year-round" if gp is not None else None,
             "HarvestWindowDays": np.nan,
         })
@@ -167,27 +178,41 @@ class TestExclusionPredicateAnchorPreStep5_3:
             "MaxPrice": np.linspace(105, 125, len(dates)),
         })
 
-    def test_unverified_but_known_gp_is_forecastable(self):
-        """IsVerified=0 (unverified) + GrowthPeriodDays known -> the crop DOES
-        get a label / resolves a harvest horizon. Today (pre-Step-5) ALL 96
-        profiles are IsVerified=0, so if this test ever fails it means the
-        current pooled model has silently lost its only 11 training crops."""
+    def test_verified_with_known_gp_is_forecastable(self):
+        """IsVerified=1 + GrowthPeriodDays known -> the crop DOES resolve a
+        harvest horizon and at least one label. This is the ONLY combination
+        that forecasts under the Step 5.3 predicate; the owner-verified model
+        crops must land here."""
+        meta = self._meta_row(gp=60, is_verified=True)
+        weather_by_month, rain_clim = self._weather_lookups()
+        out = F.build_crop_features("crop-verified", self._tiny_price_group(),
+                                     meta, weather_by_month, rain_clim)
+        assert not out["GrowthPeriodDays"].isna().all(), \
+            "verified crop with a known GrowthPeriodDays must populate the feature"
+        assert out["LabelAvailable"].sum() > 0, \
+            "verified-with-known-gp crop must resolve at least one harvest label"
+
+    def test_unverified_but_known_gp_is_now_excluded(self):
+        """THE FLIP: IsVerified=0 + a legacy GrowthPeriodDays is NO LONGER
+        forecastable. The unverified profile's gp is NOT honored -> no harvest
+        horizon, no label -> the crop is dropped from the trainable/servable
+        set, exactly as a NULL-gp crop is. (Under the pre-flip gp-only predicate
+        this same input WAS forecastable and merely warned -- that is the
+        behavior this rewrite deliberately inverts.)"""
         meta = self._meta_row(gp=60, is_verified=False)
         weather_by_month, rain_clim = self._weather_lookups()
         out = F.build_crop_features("crop-unverified", self._tiny_price_group(),
                                      meta, weather_by_month, rain_clim)
-        assert not out["GrowthPeriodDays"].isna().all(), \
-            "known GrowthPeriodDays must populate the feature, even if unverified"
-        assert out["LabelAvailable"].sum() > 0, \
-            "unverified-but-known-gp crop must resolve at least one harvest label -- " \
-            "this is the CURRENT (pre-Step-5.3) predicate; if this fails because " \
-            "Step 5.3 flipped to IsVerified-strict, that is EXPECTED -- rewrite this " \
-            "test class for the new predicate instead of re-greening it silently."
+        assert out["GrowthPeriodDays"].isna().all(), \
+            "unverified profile's GrowthPeriodDays must NOT be honored (gp=None)"
+        assert out["LabelAvailable"].sum() == 0, \
+            "unverified-but-gp crop must resolve ZERO labels under IsVerified-strict"
 
     def test_null_gp_is_not_forecastable_regardless_of_verified_flag(self):
-        """NULL GrowthPeriodDays -> excluded from forecasting no matter what
-        IsVerified says (there is no growth period to compute a harvest date
-        from). This half of the predicate is untouched by the Step 5.3 flip."""
+        """NULL GrowthPeriodDays -> excluded no matter what IsVerified says
+        (there is no growth period to compute a harvest date from). This half of
+        the predicate is untouched by the Step 5.3 flip; verified=True here to
+        prove the gp-NULL exclusion is independent of the verified flag."""
         meta = self._meta_row(gp=None, is_verified=True)
         weather_by_month, rain_clim = self._weather_lookups()
         out = F.build_crop_features("crop-null-gp", self._tiny_price_group(),
@@ -195,6 +220,21 @@ class TestExclusionPredicateAnchorPreStep5_3:
         assert out["GrowthPeriodDays"].isna().all()
         assert out["LabelAvailable"].sum() == 0, \
             "NULL GrowthPeriodDays must never resolve a harvest label"
+
+    def test_resolve_forecast_gp_predicate_truth_table(self):
+        """Unit-pins the shared gate itself (load.resolve_forecast_gp) — the
+        single source of truth both train and serve route through. Only
+        (verified AND gp-known) yields an int horizon; every other cell is None."""
+        assert L.resolve_forecast_gp(True, 60) == 60
+        assert L.resolve_forecast_gp(False, 60) is None   # the flip
+        assert L.resolve_forecast_gp(True, None) is None
+        assert L.resolve_forecast_gp(False, None) is None
+        assert L.resolve_forecast_gp(None, 60) is None    # profile-less LEFT JOIN
+        assert L.resolve_forecast_gp(1, 90) == 90         # int truthy encoding
+        assert L.resolve_forecast_gp(0, 90) is None
+        # non-positive gp is not a usable horizon (degenerate shift) -> excluded
+        assert L.resolve_forecast_gp(True, 0) is None
+        assert L.resolve_forecast_gp(True, -5) is None
 
 
 # ===========================================================================
@@ -233,30 +273,42 @@ class TestLiveAgronomyProfilePin:
         assert df["IsVerified"].dtype == bool
 
     def test_live_gp_non_null_count_and_season_split(self):
+        """REPINNED 2026-07-06 to the post-Step-5-Phase-1 live state: the DOA
+        migration (RecodeAgronomyProfilesDoaVerifiedBatch1) applied 13
+        owner-verified profiles carrying real Yala planting months (was 11
+        gp-known / all 'Year-round' pre-Step-5)."""
         df = _db_or_skip()
         gp_known = df["GrowthPeriodDays"].notna()
-        assert int(gp_known.sum()) == 11, \
-            f"expected 11 gp-non-null crops (pinned 2026-07-05), got {int(gp_known.sum())}"
-        # Exactly the 11 gp-known crops are 'Year-round'; the other 85 are None.
-        assert (df.loc[gp_known, "PlantingSeason"] == "Year-round").all()
+        assert int(gp_known.sum()) == 13, \
+            f"expected 13 gp-non-null crops (Step 5 Phase 1), got {int(gp_known.sum())}"
+        # Exactly the 13 gp-known crops carry real Yala months now; the rest None.
+        assert (df.loc[gp_known, "PlantingSeason"] == "Yala").all()
         assert df.loc[~gp_known, "PlantingSeason"].isna().all()
 
-    def test_live_all_profiles_still_unverified_pre_step5(self):
-        """Pins the pre-Step-5 state: every live profile is IsVerified=0. This
-        test is EXPECTED to start failing once Step 5.3 lands verified values
-        -- that is a sign Step 5 shipped, not a regression. Update/remove then."""
+    def test_live_verified_set_equals_forecastable_set(self):
+        """REWRITTEN 2026-07-06 from test_live_all_profiles_still_unverified_pre_step5.
+        Under R2 Step 5.3 (IsVerified-strict) the forecastable set IS the verified
+        set: Step 5 Phase 1 verified exactly the 13 crops that carry a gp, so
+        IsVerified and GrowthPeriodDays-known must coincide row-for-row. (The old
+        test pinned the pre-Step-5 all-unverified state and was self-flagged to be
+        replaced the moment verified values landed.)"""
         df = _db_or_skip()
-        assert (df["IsVerified"] == False).all()  # noqa: E712
+        verified = df["IsVerified"] == True   # noqa: E712
+        gp_known = df["GrowthPeriodDays"].notna()
+        assert int(verified.sum()) == 13, \
+            f"expected 13 verified profiles (Step 5 Phase 1), got {int(verified.sum())}"
+        assert (verified == gp_known).all(), \
+            "IsVerified-strict: the verified set must equal the gp-known (forecastable) set"
 
     def test_live_planting_season_enc_distribution(self):
-        """PlantingSeasonEnc (features.py) must give exactly {0: gp-known
-        crops, -1: rest} today -- the {-1: 33555, 0: 13930} training-frame
-        distribution (CONTRACTS.md) derives from this per-crop 11-vs-85 split
-        fanned out over each crop's price-history row count."""
+        """REPINNED 2026-07-06: PlantingSeasonEnc (features.py) now gives {1: the
+        13 verified Yala crops, -1: the other 83} — Step 5 populated real Yala
+        planting months, so the gp-known crops encode to 1 (Yala), NOT 0
+        (Year-round) as they did pre-Step-5."""
         df = _db_or_skip()
         enc = df["PlantingSeason"].map(lambda s: F._PLANTING_SEASON_ENC.get(s, -1))
         gp_known = df["GrowthPeriodDays"].notna()
-        assert (enc[gp_known] == 0).all()
+        assert (enc[gp_known] == 1).all()
         assert (enc[~gp_known] == -1).all()
-        assert set(enc.unique()) == {0, -1}, \
-            "no live crop should encode to 1 (Yala) or 2 (Maha) before Step 5 populates months"
+        assert set(enc.unique()) == {1, -1}, \
+            "the 13 verified crops encode to 1 (Yala); the rest to -1"
