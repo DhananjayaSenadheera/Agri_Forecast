@@ -1,3 +1,4 @@
+using AgriForecast.Application.common;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Interfaces;
 using AgriForecast.Infrastructure.Database;
@@ -17,13 +18,15 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
     private readonly IMarketPriceRepository _marketPriceRepository;
     private readonly ICropRepository _cropRepository;
     private readonly IGenericRepository<CropAgronomyProfile> _agronomyProfileRepository;
+    private readonly CodeSettings _codeSettings;
     private const string SourceName = "DAMBULLA_DEC";
 
     // Default category for auto-provisioned crops = top-level Vegetable (fixed seed GUID).
     // Fruit-by-keyword refinement bumps obvious fruits to top-level Fruit instead.
-    // (Seed GUIDs are the fixed reference-table GUIDs applied by migration 20260705001104.)
-    private static readonly Guid VegetableCategoryId = Guid.Parse("d4c40001-0000-0000-0000-000000000001");
-    private static readonly Guid FruitCategoryId = Guid.Parse("d4c40001-0000-0000-0000-000000000002");
+    // (Seed GUIDs are the fixed reference-table constants on CropCategory — single source of truth
+    // shared with the manual registration path and the CropCode re-code migration.)
+    private static readonly Guid VegetableCategoryId = CropCategory.VegetableId;
+    private static readonly Guid FruitCategoryId = CropCategory.FruitId;
 
     // Conservative fruit keyword list. Melon variants are deliberately EXCLUDED: "watermelon"
     // and other melons appear under vegetables in Sri Lankan market groupings, so keeping them
@@ -34,7 +37,7 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         "banana", "mango", "papaya", "pineapple", "guava", "avocado", "avacado"
     };
 
-    public MarketPriceIngestionService(IDambullaApiClient client, IConfiguration config, ILogger<MarketPriceIngestionService> logger, IUnitofWorkRepository unitofWorkRepository, IMarketPriceRepository marketPriceRepository, ICropRepository cropRepository, IGenericRepository<CropAgronomyProfile> agronomyProfileRepository)
+    public MarketPriceIngestionService(IDambullaApiClient client, IConfiguration config, ILogger<MarketPriceIngestionService> logger, IUnitofWorkRepository unitofWorkRepository, IMarketPriceRepository marketPriceRepository, ICropRepository cropRepository, IGenericRepository<CropAgronomyProfile> agronomyProfileRepository, CodeSettings codeSettings)
     {
         _client = client;
         _config = config;
@@ -43,6 +46,7 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         _marketPriceRepository = marketPriceRepository;
         _cropRepository = cropRepository;
         _agronomyProfileRepository = agronomyProfileRepository;
+        _codeSettings = codeSettings;
     }
 
     public async Task IngestAsync(CancellationToken ct)
@@ -186,19 +190,31 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
     }
 
     // Creates and stages (not committed) a crop for an external market product, plus its PENDING
-    // agronomy profile (a crop must never exist without one). CropCode uses a deterministic
-    // source-derived scheme (e.g. DMB000026) so the background worker never races the API's
-    // incrementing crop-code counter. cropsWithProfile is updated so the self-heal pass never
-    // double-stages a profile for a crop provisioned in this same run.
+    // agronomy profile (a crop must never exist without one).
+    //
+    // R2 D-DF4: CropCode is now the category-prefixed VEG######/FRT###### scheme (was the
+    // source-derived DMB###### scheme). The prefix follows the crop's resolved CropCategoryId
+    // (fruit-keyword ⇒ FRT, else VEG), consuming the per-prefix DefaultSetting counter via
+    // CodeSettings.GetCropCode — the SAME counter the manual CQRS path uses. The counter increment
+    // commits in the caller's CommitAsync scope alongside the crop insert. CropCode has no unique
+    // index/FK/join (display-only), so a rare worker/API counter race yields at worst a duplicate
+    // cosmetic code, never a failed insert — accepted trade-off for a single consistent code scheme.
+    // cropsWithProfile is updated so the self-heal pass never double-stages a profile for a crop
+    // provisioned in this same run.
     private async Task<Guid> CreateCropForProductAsync(int externalProductId, string name, HashSet<Guid> cropsWithProfile, CancellationToken ct)
     {
         var cropName = string.IsNullOrWhiteSpace(name) ? $"Product {externalProductId}" : name.Trim();
-        var cropCode = $"DMB{externalProductId.ToString().PadLeft(6, '0')}";
-        var crop = Crop.CreateFromExternalSource(cropName, externalProductId, SourceName, cropCode);
 
         // Assign a default CropCategory so auto-provisioned crops are never left uncategorised:
         // top-level Vegetable, or top-level Fruit when the product name matches a fruit keyword.
-        crop.CropCategoryId = ResolveCategoryId(cropName);
+        var categoryId = ResolveCategoryId(cropName);
+
+        // CropCode prefix follows the TOP-LEVEL category of that CropCategoryId.
+        var prefix = CropCategory.PrefixForCategory(categoryId);
+        var cropCode = await _codeSettings.GetCropCode(prefix)
+                       ?? $"{prefix}{externalProductId.ToString().PadLeft(6, '0')}"; // fail-safe fallback
+        var crop = Crop.CreateFromExternalSource(cropName, externalProductId, SourceName, cropCode);
+        crop.CropCategoryId = categoryId;
 
         await _cropRepository.Addasync(crop);
 

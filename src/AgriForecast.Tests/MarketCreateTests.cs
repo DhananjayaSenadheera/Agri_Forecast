@@ -93,7 +93,8 @@ public class MarketCreateTests
         var settings = new DefaultSetting
         {
             Id = 1,
-            Crop_Prefix = "CROP", Crop_Padding = 8, Crop_Code = 1,
+            Veg_Prefix = "VEG", Veg_Padding = 6, Veg_Code = 71,
+            Frt_Prefix = "FRT", Frt_Padding = 6, Frt_Code = 27,
             Mkt_Prefix = mktPrefix, Mkt_Padding = mktPadding, Mkt_Code = mktCode
         };
         var settingRepo = new Mock<IDefaultSettingRepository>();

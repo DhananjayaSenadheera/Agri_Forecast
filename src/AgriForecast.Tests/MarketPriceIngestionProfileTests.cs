@@ -76,6 +76,21 @@ public class MarketPriceIngestionProfileTests
             => Task.FromResult<List<DambullaChartItemDto>?>(new List<DambullaChartItemDto>());
     }
 
+    // Backs CodeSettings so the auto-provision path can stamp category-prefixed CropCodes
+    // (VEG######/FRT######) via the same per-prefix DefaultSetting counters the API uses.
+    private sealed class FakeDefaultSettingRepository : IDefaultSettingRepository
+    {
+        private readonly DefaultSetting _setting = new()
+        {
+            Id = 1,
+            Veg_Prefix = "VEG", Veg_Padding = 6, Veg_Code = 71,
+            Frt_Prefix = "FRT", Frt_Padding = 6, Frt_Code = 27,
+            Mkt_Prefix = "MKT", Mkt_Padding = 8, Mkt_Code = 7,
+        };
+        public Task<DefaultSetting> GetDefaultSetting() => Task.FromResult(_setting);
+        public void UpdateDefaultSetting(DefaultSetting defaultSetting) { }
+    }
+
     private static IConfiguration Config()
         => new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["MarketPriceSources:DambullaDec:MaxProductId"] = "0" })
@@ -88,9 +103,10 @@ public class MarketPriceIngestionProfileTests
         var profiles = new FakeGenericRepository<CropAgronomyProfile>();
         var prices = new FakeMarketPriceRepository();
         var uow = new FakeUnitOfWork();
+        var codeSettings = new AgriForecast.Application.common.CodeSettings(new FakeDefaultSettingRepository());
         var svc = new MarketPriceIngestionService(
             new EmptyDambullaClient(), Config(), NullLogger<MarketPriceIngestionService>.Instance,
-            uow, prices, crops, profiles);
+            uow, prices, crops, profiles, codeSettings);
         return (svc, crops, profiles, prices, uow);
     }
 

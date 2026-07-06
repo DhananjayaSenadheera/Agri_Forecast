@@ -39,9 +39,15 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
         modelBuilder.Entity<DefaultSetting>().HasData(new DefaultSetting
         {
             Id = 1,
-            Crop_Code = 1,
-            Crop_Padding = 8,
-            Crop_Prefix = "CROP",
+            // R2 D-DF4: per-category-prefix crop-code counters. Seeded to next-free after the 96
+            // existing crops were re-coded (VEG000001..VEG000070 ⇒ next 71; FRT000001..FRT000026
+            // ⇒ next 27); padding 6 → VEG######/FRT######.
+            Veg_Code = 71,
+            Veg_Padding = 6,
+            Veg_Prefix = CropCategory.VegetablePrefix,
+            Frt_Code = 27,
+            Frt_Padding = 6,
+            Frt_Prefix = CropCategory.FruitPrefix,
             // Next manual market code = MKT00000007 (7 seeded markets occupy 1..6).
             Mkt_Code = 7,
             Mkt_Padding = 8,

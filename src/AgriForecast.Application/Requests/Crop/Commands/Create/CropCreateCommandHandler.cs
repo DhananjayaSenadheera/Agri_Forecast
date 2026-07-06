@@ -35,13 +35,15 @@ public class CropCreateCommandHandler : IRequestHandler<CropCreateCommand, Resul
             return Result<bool>.Failure("Crop details cannot be null.");
         }
         
-        var cropcode = await _codeSetting.GetCropCode();
+        // CropCode prefix (VEG/FRT) follows the crop's TOP-LEVEL category (sub-categories roll up).
+        var prefix = Domain.Entities.CropCategory.PrefixForCategory(dto.CropCategoryId);
+        var cropcode = await _codeSetting.GetCropCode(prefix);
         if (cropcode is null)
         {
             _logger.LogInformation("Failed to create crop: Crop code is null.");
-            return Result<bool>.Failure("Crop code cannot be null."); 
+            return Result<bool>.Failure("Crop code cannot be null.");
         }
-        
+
         var crop = dto.ToEntity();
         crop.CropCode = cropcode;
         await _cropRepository.Addasync(crop);
