@@ -209,6 +209,17 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             // prevents duplicates even if worker runs twice
             e.HasIndex(x => new { x.Source, x.ExternalProductId, x.PriceDate })
                 .IsUnique();
+
+            // R2 Step 3.3 / D-DF3: EconomicCenterId references Markets (the EconomicCenters
+            // CRUD dimension is retired; a Dedicated Economic Centre is a Markets row with
+            // IsEconomicCenter=1). MarketPrice has no nav property, so the FK is declared
+            // without a reference navigation. Restrict so a Market can never be deleted out
+            // from under a price row. Column stays nullable in the DB (an unlinked source
+            // may exist before its per-source backfill runs).
+            e.HasOne<Market>()
+                .WithMany()
+                .HasForeignKey(x => x.EconomicCenterId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<Market>(e =>
