@@ -720,10 +720,13 @@ class TestDambullaBackCompat:
         ]
         original = harti_loader._build_crop_map
         harti_loader._build_crop_map = lambda _: fake_map
+        original_market_id = harti_loader._dambulla_market_id
+        harti_loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             result = harti_loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             harti_loader._build_crop_map = original
+            harti_loader._dambulla_market_id = original_market_id
 
         assert result["inserted"] == 1, "Only the Dambulla row should be inserted"
         assert result["skipped_non_dambulla"] == 2
@@ -737,10 +740,13 @@ class TestDambullaBackCompat:
         ]
         original = harti_loader._build_crop_map
         harti_loader._build_crop_map = lambda _: fake_map
+        original_market_id = harti_loader._dambulla_market_id
+        harti_loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             result = harti_loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             harti_loader._build_crop_map = original
+            harti_loader._dambulla_market_id = original_market_id
 
         assert result["inserted"] == 1
         assert result["skipped_non_dambulla"] == 0

@@ -295,6 +295,44 @@ def _build_market_map(engine: sa.engine.Engine) -> dict[str, uuid.UUID]:
     return result
 
 
+# MarketCode of the sole Dambulla market row (Markets.MarketCode is a stable
+# business code, seeded by migration -- NEVER hardcode the row's GUID, which
+# is per-DB; see D-DF3 / R2 Step 3 in the project memory).
+_DAMBULLA_MARKET_CODE = "MKT00000001"
+
+
+def _dambulla_market_id(engine: sa.engine.Engine) -> uuid.UUID:
+    """Resolve the Dambulla Markets.Id at runtime (BY CODE, never a hardcoded
+    GUID -- GUIDs are per-DB).
+
+    Used to populate MarketPrices.EconomicCenterId for HARTI rows written by
+    upsert_harti_prices() (the legacy Dambulla-only MarketPrices path): the
+    R2 Step-3 Markets/EconomicCenters merge repoints EconomicCenterId at
+    Markets.Id, and both DAMBULLA_DEC and HARTI rows resolve to the same
+    Dambulla market row (hub-adjudicated -- the legacy HARTI splice loader
+    IS Dambulla prices).
+
+    Cache-per-run: callers should call this once per upsert call (mirrors
+    _build_crop_map() / _build_market_map()), not per row.
+
+    Raises RuntimeError if the Dambulla market row is missing -- fails
+    loudly rather than silently writing NULL/a guessed GUID.
+    """
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa.text("SELECT Id FROM Markets WHERE MarketCode = :code"),
+            {"code": _DAMBULLA_MARKET_CODE},
+        ).fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            f"Dambulla market row not found (MarketCode={_DAMBULLA_MARKET_CODE!r}) "
+            "-- cannot resolve EconomicCenterId for HARTI MarketPrices rows. "
+            "Refusing to insert with a NULL/guessed value."
+        )
+    return _parse_guid(row[0])
+
+
 # --------------------------------------------------------------------------
 # Bulletin publication timestamp (AsOfUtc) extraction
 # --------------------------------------------------------------------------
@@ -414,6 +452,15 @@ def upsert_harti_prices(
     second Dambulla copy) land in PriceObservations instead — see
     upsert_harti_price_observations().
 
+    EconomicCenterId (R2 Step 3, Markets/EconomicCenters merge): every row
+    written/updated here gets EconomicCenterId = the Dambulla Markets.Id,
+    resolved at runtime BY CODE via _dambulla_market_id() (never a
+    hardcoded GUID — GUIDs are per-DB) and cached once per call. Both
+    DAMBULLA_DEC and HARTI rows resolve to the same Dambulla market row
+    (hub-adjudicated: this legacy splice loader IS Dambulla prices). Raises
+    RuntimeError if the Dambulla market row is missing rather than writing
+    NULL/a guessed value.
+
     Args:
         parsed_rows:  Output of parser.parse_many().
         engine:       SQLAlchemy engine; created from config if None.
@@ -427,6 +474,7 @@ def upsert_harti_prices(
         engine = get_engine()
 
     crop_map = _build_crop_map(engine)
+    dambulla_market_id = _dambulla_market_id(engine)  # cached once per run, not per row
     now_utc = datetime.now(timezone.utc)
 
     counters = dict(
@@ -527,6 +575,7 @@ def upsert_harti_prices(
                         """UPDATE MarketPrices
                            SET MinPrice = :min_price,
                                MaxPrice = :max_price,
+                               EconomicCenterId = :economic_center_id,
                                RetrievedAtUtc = :retrieved_at
                            WHERE CONVERT(varchar(36), CropId) = :crop_id
                              AND PriceDate = :price_date
@@ -535,6 +584,7 @@ def upsert_harti_prices(
                     {
                         "min_price": row["min_price"],
                         "max_price": row["max_price"],
+                        "economic_center_id": str(dambulla_market_id),
                         "retrieved_at": now_utc,
                         "crop_id": crop_id_str,
                         "price_date": row["price_date"],
@@ -552,13 +602,14 @@ def upsert_harti_prices(
                             ExternalProductName, PriceDate, MinPrice, MaxPrice,
                             Source, RetrievedAtUtc)
                            VALUES
-                           (:id, :crop_id, NULL, :ext_prod_id,
+                           (:id, :crop_id, :economic_center_id, :ext_prod_id,
                             :ext_prod_name, :price_date, :min_price, :max_price,
                             :source, :retrieved_at)"""
                     ),
                     {
                         "id": new_id,
                         "crop_id": crop_id_str,
+                        "economic_center_id": str(dambulla_market_id),
                         "ext_prod_id": row["ext_prod_id"],
                         "ext_prod_name": row["harti_label"],
                         "price_date": row["price_date"],

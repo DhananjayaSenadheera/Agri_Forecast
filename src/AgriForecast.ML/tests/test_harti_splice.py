@@ -392,10 +392,13 @@ class TestNameAliasMapping:
         ]
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             result = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert result["inserted"] == 0, (
             "Zero-data crop labels should produce zero inserts, got %d" % result["inserted"]
@@ -415,10 +418,13 @@ class TestNameAliasMapping:
         rows = [ParsedPrice("2019-01-01", "Luffa", "70-80", 70.0, 80.0)]
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             result = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert result["inserted"] == 1, (
             "Luffa should resolve to Ridge Gourd and be inserted. Got: %s" % result
@@ -626,6 +632,98 @@ class TestParserOnCachedPDF:
 
 
 # ===========================================================================
+# 4b. DAMBULLA MARKET ID RESOLUTION (R2 Step 3 -- EconomicCenterId fix)
+# ===========================================================================
+
+class TestDambullaMarketIdResolution:
+    """_dambulla_market_id() must resolve Markets.Id BY CODE (never a
+    hardcoded GUID), cache once per upsert call, and fail loudly (not NULL)
+    if the Dambulla market row is missing."""
+
+    def _engine_returning(self, fetchone_result):
+        """Build a MagicMock engine whose `with engine.connect() as conn:
+        conn.execute(...).fetchone()` chain returns `fetchone_result`."""
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.connect.return_value.__enter__.return_value = conn
+        conn.execute.return_value.fetchone.return_value = fetchone_result
+        return engine, conn
+
+    def test_resolves_id_by_market_code(self):
+        from agriforecast_ml.harti import loader
+
+        expected_id = uuid.UUID("11111111-2222-3333-4444-555555555555")
+        engine, conn = self._engine_returning((str(expected_id),))
+
+        result = loader._dambulla_market_id(engine)
+
+        assert result == expected_id
+
+    def test_queries_by_market_code_not_a_hardcoded_guid(self):
+        """The SQL text must filter on MarketCode, and the bound param must be
+        the documented Dambulla code -- never a literal GUID baked into the
+        query."""
+        from agriforecast_ml.harti import loader
+
+        expected_id = uuid.UUID("11111111-2222-3333-4444-555555555555")
+        engine, conn = self._engine_returning((str(expected_id),))
+
+        loader._dambulla_market_id(engine)
+
+        assert conn.execute.call_count == 1
+        (sql_clause, params), _kwargs = conn.execute.call_args
+        assert "MarketCode" in str(sql_clause)
+        assert params == {"code": loader._DAMBULLA_MARKET_CODE}
+        assert loader._DAMBULLA_MARKET_CODE == "MKT00000001"
+
+    def test_raises_loudly_when_dambulla_market_row_missing(self):
+        """No silent NULL / guessed GUID -- a missing Dambulla row must
+        raise, not degrade quietly."""
+        from agriforecast_ml.harti import loader
+
+        engine, conn = self._engine_returning(None)
+
+        with pytest.raises(RuntimeError, match="Dambulla market row not found"):
+            loader._dambulla_market_id(engine)
+
+    def test_cached_once_per_upsert_call_not_per_row(self):
+        """upsert_harti_prices must resolve the Dambulla market id exactly
+        once per call, mirroring _build_crop_map's cache-per-run contract --
+        not re-queried per row."""
+        from agriforecast_ml.harti.parser import ParsedPrice
+        from agriforecast_ml.harti import loader
+
+        call_count = {"n": 0}
+        dambulla_id = uuid.UUID("11111111-2222-3333-4444-555555555555")
+
+        def _counting_dambulla_market_id(_engine):
+            call_count["n"] += 1
+            return dambulla_id
+
+        fake_map = _make_fake_crop_map()
+        rows = [
+            ParsedPrice("2019-01-01", "Beans", "100-120", 100.0, 120.0),
+            ParsedPrice("2019-01-02", "Luffa", "70-80", 70.0, 80.0),
+            ParsedPrice("2019-01-03", "Capsicum", "200-250", 200.0, 250.0),
+        ]
+        original_crop_map = loader._build_crop_map
+        original_market_id = loader._dambulla_market_id
+        loader._build_crop_map = lambda _: fake_map
+        loader._dambulla_market_id = _counting_dambulla_market_id
+        try:
+            result = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
+        finally:
+            loader._build_crop_map = original_crop_map
+            loader._dambulla_market_id = original_market_id
+
+        assert call_count["n"] == 1, (
+            "_dambulla_market_id must be called exactly once per upsert call, "
+            "got %d calls" % call_count["n"]
+        )
+        assert result["inserted"] == 3
+
+
+# ===========================================================================
 # 5. IDEMPOTENCY
 # ===========================================================================
 
@@ -647,11 +745,14 @@ class TestIdempotency:
         fake_map = _make_fake_crop_map()
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             r1 = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
             r2 = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert r1["inserted"] == r2["inserted"]
         assert r1["skipped_splice"] == r2["skipped_splice"]
@@ -668,11 +769,14 @@ class TestIdempotency:
         fake_map = _make_fake_crop_map()
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             r1 = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
             r2 = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert r1["skipped_splice"] == r2["skipped_splice"]
         assert r1["inserted"] == r2["inserted"]
@@ -686,10 +790,13 @@ class TestIdempotency:
         fake_map = _make_fake_crop_map()
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             result = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert result["skipped_splice"] == 1, (
             "Capsicum at 2025-05-10 must be splice-skipped, got: %s" % result
@@ -705,10 +812,13 @@ class TestIdempotency:
         fake_map = _make_fake_crop_map()
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             result = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert result["skipped_splice"] == 0, (
             "Beans at 2025-05-10 must NOT be splice-skipped (exception window)"
@@ -727,10 +837,13 @@ class TestIdempotency:
         fake_map = _make_fake_crop_map()
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             result = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert result["skipped_invalid_price"] == 2, (
             "Both zero-price rows must be rejected, got: %s" % result
