@@ -12,7 +12,7 @@ import pandas as pd
 from xgboost import XGBRegressor
 
 from . import baselines, dataset
-from .evaluate import regression_metrics
+from .evaluate import directional_accuracy, regression_metrics
 
 QUANTILES = {"p10": 0.10, "p50": 0.50, "p90": 0.90}
 SEED = 42
@@ -101,22 +101,41 @@ def purged_walk_forward(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, n_folds
         pred = _fit_predict_log(model, Xtr, ytr, Xte)
         m = regression_metrics(yte, pred)
 
-        cf = regression_metrics(yte, baselines.carry_forward_pred(dte))
+        cf_pred = baselines.carry_forward_pred(dte)
+        cf = regression_metrics(yte, cf_pred)
         cm_pred = baselines.crop_mean_pred(dtr, dte)
         cm = regression_metrics(yte, cm_pred)
-        rw = regression_metrics(yte, baselines.recency_weighted_crop_mean_pred(dtr, dte))
+        rw_pred = baselines.recency_weighted_crop_mean_pred(dtr, dte)
+        rw = regression_metrics(yte, rw_pred)
 
         # --- candidate approaches (leakage-safe) -----------------------------
         # (2) residual model on a per-crop crop-mean offset
         off_tr = baselines.offset_for(dtr, dtr)
         off_te = baselines.offset_for(dtr, dte)
-        resid = regression_metrics(yte, _residual_pred(Xtr, ytr, Xte, off_tr, off_te))
+        resid_pred = _residual_pred(Xtr, ytr, Xte, off_tr, off_te)
+        resid = regression_metrics(yte, resid_pred)
 
         # (1) per-crop blend: serve model only for crops it won on inner-val
         winners = _blend_winner_crops(dtr, Xtr, ytr)
         use_model = dte["CropId"].isin(winners).to_numpy()
         blend_pred = np.where(use_model, pred, cm_pred)
         blend = regression_metrics(yte, blend_pred)
+
+        # --- directional accuracy (go/no-go signal, REPORTING ONLY) ----------
+        # Reference = price KNOWN AT observation date (AvgPrice), never future.
+        # This is the carry-forward reference; carry-forward's own predicted move
+        # is therefore always 0 (flat) -> its directional_acc is degenerate but
+        # recorded honestly for comparison.
+        ref = dte["AvgPrice"].to_numpy(dtype=float)
+        yte_arr = yte.to_numpy(dtype=float)
+        m.update(
+            model_dir_acc=directional_accuracy(yte_arr, pred, ref)["directional_acc"],
+            residual_dir_acc=directional_accuracy(yte_arr, resid_pred, ref)["directional_acc"],
+            blend_dir_acc=directional_accuracy(yte_arr, blend_pred, ref)["directional_acc"],
+            carry_dir_acc=directional_accuracy(yte_arr, cf_pred, ref)["directional_acc"],
+            cropmean_dir_acc=directional_accuracy(yte_arr, cm_pred, ref)["directional_acc"],
+            recencymean_dir_acc=directional_accuracy(yte_arr, rw_pred, ref)["directional_acc"],
+        )
 
         m.update(train=int(train_mask.sum()), test=int(test_mask.sum()),
                  carry_MAE=cf["MAE"], cropmean_MAE=cm["MAE"],
@@ -126,14 +145,59 @@ def purged_walk_forward(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, n_folds
     return fold_rows
 
 
+# Minimum count of labelled observations for a crop's OWN quantiles to be trusted
+# as an adequate-history (non-cold-start) prior. See DECISIONS.md 2026-07-04 for
+# the justification: the labelled frame is bimodal — 7 crops at 167-328 rows
+# (<1 seasonal year) and 4 HARTI-backed crops at ~2,635-2,691 rows (~11 years).
+# 365 (~one calendar year of daily rows) cleanly separates the two clusters with a
+# large margin and marks the floor at which per-crop quantiles can span a full
+# Yala+Maha seasonal cycle. Persisted into the payload (configurable there, not via
+# env) so serving reads it without a code change. PROPOSED default — owner signs off.
+_DEFAULT_MIN_HISTORY_OBS = 365
+
+
 def _crop_fallback(df: pd.DataFrame) -> dict:
-    """Per-crop harvest-price quantiles + global fallback — the deployable
-    baseline used when no ML model is good enough to promote."""
+    """Per-crop harvest-price quantiles + category + global fallback — the
+    deployable baseline ladder used when no ML model is good enough to promote,
+    and the graceful-degradation prior for thin / unknown crops.
+
+    Additive schema (old serving code degrades if any key is absent):
+      per_crop[cid]         : {p10,p50,p90, n_obs}   (n_obs = labelled row count)
+      by_category[cat]      : {p10,p50,p90, n_obs}   (pooled category quantiles)
+      global                : {p10,p50,p90}
+      min_history_obs       : int threshold for "adequate own history"
+    """
+    from ..serving.crop_categories import category_for
+
+    counts = df.groupby("CropId").size()
     q = df.groupby("CropId")["LabelHarvestPrice"].quantile([0.1, 0.5, 0.9]).unstack()
-    per_crop = {str(cid).lower(): {"p10": float(r[0.1]), "p50": float(r[0.5]), "p90": float(r[0.9])}
-                for cid, r in q.iterrows()}
+    per_crop = {}
+    names = df.groupby("CropId")["CropName"].first() if "CropName" in df.columns else {}
+    for cid, r in q.iterrows():
+        per_crop[str(cid).lower()] = {
+            "p10": float(r[0.1]), "p50": float(r[0.5]), "p90": float(r[0.9]),
+            "n_obs": int(counts.loc[cid]),
+        }
+
+    # Category-level quantiles: assign each labelled row a category, pool by it.
+    cat_series = df["CropId"].map(
+        lambda cid: category_for(str(cid).lower(),
+                                  names.get(cid) if hasattr(names, "get") else None))
+    by_category: dict[str, dict] = {}
+    if cat_series.notna().any():
+        tmp = df.assign(_cat=cat_series).dropna(subset=["_cat"])
+        cq = tmp.groupby("_cat")["LabelHarvestPrice"].quantile([0.1, 0.5, 0.9]).unstack()
+        ccnt = tmp.groupby("_cat").size()
+        for cat, r in cq.iterrows():
+            by_category[str(cat)] = {
+                "p10": float(r[0.1]), "p50": float(r[0.5]), "p90": float(r[0.9]),
+                "n_obs": int(ccnt.loc[cat]),
+            }
+
     g = df["LabelHarvestPrice"].quantile([0.1, 0.5, 0.9])
     return {"per_crop": per_crop,
+            "by_category": by_category,
+            "min_history_obs": _DEFAULT_MIN_HISTORY_OBS,
             "global": {"p10": float(g[0.1]), "p50": float(g[0.5]), "p90": float(g[0.9])}}
 
 
@@ -163,6 +227,12 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
 
     def fmean(key):
         return float(np.mean([f[key] for f in folds]))
+
+    def fmean_dir(key):
+        """Mean directional accuracy over folds, skipping folds where it was
+        undefined (None -> no scored rows). None if no fold had a value."""
+        vals = [f[key] for f in folds if f.get(key) is not None]
+        return round(float(np.mean(vals)), 4) if vals else None
 
     model_mae = fmean("MAE")
     carry_mae = fmean("carry_MAE")
@@ -203,6 +273,13 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
         print(f"  carry-forward  : {carry_mae:.2f}")
         print(f"  crop-mean      : {cropmean_mae:.2f}")
         print(f"  recency-mean   : {recencymean_mae:.2f}")
+        print("--- Directional accuracy (CV mean, go/no-go; reporting only) ---")
+        def _da(key):
+            v = fmean_dir(key)
+            return f"{v * 100:.1f}%" if v is not None else "n/a"
+        print(f"  pooled model   : {_da('model_dir_acc')}   "
+              f"crop-mean : {_da('cropmean_dir_acc')}   "
+              f"recency : {_da('recencymean_dir_acc')}")
         print(f"\nBest ML candidate : {best_ml_name} ({best_ml_mae:.2f})")
         print(f"Best baseline     : {best_baseline_name} ({best_baseline_mae:.2f})")
         verdict = (f"PROMOTE ({best_ml_name} beats {best_baseline_name})" if beats_baseline
@@ -267,7 +344,21 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
                "recencymean_MAE": round(recencymean_mae, 2),
                "best_ml": best_ml_name, "best_ml_MAE": round(best_ml_mae, 2),
                "best_baseline": best_baseline_name,
-               "best_baseline_MAE": round(best_baseline_mae, 2), "folds": folds},
+               "best_baseline_MAE": round(best_baseline_mae, 2), "folds": folds,
+               # Directional accuracy (go/no-go signal) -- REPORTING ONLY, not a
+               # gate input. Pooled = mean over folds (folds carry per-fold
+               # *_dir_acc keys). Reference price = AvgPrice known at obs date.
+               # carry_forward's move is always flat so its dir_acc is degenerate
+               # (recorded for honesty). ADDITIVE keys: the pre-existing flat cv
+               # schema is unchanged.
+               "dir_acc": {
+                   "model": fmean_dir("model_dir_acc"),
+                   "residual": fmean_dir("residual_dir_acc"),
+                   "blend": fmean_dir("blend_dir_acc"),
+                   "carry_forward": fmean_dir("carry_dir_acc"),
+                   "crop_mean": fmean_dir("cropmean_dir_acc"),
+                   "recency_weighted_mean": fmean_dir("recencymean_dir_acc"),
+               }},
         "beats_baseline": beats_baseline,
         "active_predictor": (best_ml_name if beats_baseline else "crop_mean_fallback"),
         "served_ml_kind": best_ml_name,  # which ML variant would serve if promoted

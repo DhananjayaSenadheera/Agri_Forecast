@@ -17,6 +17,8 @@ from ..db import get_engine
 from ..load import resolve_forecast_gp
 from ..registry import registry
 from . import explain
+from .build_x import build_x
+from .crop_categories import category_for
 
 _log = logging.getLogger(__name__)
 
@@ -28,6 +30,99 @@ _log = logging.getLogger(__name__)
 
 # Load the promoted payload once at import (serving is read-only).
 _PAYLOAD, _META = registry.load_promoted()
+
+# Cold-start default: used ONLY when the promoted payload predates this feature
+# (i.e. no fallback["min_history_obs"] key). The live v10 payload lacks the key,
+# so serving MUST degrade to this constant rather than crash — old-payload compat,
+# mirroring the served_ml_kind default at _served_ml_kind(). See DECISIONS.md.
+_DEFAULT_MIN_HISTORY_OBS = 365
+
+
+def _min_history_obs() -> int:
+    fb = (_PAYLOAD or {}).get("fallback") or {}
+    v = fb.get("min_history_obs")
+    return int(v) if v is not None else _DEFAULT_MIN_HISTORY_OBS
+
+
+def _resolve_fallback(crop_id: str, crop_name: str | None = None) -> tuple[dict, str]:
+    """Fallback ladder: per-crop (if n_obs >= threshold) -> category -> global.
+
+    Returns (quantile_dict, tier) where tier in {"crop", "category", "global"}.
+    Fully old-payload compatible: a per-crop entry without an "n_obs" key (pre-P4
+    payloads) is treated as adequate history (tier "crop") — we never fabricate a
+    cold-start flag the trained-on data can't support, preserving prior behavior.
+    """
+    fb = _PAYLOAD["fallback"]
+    per = fb["per_crop"].get(crop_id)
+    if per is not None:
+        n_obs = per.get("n_obs")
+        # Missing n_obs -> old payload: keep legacy behavior (trust per-crop).
+        if n_obs is None or int(n_obs) >= _min_history_obs():
+            return per, "crop"
+    # Per-crop absent or thin: try the category rung (P4 addition; absent in old payloads).
+    cat = category_for(crop_id, crop_name)
+    by_cat = fb.get("by_category") or {}
+    if cat and cat in by_cat:
+        return by_cat[cat], "category"
+    return fb["global"], "global"
+
+
+# --- Confidence rungs (PROPOSED — owner sign-off at review) ------------------
+# Preserves the EXACT spelling + .NET MlContract.cs semantics of "Low"/"Medium":
+#   * "Low"    -> caps the .NET recommendation (fail-closed, unchanged trigger).
+#   * "Medium" -> unchanged.
+#   * "High"   -> NEW value. Safe under the .NET client (case-insensitive,
+#                 unmapped-ignore) AND the recommendation matrix: the ceiling logic
+#                 only LOWERS trust on lowTrust=(fallback|Low); "High" is never
+#                 compared, so it enables StronglyRecommended where "Medium" already
+#                 did NOT cap. It does NOT flip any existing branch to a WORSE
+#                 outcome. Emitted ONLY when the ML model is served AND the crop has
+#                 adequate own history (tier == "crop").
+def _confidence_for(model_served: bool, tier: str, row_missing: bool = False) -> str:
+    # row_missing: the fallback path was taken because NO scoreable CropFeatureDaily
+    # row exists as of the plant date. The prediction is inert-until-retrain, so it
+    # must NOT inherit the resolved tier's (possibly Medium/High) trust — clamp to
+    # "Low" regardless of tier. Restores the pre-step-1 downgrade the fallback
+    # refactor silently dropped on the live v10 payload. Exact "Low" spelling is
+    # load-bearing (.NET MlContract is fail-closed on it).
+    if row_missing:
+        return "Low"
+    if tier == "global":
+        return "Low"          # unknown / no category prior — genuine cold start
+    if model_served and tier == "crop":
+        return "High"
+    if tier == "category":
+        return "Low"          # borrowed prior, thin own history -> honest low trust
+    return "Medium"           # adequate own history, fallback or ML
+
+
+def _reason_for(model_served: bool, tier: str, row_missing: bool = False) -> str:
+    """Human-readable justification for the confidence rung (additive field)."""
+    if row_missing:
+        return ("No recent feature row is available for this crop as of the plant "
+                "date; serving a fallback prior with low confidence.")
+    if tier == "global":
+        return ("No history for this crop or its category; using an overall "
+                "price prior (cold start).")
+    if tier == "category":
+        return ("Too little history for this crop; using a similar-crop category "
+                "prior (cold start).")
+    if model_served and tier == "crop":
+        return "ML model served with adequate crop history."
+    return "Adequate crop history."
+
+
+def _fallback_explanation(tier: str) -> str:
+    base = ("The ML model is not yet more accurate than this baseline at current "
+            "data volume.")
+    if tier == "category":
+        return ("Based on a similar-crop category's historical harvest-price "
+                f"distribution (too little history for this crop). ({base})")
+    if tier == "global":
+        return ("Based on the overall historical harvest-price distribution "
+                f"(no data for this crop or its category). ({base})")
+    return ("Based on this crop's historical harvest-price distribution. "
+            f"({base})")
 
 
 def _latest_feature_row(crop_id: str, plant_date: date):
@@ -110,20 +205,11 @@ def _ml_servable() -> bool:
 
 
 def _build_X(row):
-    # Serving contract — missing features stay NaN, never 0.0. A missing
-    # sentiment column (MeanSentiment / DroughtRatio / FloodRatio / PolicyRatio)
-    # means "no news signal as of this date"; 0.0 is a *measured* VADER-neutral
-    # value, which is semantically different. Training (_attach_sentiment) leaves
-    # these NaN and XGBoost handles NaN natively (learned default split
-    # direction). So errors="coerce" below is deliberate — do NOT add .fillna(0).
-    cols = _PAYLOAD["feature_cols"]
-    X = pd.DataFrame([{c: row.get(c) for c in cols}])
-    for c in cols:
-        if c in _PAYLOAD["categorical"]:
-            X[c] = X[c].astype("category")
-        else:
-            X[c] = pd.to_numeric(X[c], errors="coerce").astype("float64")
-    return X
+    # Single source of truth for the serve-time input frame lives in
+    # serving/build_x.py (shared with explain.py so coercion / NaN discipline
+    # can never drift between the predict and SHAP paths). See that module for
+    # the deliberate NaN-never-0 serving contract.
+    return build_x(row, _PAYLOAD)
 
 
 def _residual_offset(crop_id: str) -> float:
@@ -172,20 +258,27 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
     model_active = bool(_PAYLOAD.get("beats_baseline")) and _ml_servable()
 
     top_factors: list[dict] = []
+    # Resolve the fallback rung once (used for confidence even when ML serves, so
+    # a thin-history ML-covered crop is not over-trusted).
+    fb_q, tier = _resolve_fallback(crop_id, crop_name)
     if model_active and row is not None and gp:
         q = _model_quantiles(row, crop_id)
         p10, p50, p90 = q["p10"], q["p50"], q["p90"]
-        active, confidence = _served_ml_kind(), "Medium"
+        active = _served_ml_kind()
+        confidence = _confidence_for(model_served=True, tier=tier)
+        confidence_reason = _reason_for(model_served=True, tier=tier)
         explanation = "ML model forecast from current price, season and recent weather."
         top_factors = explain.top_factors(row, _PAYLOAD, top_n=5)
     else:
-        fb = _PAYLOAD["fallback"]
-        per = fb["per_crop"].get(crop_id) or fb["global"]
-        p10, p50, p90 = per["p10"], per["p50"], per["p90"]
+        p10, p50, p90 = fb_q["p10"], fb_q["p50"], fb_q["p90"]
         active = "crop_mean_fallback"
-        confidence = "Low" if row is None else "Medium"
-        explanation = ("Based on this crop's historical harvest-price distribution. "
-                       "(The ML model is not yet more accurate than this baseline at current data volume.)")
+        # When the fallback is taken because there is NO scoreable feature row as of
+        # the plant date, the prediction is un-scoreable/inert -> force "Low" trust
+        # regardless of the resolved tier (fallbackTier still reports the real tier).
+        row_missing = row is None
+        confidence = _confidence_for(model_served=False, tier=tier, row_missing=row_missing)
+        confidence_reason = _reason_for(model_served=False, tier=tier, row_missing=row_missing)
+        explanation = _fallback_explanation(tier)
 
     p10, p50, p90 = sorted([round(p10, 2), round(p50, 2), round(p90, 2)])
     return {
@@ -198,6 +291,8 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
         "lowerBound": p10,
         "upperBound": p90,
         "confidence": confidence,
+        "confidenceReason": confidence_reason,
+        "fallbackTier": tier,
         "activePredictor": active,
         "modelVersion": (_META or {}).get("version"),
         "explanation": explanation,
@@ -257,10 +352,10 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
 
     history = _monthly_history(crop_id, as_of, max_months=12)
 
-    fb = _PAYLOAD["fallback"]
-    per = fb["per_crop"].get(crop_id) or fb["global"]
-    p10, p50, p90 = float(per["p10"]), float(per["p50"]), float(per["p90"])
-    have_crop = crop_id in fb["per_crop"]
+    # Fallback ladder: per-crop (adequate history) -> category -> global. Replaces
+    # the old presence-only `have_crop` check, which trusted single-row crops.
+    fb_q, tier = _resolve_fallback(crop_id, crop_name)
+    p10, p50, p90 = float(fb_q["p10"]), float(fb_q["p50"]), float(fb_q["p90"])
 
     # Serve the ML path only when promoted AND its artifacts are present/understood
     # here (same guard as predict_harvest; protects the residual/blend trap).
@@ -270,18 +365,20 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
         q = _model_quantiles(row, crop_id)  # residual or pooled, per served_ml_kind
         p10, p50, p90 = float(q["p10"]), float(q["p50"]), float(q["p90"])
         p10, p50, p90 = sorted([p10, p50, p90])
-        active, confidence = _served_ml_kind(), "Medium"
+        active = _served_ml_kind()
+        confidence = _confidence_for(model_served=True, tier=tier)
+        confidence_reason = _reason_for(model_served=True, tier=tier)
         explanation = ("ML model forecast from current price, season and recent "
                        "weather; the band widens with horizon to reflect growing "
                        "uncertainty further out.")
     else:
         # Fallback: no servable ML path (or no feature row to score for this crop).
         active = "crop_mean_fallback"
-        confidence = "Medium" if have_crop else "Low"
-        explanation = ("Based on this crop's historical harvest-price distribution. "
-                       "(The ML model is not yet more accurate than this baseline at "
-                       "current data volume, so the central forecast is flat; the band "
-                       "widens with horizon to reflect growing uncertainty.)")
+        confidence = _confidence_for(model_served=False, tier=tier)
+        confidence_reason = _reason_for(model_served=False, tier=tier)
+        explanation = (_fallback_explanation(tier) +
+                       " The central forecast is flat; the band widens with "
+                       "horizon to reflect growing uncertainty.")
 
     # h=1 reproduces the active predictor's actual [p10, p90] (ML quantiles when
     # served, else the fallback distribution) so the 1-month band matches what
@@ -310,6 +407,8 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
         "asOf": as_of.isoformat(),
         "activePredictor": active,
         "confidence": confidence,
+        "confidenceReason": confidence_reason,
+        "fallbackTier": tier,
         "modelVersion": (_META or {}).get("version"),
         "explanation": explanation,
         "history": history,

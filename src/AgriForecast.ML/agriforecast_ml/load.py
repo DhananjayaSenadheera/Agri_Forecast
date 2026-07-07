@@ -1,6 +1,8 @@
 """Load raw inputs from SQL Server into pandas DataFrames."""
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 
 from .db import get_engine
@@ -114,6 +116,136 @@ def load_prices() -> pd.DataFrame:
         df[col] = df[col].astype(float)
     df["AvgPrice"] = (df["MinPrice"] + df["MaxPrice"]) / 2.0
     return df
+
+
+# Empty-frame schema for load_price_observations so a missing/empty
+# PriceObservations table (or an unreachable Markets set) degrades to all-NaN
+# spread features rather than failing the build (mirrors the policy/macro
+# empty-frame degrade contract).
+_PRICE_OBS_COLS = ["MarketSlug", "CropId", "ObservedDate", "AvgPrice"]
+
+
+def _market_slug(name: str) -> str:
+    """Stable, human-readable column token for a market Name.
+
+    'Dambulla Dedicated Economic Centre' -> 'Dambulla';
+    'Pettah (HARTI wholesale)' -> 'Pettah'. We take the first word of the Name
+    (all 5 feature-safe markets have a distinct leading word), stripped of
+    non-alphanumerics, so the emitted feature-column names are farmer-legible
+    ('MktDambullaAvgPrice') and stable across DB row-order changes.
+    """
+    first = (name or "").strip().split()[0] if (name or "").strip() else ""
+    return re.sub(r"[^0-9A-Za-z]", "", first)
+
+
+def load_price_observations() -> pd.DataFrame:
+    """Per-(market, crop, date) confirmed prices from PriceObservations, restricted
+    to the FEATURE-SAFE market set, for the cross-market spread features (P4).
+
+    This is the ONLY source for the cross-market legs (owner decision D5,
+    2026-07-04): PriceObservations exclusively, NEVER mixed per-row with
+    MarketPrices (measured 12.6% exact-match disagreement between the two
+    tables). load_prices()/labels are untouched -- the harvest-price label still
+    reads MarketPrices; this loader only feeds the point-in-time spread context.
+
+    Filters (leakage-/quality-safe):
+      - MarketId IN get_feature_safe_market_ids() -- excludes the CBSL
+        NationalAggregate pseudo-market (already an average -> double-count) and
+        the ECOMAP-% demo twins (canonical.py). "National" is later an UNWEIGHTED
+        mean over exactly these markets, never a raw AVG over PriceObservations.
+      - IsUnitConfirmed = 1 -- the fail-closed unit quarantine; unconfirmed rows
+        must never reach features.
+      - MaxPrice > 0 AND CropId IS NOT NULL -- mirrors load_prices()'s validity
+        gate; zero/NULL-price rows are absent signal, not a 0 observation.
+
+    Per-market AvgPrice = (MinPrice + MaxPrice) / 2 -- the SAME midpoint
+    convention load_prices() uses for MarketPrices (PriceObservations'
+    Wholesale/Retail columns are unpopulated here: all 0). Multiple rows for the
+    same (market, crop, date) are averaged so the series is one value per day.
+
+    Returns a LONG frame [MarketSlug, CropId(str), ObservedDate(ns), AvgPrice]
+    sorted by (MarketSlug, CropId, ObservedDate) -- ready for a per-market
+    backward merge_asof. Missing/empty source (or unreachable feature-safe set)
+    -> empty frame with the right columns (all-NaN spread features downstream).
+    """
+    from .canonical import get_feature_safe_market_ids
+
+    try:
+        engine = get_engine()
+        safe_ids = get_feature_safe_market_ids(engine)
+    except Exception:
+        return pd.DataFrame(columns=_PRICE_OBS_COLS)
+    if not safe_ids:
+        return pd.DataFrame(columns=_PRICE_OBS_COLS)
+
+    # Parameterise the market-id IN-list. Cast to str so the driver binds the
+    # GUIDs uniformly regardless of uuid/str dtype in the set.
+    id_list = [str(i) for i in safe_ids]
+    placeholders = ", ".join(f":m{i}" for i in range(len(id_list)))
+    params = {f"m{i}": v for i, v in enumerate(id_list)}
+    sql = f"""
+        SELECT m.Name AS MarketName, po.CropId, po.ObservedDate,
+               po.MinPrice, po.MaxPrice
+        FROM PriceObservations po
+        JOIN Markets m ON m.Id = po.MarketId
+        WHERE po.MarketId IN ({placeholders})
+          AND po.IsUnitConfirmed = 1
+          AND po.MaxPrice > 0
+          AND po.CropId IS NOT NULL
+    """
+    try:
+        import sqlalchemy as sa
+        df = pd.read_sql(sa.text(sql), engine, params=params)
+    except Exception:
+        return pd.DataFrame(columns=_PRICE_OBS_COLS)
+    if df.empty:
+        return pd.DataFrame(columns=_PRICE_OBS_COLS)
+
+    df["MarketSlug"] = df["MarketName"].map(_market_slug)
+    df["CropId"] = df["CropId"].astype(str)
+    df["ObservedDate"] = _as_canon_dt(df["ObservedDate"])
+    for col in ("MinPrice", "MaxPrice"):
+        df[col] = df[col].astype(float)
+    df["AvgPrice"] = (df["MinPrice"] + df["MaxPrice"]) / 2.0
+    # Collapse any duplicate (market, crop, date) rows to one daily value.
+    out = (df.groupby(["MarketSlug", "CropId", "ObservedDate"], as_index=False)
+             ["AvgPrice"].mean())
+    return out.sort_values(["MarketSlug", "CropId", "ObservedDate"]).reset_index(drop=True)
+
+
+def feature_safe_market_slugs() -> list[str]:
+    """The stable, sorted MarketSlug set for the feature-safe markets.
+
+    Drives which per-market spread columns _attach_market_spread emits (so a
+    market with zero PriceObservations today -- e.g. Narahenpita -- still gets an
+    explicit all-NaN column rather than a silently absent one). Sorted by
+    MarketCode so column ordering is deterministic across DB row order. Empty on
+    an unreachable DB (spread features then attach with no per-market columns).
+    """
+    try:
+        import sqlalchemy as sa
+        from .canonical import get_feature_safe_market_ids
+
+        engine = get_engine()
+        safe_ids = get_feature_safe_market_ids(engine)
+        if not safe_ids:
+            return []
+        id_list = [str(i) for i in safe_ids]
+        placeholders = ", ".join(f":m{i}" for i in range(len(id_list)))
+        params = {f"m{i}": v for i, v in enumerate(id_list)}
+        with engine.connect() as conn:
+            rows = conn.execute(sa.text(
+                f"SELECT Name, MarketCode FROM Markets "
+                f"WHERE Id IN ({placeholders}) ORDER BY MarketCode"
+            ), params).fetchall()
+    except Exception:
+        return []
+    slugs: list[str] = []
+    for name, _code in rows:
+        s = _market_slug(name)
+        if s and s not in slugs:
+            slugs.append(s)
+    return slugs
 
 
 def load_crops() -> pd.DataFrame:
