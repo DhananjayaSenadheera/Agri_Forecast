@@ -87,6 +87,22 @@ _LABELS = {
     "MktPettahLag7": "Pettah price 7 days ago",
     "MktNarahenpitaAvgPrice": "Narahenpita market price",
     "MktNarahenpitaLag7": "Narahenpita price 7 days ago",
+    # 6 markets added when the HARTI parser was widened (R2 Step 6): Kandy,
+    # Meegoda, Norochchole, Nuwara Eliya, Bandarawela, Veyangoda. Slug = first
+    # word of the market Name (load._market_slug), so 'Nuwara Eliya' -> 'Nuwara'.
+    # These enter the feature contract at the R2 Step 7 rebuild+retrain.
+    "MktKandyAvgPrice": "Kandy market price",
+    "MktKandyLag7": "Kandy price 7 days ago",
+    "MktMeegodaAvgPrice": "Meegoda market price",
+    "MktMeegodaLag7": "Meegoda price 7 days ago",
+    "MktNorochcholeAvgPrice": "Norochchole market price",
+    "MktNorochcholeLag7": "Norochchole price 7 days ago",
+    "MktNuwaraAvgPrice": "Nuwara Eliya market price",
+    "MktNuwaraLag7": "Nuwara Eliya price 7 days ago",
+    "MktBandarawelaAvgPrice": "Bandarawela market price",
+    "MktBandarawelaLag7": "Bandarawela price 7 days ago",
+    "MktVeyangodaAvgPrice": "Veyangoda market price",
+    "MktVeyangodaLag7": "Veyangoda price 7 days ago",
     "SpreadVsNational": "local price vs national average",
     "MarketRankPct": "local price rank across markets",
     "LeaderMarketLag7": "leading market price 7 days ago",

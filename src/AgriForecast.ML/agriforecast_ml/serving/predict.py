@@ -78,14 +78,20 @@ def _resolve_fallback(crop_id: str, crop_name: str | None = None) -> tuple[dict,
 #                 did NOT cap. It does NOT flip any existing branch to a WORSE
 #                 outcome. Emitted ONLY when the ML model is served AND the crop has
 #                 adequate own history (tier == "crop").
-def _confidence_for(model_served: bool, tier: str, row_missing: bool = False) -> str:
+def _confidence_for(model_served: bool, tier: str, row_missing: bool = False,
+                    ml_failed: bool = False) -> str:
     # row_missing: the fallback path was taken because NO scoreable CropFeatureDaily
     # row exists as of the plant date. The prediction is inert-until-retrain, so it
     # must NOT inherit the resolved tier's (possibly Medium/High) trust — clamp to
     # "Low" regardless of tier. Restores the pre-step-1 downgrade the fallback
     # refactor silently dropped on the live v10 payload. Exact "Low" spelling is
     # load-bearing (.NET MlContract is fail-closed on it).
-    if row_missing:
+    # ml_failed: the ML path was ATTEMPTED (promoted model, scoreable row) but the
+    # predict call itself failed (_model_quantiles_safe -> None, e.g. a CropId the
+    # incumbent encoder never saw after a corpus widening). Equally inert-until-
+    # retrain — same clamp, so a trained-crop tier can never report Medium/High for
+    # a forecast the model refused to score.
+    if row_missing or ml_failed:
         return "Low"
     if tier == "global":
         return "Low"          # unknown / no category prior — genuine cold start
@@ -96,8 +102,13 @@ def _confidence_for(model_served: bool, tier: str, row_missing: bool = False) ->
     return "Medium"           # adequate own history, fallback or ML
 
 
-def _reason_for(model_served: bool, tier: str, row_missing: bool = False) -> str:
+def _reason_for(model_served: bool, tier: str, row_missing: bool = False,
+                ml_failed: bool = False) -> str:
     """Human-readable justification for the confidence rung (additive field)."""
+    if ml_failed:
+        return ("The current model cannot score this crop yet (its data arrived "
+                "after the model was trained); serving a fallback prior with low "
+                "confidence until the next retrain.")
     if row_missing:
         return ("No recent feature row is available for this crop as of the plant "
                 "date; serving a fallback prior with low confidence.")
@@ -220,6 +231,34 @@ def _residual_offset(crop_id: str) -> float:
     return float(offsets.get(str(crop_id).lower(), _PAYLOAD["residual_offset_global"]))
 
 
+def _model_quantiles_safe(row, crop_id: str | None = None) -> dict | None:
+    """Wrap _model_quantiles so an unscoreable row degrades to the fallback ladder
+    instead of 500-ing the request.
+
+    Point-in-time note: this is a SERVING-ROBUSTNESS guard, not a model change.
+    The pooled model's CropId is a categorical feature, so XGBoost's categorical
+    encoder RAISES on a CropId it never saw in training (`Found a category not in
+    the training set`). This bites whenever the promoted model was trained on a
+    SMALLER crop set than the feature store now covers — e.g. after a corpus
+    widening that unlocks new forecastable crops (R2 Step 6/7: Beans, Snake Gourd,
+    +18 HARTI crops) while an OLDER model (v11, 11 crops) is still promoted. Those
+    crops now HAVE a feature row (so they reach the ML path) but are unknown to the
+    incumbent encoder. Rather than crash, degrade to the crop-mean fallback ladder,
+    exactly as if there were no scoreable row. Also catches any other predict-time
+    artifact mismatch. Returns None to signal "serve the fallback instead".
+    """
+    try:
+        return _model_quantiles(row, crop_id)
+    except Exception:
+        _log.warning(
+            "ML quantile prediction failed for crop %s under promoted model %s "
+            "(likely a CropId unseen by the incumbent encoder after a corpus "
+            "widening) -> serving crop-mean fallback.",
+            crop_id, (_META or {}).get("version"),
+            exc_info=True)  # server log only; the API layer never returns tracebacks
+        return None
+
+
 def _model_quantiles(row, crop_id: str | None = None) -> dict:
     """Quantile predictions for the promoted ML path.
 
@@ -261,8 +300,9 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
     # Resolve the fallback rung once (used for confidence even when ML serves, so
     # a thin-history ML-covered crop is not over-trusted).
     fb_q, tier = _resolve_fallback(crop_id, crop_name)
-    if model_active and row is not None and gp:
-        q = _model_quantiles(row, crop_id)
+    ml_attempted = bool(model_active and row is not None and gp)
+    q = _model_quantiles_safe(row, crop_id) if ml_attempted else None
+    if q is not None:
         p10, p50, p90 = q["p10"], q["p50"], q["p90"]
         active = _served_ml_kind()
         confidence = _confidence_for(model_served=True, tier=tier)
@@ -275,9 +315,14 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
         # When the fallback is taken because there is NO scoreable feature row as of
         # the plant date, the prediction is un-scoreable/inert -> force "Low" trust
         # regardless of the resolved tier (fallbackTier still reports the real tier).
+        # Same clamp when the ML path was attempted but the predict call failed
+        # (_model_quantiles_safe -> None, e.g. incumbent encoder predates this crop).
         row_missing = row is None
-        confidence = _confidence_for(model_served=False, tier=tier, row_missing=row_missing)
-        confidence_reason = _reason_for(model_served=False, tier=tier, row_missing=row_missing)
+        ml_failed = ml_attempted and q is None
+        confidence = _confidence_for(model_served=False, tier=tier,
+                                     row_missing=row_missing, ml_failed=ml_failed)
+        confidence_reason = _reason_for(model_served=False, tier=tier,
+                                        row_missing=row_missing, ml_failed=ml_failed)
         explanation = _fallback_explanation(tier)
 
     p10, p50, p90 = sorted([round(p10, 2), round(p50, 2), round(p90, 2)])
@@ -361,8 +406,12 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
     # here (same guard as predict_harvest; protects the residual/blend trap).
     model_active = bool(_PAYLOAD.get("beats_baseline")) and _ml_servable()
     row = _latest_feature_row(crop_id, as_of) if model_active else None
-    if model_active and row is not None:
-        q = _model_quantiles(row, crop_id)  # residual or pooled, per served_ml_kind
+    # _model_quantiles_safe degrades (returns None) when the row is unscoreable by
+    # the incumbent model (e.g. a CropId unseen by an older promoted encoder after
+    # a corpus widening) -> serve the fallback ladder instead of 500-ing.
+    ml_attempted = bool(model_active and row is not None)
+    q = _model_quantiles_safe(row, crop_id) if ml_attempted else None
+    if q is not None:
         p10, p50, p90 = float(q["p10"]), float(q["p50"]), float(q["p90"])
         p10, p50, p90 = sorted([p10, p50, p90])
         active = _served_ml_kind()
@@ -373,9 +422,16 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
                        "uncertainty further out.")
     else:
         # Fallback: no servable ML path (or no feature row to score for this crop).
+        # Mirror predict_harvest's inert-forecast clamp (previously missing here):
+        # a guard-degraded ML attempt (row present, predict failed) or a promoted-
+        # model-without-scoreable-row must report "Low", never the tier's trust.
         active = "crop_mean_fallback"
-        confidence = _confidence_for(model_served=False, tier=tier)
-        confidence_reason = _reason_for(model_served=False, tier=tier)
+        row_missing = bool(model_active) and row is None
+        ml_failed = ml_attempted and q is None
+        confidence = _confidence_for(model_served=False, tier=tier,
+                                     row_missing=row_missing, ml_failed=ml_failed)
+        confidence_reason = _reason_for(model_served=False, tier=tier,
+                                        row_missing=row_missing, ml_failed=ml_failed)
         explanation = (_fallback_explanation(tier) +
                        " The central forecast is flat; the band widens with "
                        "horizon to reflect growing uncertainty.")
