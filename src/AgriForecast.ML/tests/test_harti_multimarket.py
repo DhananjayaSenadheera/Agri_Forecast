@@ -132,9 +132,13 @@ def _table_only_pettah():
 
 
 def _table_no_target_markets():
-    """No target market header present at all -- whole-PDF skip case."""
+    """No target market header present at all -- whole-PDF skip case.
+
+    R2 Step 6.1 note: "Kandy" is now one of the 10 target markets (was
+    non-target noise pre-6.1), so this fixture uses two genuinely
+    unregistered market names instead."""
     header1 = ["Variety", "1/1/2019", "1/1/2019"]
-    header2 = [None, "SomeMarket\nMarket", "Kandy\nMarket"]
+    header2 = [None, "SomeMarket\nMarket", "AnotherMarket\nMarket"]
     header3 = ["", "", ""]
     rows = [
         header1, header2, header3,
@@ -397,18 +401,24 @@ class TestParsePdfMultiMarket:
         return harti_parser.parse_pdf(fake_pdf_path, "2019-01-01")
 
     def test_all_locatable_markets_emit_rows(self, monkeypatch, tmp_path):
+        """R2 Step 6.1 note: _standard_table() also carries a 'Meegoda'
+        header column (with real Beans/Capsicum data) -- since Meegoda is
+        now one of the 10 target markets (was non-target noise pre-6.1),
+        it legitimately emits rows here too."""
         table = _standard_table(include_narahenpita=True)
         rows = self._run_parse_pdf(monkeypatch, table, tmp_path)
         markets = {r.market_name for r in rows}
-        assert markets == {"Dambulla", "Pettah", "Narahenpita"}
+        assert markets == {"Dambulla", "Pettah", "Narahenpita", "Meegoda"}
 
     def test_partial_market_missing_others_still_parse(self, monkeypatch, tmp_path, caplog):
         """Narahenpita absent (as in real 2019-format bulletins) -> WARN-skip
-        for that market only; Dambulla and Pettah still parse normally."""
+        for that market only; Dambulla/Pettah/Meegoda still parse normally
+        (Meegoda is target-market noise baked into _standard_table(), see
+        the note on test_all_locatable_markets_emit_rows above)."""
         table = _standard_table(include_narahenpita=False)
         rows = self._run_parse_pdf(monkeypatch, table, tmp_path)
         markets = {r.market_name for r in rows}
-        assert markets == {"Dambulla", "Pettah"}
+        assert markets == {"Dambulla", "Pettah", "Meegoda"}
         assert "Narahenpita" not in markets
         assert any("Narahenpita" in rec.message and "not located" in rec.message
                     for rec in caplog.records)
@@ -1073,20 +1083,454 @@ class TestThambuttegamaKeppetipola:
         )
 
     def test_seeded_market_names_for_new_markets_match_migration(self):
-        """Pin the exact live-DB-verified Markets.Name strings for the two
-        new markets (MKT00000002 / MKT00000003), same pattern as the
-        existing R1.1 P1 pin for Dambulla/Pettah/Narahenpita."""
-        assert (
-            harti_loader._PARSER_MARKET_TO_DB_NAME["Keppetipola"]
-            == "Keppetipola Dedicated Economic Centre"
-        )
-        assert (
-            harti_loader._PARSER_MARKET_TO_DB_NAME["Thambuttegama"]
-            == "Thambuttegama Dedicated Economic Centre"
-        )
+        """Pin the exact seeded Markets.Name strings for the new markets,
+        same pattern as the R1.1 P1 pin for Dambulla/Pettah/Narahenpita.
+        Covers Keppetipola / Thambuttegama (MKT00000002 / MKT00000003) plus
+        the 6 R2 Step 6.2 markets (MKT00000007..MKT00000012). These strings
+        must stay byte-for-byte identical to SeedMarkets in
+        AgriForecastDbContext.cs or _build_market_map WARN-skips at runtime."""
+        expected = {
+            "Keppetipola":  "Keppetipola Dedicated Economic Centre",
+            "Thambuttegama": "Thambuttegama Dedicated Economic Centre",
+            # R2 Step 6.2 — 6 new markets, owner-verified classification:
+            "Kandy":         "Kandy (HARTI wholesale)",
+            "Meegoda":       "Meegoda Dedicated Economic Centre",
+            "Norochchole":   "Norochchole (HARTI wholesale)",
+            "Nuwara Eliya":  "Nuwara Eliya Dedicated Economic Centre",
+            "Bandarawela":   "Bandarawela (HARTI wholesale)",
+            "Veyangoda":     "Veyangoda Dedicated Economic Centre",
+        }
+        for parser_name, db_name in expected.items():
+            assert (
+                harti_loader._PARSER_MARKET_TO_DB_NAME[parser_name] == db_name
+            ), f"{parser_name} DB name drifted from seed"
 
     def test_target_markets_includes_both_new_markets(self):
         """_TARGET_MARKETS must include both new markets (parse_pdf() only
         extracts markets listed here)."""
         assert "Thambuttegama" in harti_parser._TARGET_MARKETS
         assert "Keppetipola" in harti_parser._TARGET_MARKETS
+
+
+# ===========================================================================
+# 9. R2 Step 6.1 (ClickUp D-DF6) -- the remaining 6 markets: Kandy, Meegoda,
+#    Norochchole, Nuwara Eliya, Bandarawela, Veyangoda
+# ===========================================================================
+
+class TestSixNewMarketsStep6_1:
+    """Full 4 -> 10 market widen. Header evidence sourced from the cached
+    corpus (--no-download, zero new scraping) via a stratified sample plus
+    binary search for the two markets with a confirmed introduction date
+    (Bandarawela, Veyangoda) -- see parser.py's _MARKET_HEADER_ALIASES
+    docstring for the full per-market evidence this pins.
+    """
+
+    _HEADER_2015_7COL = [
+        None, "Pettah\nMarket", "Kandy\nMarket", "Dambulla\nMarket",
+        "Meegoda\nMarket", "Norochchole\nMarket", "Thambuththegama\nMarket",
+    ]
+    _HEADER_2017_9COL = [
+        None, "Pettah\nMarket", "Kandy\nMarket", "Dambulla\nMarket",
+        "Meegoda\nMarket", "Norochchole\nMarket", "T'thegama\nMarket",
+        "Kappetipola\nMarket", "Nuwaraeliya\nMarket",
+    ]
+    # 2021-12-01..09: real cached-corpus era, "ambuththega"/"maKappetipola"
+    # cell-bleed variant PRE-DATES the more commonly-known "hambuththegam"/
+    # "aKappetipola" era (which starts 2021-12-10) -- Bandarawela not yet
+    # introduced (introduced precisely 2021-12-02, so this fixture uses the
+    # 2021-12-01 pre-introduction moment specifically, no Bandarawela column).
+    _HEADER_2021_12_01_PRE_BANDARAWELA = [
+        None, "Petha\nMarket", "Kandy\nMarket", "Dambulla\nMarket",
+        "Meegoda\nMarket", "NorochcholTeh\nMarket", "ambuththega\nMarket",
+        "maKappetipola\nMarket", "Nuwaraeliya\nMarket",
+    ]
+    _HEADER_2021_12_02_WITH_BANDARAWELA = [
+        None, "Petha\nMarket", "Kandy\nMarket", "Dambulla\nMarket",
+        "Meegoda\nMarket", "NorochcholTeh\nMarket", "ambuththega\nMarket",
+        "maKappetipola\nMarket", "Nuwaraeliya\nMarket", "Bandarawela\nMarket",
+    ]
+    # 2022-02-21 (10-column, Bandarawela present, Veyangoda NOT yet) vs
+    # 2022-02-22 (11-column, Veyangoda introduced) -- binary-searched exactly
+    # against the cache.
+    _HEADER_2022_02_21_PRE_VEYANGODA = [
+        None, "Peliyagoda\nMarket", "Kandy\nMarket", "Dambulla\nMarket",
+        "Meegoda\nMarket", "NorochcholeT\nMarket", "hambuththegam\nMarket",
+        "aKappetipola\nMarket", "Nuwaraeliya\nMarket", "Bandarawela\nMarket",
+    ]
+    _HEADER_2022_02_22_WITH_VEYANGODA = [
+        None, "Peliyagoda\nMarket", "Kandy\nMarket", "Dambulla\nMarket",
+        "Meegoda\nMarket", "NorochcholeT\nMarket", "hambuththegam\nMarket",
+        "aKappetipola\nMarket", "Nuwaraeliya\nMarket", "Bandarawela\nMarket",
+        "Veyangoda\nMarket",
+    ]
+    _HEADER_2025_CLEAN = [
+        None, "Peliyagoda\nMarket", "Kandy\nMarket", "Dambulla\nMarket",
+        "Meegoda\nMarket", "Norochchole\nMarket", "Thambuththegama\nMarket",
+        "Keppetipola\nMarket", "Nuwaraeliya\nMarket", "Bandarawela\nMarket",
+        "Veyangoda\nMarket",
+    ]
+    # The single malformed 2022-11-26 PDF (pre-existing "no English veg page
+    # found" case, unrelated to this widen -- see harti_multimarket_audit.md
+    # Sec 4): its raw header row carries truncated/spaced variants that are
+    # NOT reachable via the normal _find_english_veg_page() -> table[1] path
+    # for THAT specific PDF, but are kept as defensive aliases in case a
+    # different, otherwise-parseable PDF repeats the same truncation.
+    _HEADER_2022_11_26_MALFORMED_VARIANTS = [
+        None, "Peliyagoda", "Norochchole", "Kandy", "Nuwara Eliya",
+        "DambullaTh", "ambuththega", "maKappetipola", "Meegoda*",
+        "Bandarawela", "Veyangod*",
+    ]
+
+    def _table(self, header2):
+        header1 = ["Variety"] + ["d1"] * (len(header2) - 1)
+        header3 = [""] * len(header2)
+        return [header1, header2, header3]
+
+    # -- Kandy: stable spelling corpus-wide, no drift observed --
+
+    def test_kandy_located_2015_clean(self):
+        table = self._table(self._HEADER_2015_7COL)
+        col = harti_parser._locate_market_column(table, "Kandy")
+        assert col == 2
+
+    def test_kandy_located_2025_clean(self):
+        table = self._table(self._HEADER_2025_CLEAN)
+        col = harti_parser._locate_market_column(table, "Kandy")
+        assert col == 2
+
+    # -- Meegoda: clean spelling + truncated/star-suffixed variant --
+
+    def test_meegoda_located_2015_clean(self):
+        table = self._table(self._HEADER_2015_7COL)
+        col = harti_parser._locate_market_column(table, "Meegoda")
+        assert col == 4
+
+    def test_meegoda_located_star_suffixed_variant(self):
+        """The 2022-11-26 malformed-header PDF truncates to 'Meegoda*' --
+        the plain 'Meegoda' alias already substring-matches this via
+        _locate_market_column's `alias in cell_text` check, no separate
+        alias entry needed."""
+        table = self._table(self._HEADER_2022_11_26_MALFORMED_VARIANTS)
+        col = harti_parser._locate_market_column(table, "Meegoda")
+        assert col == 8
+        assert table[1][col] == "Meegoda*"
+
+    # -- Norochchole: clean + two cell-bleed variants --
+
+    def test_norochchole_located_clean_spelling(self):
+        table = self._table(self._HEADER_2025_CLEAN)
+        col = harti_parser._locate_market_column(table, "Norochchole")
+        assert col == 5
+        assert table[1][col] == "Norochchole\nMarket"
+
+    def test_norochchole_located_bleed_variant_norochcholet(self):
+        """'Norochchole' (clean) IS a substring of 'NorochcholeT' -- same
+        market, safe by construction (only one alias needs to hit)."""
+        table = self._table(self._HEADER_2022_02_22_WITH_VEYANGODA)
+        col = harti_parser._locate_market_column(table, "Norochchole")
+        assert col == 5
+        assert table[1][col] == "NorochcholeT\nMarket"
+
+    def test_norochchole_located_bleed_variant_norochcholteh(self):
+        """'NorochcholTeh' (2021-12-01..09 era) has the trailing 'e'/'h'
+        TRANSPOSED relative to 'NorochcholeT' -- 'Norochchole' is NOT a
+        substring of this variant, so it needed its own explicit alias
+        entry (this is the key non-obvious finding of the 6.1 discovery:
+        without it, this specific 9-PDF window would WARN-skip
+        Norochchole entirely)."""
+        assert "Norochchole" not in "NorochcholTeh", (
+            "sanity check: confirms this variant truly needs its own alias"
+        )
+        table = self._table(self._HEADER_2021_12_01_PRE_BANDARAWELA)
+        col = harti_parser._locate_market_column(table, "Norochchole")
+        assert col == 5
+        assert table[1][col] == "NorochcholTeh\nMarket"
+
+    # -- Nuwara Eliya: no-space "Nuwaraeliya" (standard) + spaced variant --
+
+    def test_nuwara_eliya_located_standard_no_space_spelling(self):
+        table = self._table(self._HEADER_2017_9COL)
+        col = harti_parser._locate_market_column(table, "Nuwara Eliya")
+        assert col == 8
+        assert table[1][col] == "Nuwaraeliya\nMarket"
+
+    def test_nuwara_eliya_located_spaced_variant(self):
+        """'Nuwara Eliya' (with space) seen in the malformed 2022-11-26 PDF
+        -- NOT a substring of 'Nuwaraeliya' or vice versa (the space makes
+        them mutually exclusive strings), so both needed explicit entries."""
+        assert "Nuwaraeliya" not in "Nuwara Eliya"
+        assert "Nuwara Eliya" not in "Nuwaraeliya"
+        table = self._table(self._HEADER_2022_11_26_MALFORMED_VARIANTS)
+        col = harti_parser._locate_market_column(table, "Nuwara Eliya")
+        assert col == 4
+        assert table[1][col] == "Nuwara Eliya"
+
+    # -- Bandarawela: introduction window --
+
+    def test_bandarawela_missing_before_introduction_returns_none(self):
+        """Bandarawela's column does not exist before its introduction --
+        binary-searched exactly against the cache: absent 2021-12-01,
+        present 2021-12-02."""
+        table = self._table(self._HEADER_2021_12_01_PRE_BANDARAWELA)
+        col = harti_parser._locate_market_column(table, "Bandarawela")
+        assert col is None
+
+    def test_bandarawela_located_from_introduction_date(self):
+        table = self._table(self._HEADER_2021_12_02_WITH_BANDARAWELA)
+        col = harti_parser._locate_market_column(table, "Bandarawela")
+        assert col == 9
+
+    def test_bandarawela_located_2025_clean(self):
+        table = self._table(self._HEADER_2025_CLEAN)
+        col = harti_parser._locate_market_column(table, "Bandarawela")
+        assert col == 9
+
+    # -- Veyangoda: introduction window --
+
+    def test_veyangoda_missing_before_introduction_returns_none(self):
+        """Binary-searched exactly against the cache: absent 2022-02-21,
+        present 2022-02-22 (this corrects harti_multimarket_audit.md's
+        informal '~2022' estimate to an exact date)."""
+        table = self._table(self._HEADER_2022_02_21_PRE_VEYANGODA)
+        col = harti_parser._locate_market_column(table, "Veyangoda")
+        assert col is None
+
+    def test_veyangoda_located_from_introduction_date(self):
+        table = self._table(self._HEADER_2022_02_22_WITH_VEYANGODA)
+        col = harti_parser._locate_market_column(table, "Veyangoda")
+        assert col == 10
+
+    def test_veyangoda_located_star_suffixed_variant(self):
+        """The 2022-11-26 malformed-header PDF truncates to 'Veyangod*' --
+        the 'Veyangod' alias already substring-matches this, no separate
+        alias entry needed (same reasoning as Meegoda* above)."""
+        table = self._table(self._HEADER_2022_11_26_MALFORMED_VARIANTS)
+        col = harti_parser._locate_market_column(table, "Veyangoda")
+        assert col == 10
+        assert table[1][col] == "Veyangod*"
+
+    # -- Substring-safety: FULL matrix across all 11 wired-up markets
+    #    (10 "real bulletin" targets + Narahenpita, kept live per the
+    #    detect-don't-hardcode contract even though it is corpus-empty --
+    #    see parser.py module docstring) + noise --
+
+    def test_full_10_market_alias_matrix_no_cross_market_substring(self):
+        """Permanent regression test (audit Sec 8.3 method, extended to the
+        full 11-key _MARKET_HEADER_ALIASES set -- 10 markets with real
+        bulletin data plus Narahenpita): no alias for any market may be a
+        substring of any OTHER market's alias. Only intra-market substrings
+        are allowed (checked implicitly by NOT skipping same-market
+        pairs)."""
+        aliases = harti_parser._MARKET_HEADER_ALIASES
+        assert len(aliases) == 11, "Expected exactly 11 _MARKET_HEADER_ALIASES keys"
+        collisions = []
+        for market_a, aliases_a in aliases.items():
+            for market_b, aliases_b in aliases.items():
+                if market_a == market_b:
+                    continue
+                for alias_a in aliases_a:
+                    for alias_b in aliases_b:
+                        if alias_a in alias_b:
+                            collisions.append((market_a, alias_a, market_b, alias_b))
+        assert not collisions, (
+            "Cross-market alias substring collisions found: %s" % collisions
+        )
+
+    def test_full_matrix_does_not_match_generic_bulletin_noise(self):
+        """None of the 10 markets' aliases may accidentally match generic
+        bulletin header/prose text that is NOT a market name."""
+        noise_strings = [
+            "Market", "Variety", "Up Country Vegetable",
+            "Low country Vegetable", "Serial", "Item", "Rs./kg",
+            "2024-03-05",
+        ]
+        for market, aliases in harti_parser._MARKET_HEADER_ALIASES.items():
+            for alias in aliases:
+                for noise in noise_strings:
+                    assert alias not in noise and noise not in alias, (
+                        f"Alias {alias!r} ({market}) collides with generic "
+                        f"bulletin text {noise!r}"
+                    )
+
+    # -- 10-market column-order shuffle (extends TestColumnOrderShuffle) --
+
+    def _shuffled_table_ten_markets(self):
+        """All 10 target markets, deliberately reordered/interleaved so no
+        market sits at a 'suspiciously convenient' fixed offset."""
+        header1 = ["Variety"] + ["d1"] * 10
+        header2 = [
+            None,
+            "Veyangoda\nMarket", "Kandy\nMarket", "Bandarawela\nMarket",
+            "Dambulla\nMarket", "Nuwaraeliya\nMarket", "Thambuththegama\nMarket",
+            "Meegoda\nMarket", "Narahenpita\nMarket", "Norochchole\nMarket",
+            "Pettah\nMarket",
+        ]
+        header3 = [""] * len(header1)
+        row = [
+            "Beans",
+            "10-20",    # Veyangoda
+            "30-40",    # Kandy
+            "50-60",    # Bandarawela
+            "70-80",    # Dambulla
+            "90-100",   # Nuwara Eliya
+            "110-120",  # Thambuttegama
+            "130-140",  # Meegoda
+            "150-160",  # Narahenpita
+            "170-180",  # Norochchole
+            "190-200",  # Pettah
+        ]
+        # Keppetipola deliberately absent from this fixture (11th market
+        # would need its own header cell; 10 of the 11 wired-up market keys
+        # -- Dambulla/Pettah/Narahenpita/Thambuttegama/Kandy/Meegoda/
+        # Norochchole/Nuwara Eliya/Bandarawela/Veyangoda -- already exercise
+        # the full shuffle risk).
+        return [header1, header2, header3, row]
+
+    def test_ten_markets_map_to_distinct_columns_regardless_of_order(self):
+        table = self._shuffled_table_ten_markets()
+        markets = (
+            "Dambulla", "Pettah", "Narahenpita", "Thambuttegama", "Kandy",
+            "Meegoda", "Norochchole", "Nuwara Eliya", "Bandarawela",
+            "Veyangoda",
+        )
+        cols = {m: harti_parser._locate_market_column(table, m) for m in markets}
+        assert all(c is not None for c in cols.values()), cols
+        assert len(set(cols.values())) == 10, (
+            "All 10 markets must resolve to mutually distinct columns: %s" % cols
+        )
+
+    def test_ten_markets_prices_pairwise_distinct_no_cross_contamination(self):
+        table = self._shuffled_table_ten_markets()
+        markets = (
+            "Dambulla", "Pettah", "Narahenpita", "Thambuttegama", "Kandy",
+            "Meegoda", "Norochchole", "Nuwara Eliya", "Bandarawela",
+            "Veyangoda",
+        )
+        beans_row = table[3]
+        prices = {}
+        for market in markets:
+            col = harti_parser._locate_market_column(table, market)
+            prices[market] = harti_parser._parse_price_cell(beans_row[col])
+        assert len(set(prices.values())) == 10, (
+            "All 10 markets' Beans prices must be pairwise distinct: %s" % prices
+        )
+
+    # -- parse_pdf() end-to-end with the widened crop set --
+
+    def _run_parse_pdf_with_header_and_crops(self, monkeypatch, tmp_path, header2, crop_rows):
+        """crop_rows: dict[label, list[cell]] (cells aligned to header2)."""
+        header1 = ["Variety"] + ["d1"] * (len(header2) - 1)
+        header3 = [""] * len(header2)
+        rows = [header1, header2, header3]
+        for label, cells in crop_rows.items():
+            rows.append([label] + cells)
+        table = rows
+
+        fake_pdf_path = tmp_path / "fake.pdf"
+        fake_pdf_path.write_bytes(b"%PDF-1.4 fake")
+
+        class _FakePdf:
+            def __init__(self):
+                self.pages = [object()]
+                self.metadata = {"CreationDate": "D:20260624141348+05'30'"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr(harti_parser, "_find_english_veg_page", lambda pdf: (0, table))
+        import pdfplumber
+        monkeypatch.setattr(pdfplumber, "open", lambda *_a, **_k: _FakePdf())
+
+        return harti_parser.parse_pdf(fake_pdf_path, "2026-06-24")
+
+    def test_end_to_end_widened_crop_set_all_10_markets(self, monkeypatch, tmp_path):
+        """Synthetic 2025-clean-format table (11 columns incl. Keppetipola)
+        with several of the newly-widened crops populated across multiple
+        markets -- proves the widened _TARGET_CROPS and the full
+        _TARGET_MARKETS set compose correctly end-to-end."""
+        header2 = self._HEADER_2025_CLEAN
+        crop_rows = {
+            "Beans":     ["400- 500", "400- 450", "350- 400", "450- 490", "-", "300- 340", "280- 310", "380- 420", "-", "350- 420"],
+            "Tomato":    ["70- 90", "-", "70- 80", "90- 100", "-", "50- 80", "-", "-", "-", "-"],
+            "Brinjals":  ["90- 100", "-", "95- 100", "-", "-", "-", "60- 80", "-", "-", "-"],
+            "Green Chillies": ["300- 350", "-", "300- 350", "350- 400", "280- 320", "300- 350", "-", "-", "-", "-"],
+        }
+        rows = self._run_parse_pdf_with_header_and_crops(monkeypatch, tmp_path, header2, crop_rows)
+        labels = {r.harti_label for r in rows}
+        assert {"Beans", "Tomato", "Brinjals", "Green Chillies"} <= labels
+        dambulla_tomato = next(r for r in rows if r.harti_label == "Tomato" and r.market_name == "Dambulla")
+        assert (dambulla_tomato.min_price, dambulla_tomato.max_price) == (70.0, 80.0)
+        thambuttegama_beans = next(r for r in rows if r.harti_label == "Beans" and r.market_name == "Thambuttegama")
+        assert (thambuttegama_beans.min_price, thambuttegama_beans.max_price) == (300.0, 340.0)
+
+    def test_bandarawela_veyangoda_absent_pre_introduction_warn_skip_via_parse_pdf(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        """End-to-end (real parse_pdf() entrypoint): a pre-introduction-era
+        header (2021-12-01, Bandarawela/Veyangoda both absent) WARN-skips
+        both, other located markets still parse."""
+        header2 = self._HEADER_2021_12_01_PRE_BANDARAWELA
+        crop_cells = ["80- 100", "-", "100- 120", "160- 165", "-", "90- 120", "-", "-"]
+        rows = self._run_parse_pdf_with_header_and_crops(
+            monkeypatch, tmp_path, header2, {"Beans": crop_cells}
+        )
+        markets = {r.market_name for r in rows}
+        assert "Bandarawela" not in markets
+        assert "Veyangoda" not in markets
+        assert "Dambulla" in markets
+        assert any("Bandarawela" in rec.message and "not located" in rec.message for rec in caplog.records)
+        assert any("Veyangoda" in rec.message and "not located" in rec.message for rec in caplog.records)
+
+    # -- Loader: market-name resolution for the 6 new markets. Post-6.2 the
+    #    live Markets rows exist (MKT00000007..MKT00000012); the fail-closed
+    #    WARN-skip path below is still exercised via a mock empty map so the
+    #    safety net stays covered if a name ever drifts. --
+
+    def test_six_new_markets_all_in_parser_market_to_db_name(self):
+        for market in (
+            "Kandy", "Meegoda", "Norochchole", "Nuwara Eliya", "Bandarawela",
+            "Veyangoda",
+        ):
+            assert market in harti_loader._PARSER_MARKET_TO_DB_NAME, (
+                f"{market} missing from _PARSER_MARKET_TO_DB_NAME"
+            )
+
+    def test_six_new_markets_warn_skip_when_db_row_absent(self, caplog):
+        """If a new market's Markets row is ever missing (e.g. a name drift
+        that breaks the _build_market_map JOIN), upsert_harti_price_
+        observations() must WARN-skip its rows, never invent a market.
+        Simulated via an empty fake map (mirrors
+        test_thambuttegama_unresolved_when_db_row_missing_warn_skip). Post-6.2
+        the real DB rows DO exist, so this exercises the safety net, not the
+        default path."""
+        fake_map = {}  # force the unresolved branch regardless of live state
+        rows = [
+            ParsedPrice("2026-06-24", "Beans", "30-40", 30.0, 40.0, market_name="Kandy"),
+            ParsedPrice("2026-06-24", "Beans", "130-140", 130.0, 140.0, market_name="Meegoda"),
+        ]
+        original = harti_loader._build_market_map
+        harti_loader._build_market_map = lambda _: fake_map
+        try:
+            result = harti_loader.upsert_harti_price_observations(rows, engine=MagicMock(), dry_run=True)
+        finally:
+            harti_loader._build_market_map = original
+
+        assert result["skipped_no_market"] == 2
+        assert result["inserted"] == 0
+        assert any("Kandy" in rec.message and "did not resolve" in rec.message for rec in caplog.records)
+        assert any("Meegoda" in rec.message and "did not resolve" in rec.message for rec in caplog.records)
+
+    def test_target_markets_includes_all_ten(self):
+        expected = {
+            "Dambulla", "Pettah", "Narahenpita", "Thambuttegama", "Keppetipola",
+            "Kandy", "Meegoda", "Norochchole", "Nuwara Eliya", "Bandarawela",
+            "Veyangoda",
+        }
+        assert set(harti_parser._TARGET_MARKETS) == expected
+        assert len(harti_parser._TARGET_MARKETS) == 11, (
+            "10 named markets + note: Narahenpita is wired but corpus-empty "
+            "(kept live per the detect-don't-hardcode contract)"
+        )

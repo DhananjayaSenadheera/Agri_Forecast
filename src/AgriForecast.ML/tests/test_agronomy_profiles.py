@@ -273,42 +273,63 @@ class TestLiveAgronomyProfilePin:
         assert df["IsVerified"].dtype == bool
 
     def test_live_gp_non_null_count_and_season_split(self):
-        """REPINNED 2026-07-06 to the post-Step-5-Phase-1 live state: the DOA
-        migration (RecodeAgronomyProfilesDoaVerifiedBatch1) applied 13
-        owner-verified profiles carrying real Yala planting months (was 11
-        gp-known / all 'Year-round' pre-Step-5)."""
+        """REPINNED 2026-07-07 (R2 Step 6.3) to the post-Step-5-Phase-2 live
+        state: migration 20260706... (RecodeAgronomyProfilesDoaVerifiedBatch2,
+        commit a9c472b) verified the remaining 81 crops, landing 84 gp-non-null
+        crops total (was 13 after Step 5 Phase 1) split Yala=54/Year-round=27/
+        Maha=3 (was: 13 gp-known crops, all 'Yala', after Phase 1)."""
         df = _db_or_skip()
         gp_known = df["GrowthPeriodDays"].notna()
-        assert int(gp_known.sum()) == 13, \
-            f"expected 13 gp-non-null crops (Step 5 Phase 1), got {int(gp_known.sum())}"
-        # Exactly the 13 gp-known crops carry real Yala months now; the rest None.
-        assert (df.loc[gp_known, "PlantingSeason"] == "Yala").all()
+        assert int(gp_known.sum()) == 84, \
+            f"expected 84 gp-non-null crops (Step 5 Phase 2), got {int(gp_known.sum())}"
+        # gp-known crops now split across all three PlantingSeason values
+        # (Yala/Year-round/Maha), not exclusively 'Yala' as under Phase 1.
+        season_counts = df.loc[gp_known, "PlantingSeason"].value_counts()
+        assert season_counts.to_dict() == {"Yala": 54, "Year-round": 27, "Maha": 3}, \
+            f"expected Yala=54/Year-round=27/Maha=3 split, got {season_counts.to_dict()}"
         assert df.loc[~gp_known, "PlantingSeason"].isna().all()
 
     def test_live_verified_set_equals_forecastable_set(self):
-        """REWRITTEN 2026-07-06 from test_live_all_profiles_still_unverified_pre_step5.
-        Under R2 Step 5.3 (IsVerified-strict) the forecastable set IS the verified
-        set: Step 5 Phase 1 verified exactly the 13 crops that carry a gp, so
-        IsVerified and GrowthPeriodDays-known must coincide row-for-row. (The old
-        test pinned the pre-Step-5 all-unverified state and was self-flagged to be
-        replaced the moment verified values landed.)"""
+        """REPINNED 2026-07-07 (R2 Step 6.3): Step 5 Phase 2 verified 94/96
+        crops total (was 13 after Phase 1), but 10 of those 94 are perennials
+        (IsPerennial=1: Ambarella, Curry Leaves, Papaya, King Coconut, Ash
+        Plantain, Coconut, Plantain Flower, Woodapple, Lime, Gooseberry) that
+        are legitimately verified WITHOUT a discrete GrowthPeriodDays (a
+        perennial has no harvest-horizon gp by agronomic definition, not a
+        data gap) — so under IsVerified-strict (load.resolve_forecast_gp:
+        BOTH is_verified AND gp not-null required), the forecastable
+        (gp-known) set is a strict SUBSET of the verified set, not equal to
+        it, exactly for those 10 perennial rows. Only 2 crops remain
+        unverified (Athugowa, Onion Leaves)."""
         df = _db_or_skip()
         verified = df["IsVerified"] == True   # noqa: E712
         gp_known = df["GrowthPeriodDays"].notna()
-        assert int(verified.sum()) == 13, \
-            f"expected 13 verified profiles (Step 5 Phase 1), got {int(verified.sum())}"
-        assert (verified == gp_known).all(), \
-            "IsVerified-strict: the verified set must equal the gp-known (forecastable) set"
+        assert int(verified.sum()) == 94, \
+            f"expected 94 verified profiles (Step 5 Phase 2), got {int(verified.sum())}"
+        # forecastable (gp-known) set must be a SUBSET of verified -- never
+        # gp-known-but-unverified (that would defeat the IsVerified-strict gate).
+        assert (gp_known <= verified).all(), \
+            "IsVerified-strict: every gp-known row must also be verified"
+        # the verified-but-gp-null rows must be exactly the 10 known perennials.
+        verified_no_gp = df[verified & ~gp_known]
+        assert len(verified_no_gp) == 10, \
+            f"expected 10 verified-but-gp-null perennial rows, got {len(verified_no_gp)}"
+        assert verified_no_gp["IsPerennial"].all(), \
+            "every verified-but-gp-null row must be a perennial (agronomically expected gp=NULL)"
 
     def test_live_planting_season_enc_distribution(self):
-        """REPINNED 2026-07-06: PlantingSeasonEnc (features.py) now gives {1: the
-        13 verified Yala crops, -1: the other 83} — Step 5 populated real Yala
-        planting months, so the gp-known crops encode to 1 (Yala), NOT 0
-        (Year-round) as they did pre-Step-5."""
+        """REPINNED 2026-07-07 (R2 Step 6.3): PlantingSeasonEnc (features.py)
+        now spans all three encoded values on the gp-known set (Yala=1,
+        Year-round=0, Maha=2 -- see F._PLANTING_SEASON_ENC), not exclusively
+        1 (Yala) as under Step 5 Phase 1's 13-crop, all-Yala state. The
+        gp-null set (12 rows: 10 verified perennials + 2 unverified) still
+        encodes to -1 (PlantingSeason is None for all of them)."""
         df = _db_or_skip()
         enc = df["PlantingSeason"].map(lambda s: F._PLANTING_SEASON_ENC.get(s, -1))
         gp_known = df["GrowthPeriodDays"].notna()
-        assert (enc[gp_known] == 1).all()
+        enc_counts = enc[gp_known].value_counts().to_dict()
+        assert enc_counts == {1: 54, 0: 27, 2: 3}, \
+            f"expected Yala=1(54)/Year-round=0(27)/Maha=2(3), got {enc_counts}"
         assert (enc[~gp_known] == -1).all()
-        assert set(enc.unique()) == {1, -1}, \
-            "the 13 verified crops encode to 1 (Yala); the rest to -1"
+        assert set(enc.unique()) == {1, 0, 2, -1}, \
+            f"expected encoded values {{1,0,2,-1}}, got {set(enc.unique())}"

@@ -48,8 +48,10 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             Frt_Code = 27,
             Frt_Padding = 6,
             Frt_Prefix = CropCategory.FruitPrefix,
-            // Next manual market code = MKT00000007 (7 seeded markets occupy 1..6).
-            Mkt_Code = 7,
+            // Next manual market code = MKT00000013 (12 seeded markets occupy 1..12 after
+            // R2 Step 6.2 added MKT00000007..MKT00000012). Bumped 7 → 13 so runtime market
+            // registration (CodeSettings.GetMktCode) can never re-issue a seeded code.
+            Mkt_Code = 13,
             Mkt_Padding = 8,
             Mkt_Prefix = "MKT",
         });
@@ -448,6 +450,90 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 IsActive = true,
                 CreatedAt = seededAt,
                 UpdatedAt = seededAt
+            },
+            // ── R2 Step 6.2 — 6 additional HARTI bulletin markets ─────────────────────────
+            // Added in lockstep with the 6.1 parser widening (10 real markets). Classification
+            // is owner-verified best-evidence (web): Meegoda / Nuwara Eliya / Veyangoda are
+            // formally-designated Dedicated Economic Centres (MarketType.DEC); Kandy /
+            // Norochchole / Bandarawela are municipal/assembly wholesale markets
+            // (MarketType.Wholesale, "(HARTI wholesale)" suffix like Pettah). Norochchole's
+            // classification is the least certain of the three and is reclassifiable if
+            // stronger evidence surfaces.
+            //
+            // IsEconomicCenter is deliberately NOT set here: per the R2 Step 3.1 convention
+            // only MKT00000001 (Dambulla) carries IsEconomicCenter=1 today — Keppetipola /
+            // Thambuttegama are MarketType.DEC yet IsEconomicCenter=0. MarketType classifies
+            // the market *kind*; IsEconomicCenter=1 flags the single feature-reference DEC.
+            // These 3 new DEC rows therefore keep the column default (false), matching the
+            // existing seeded DEC rows. (Column defaultValue=false from migration
+            // 20260706161839_AddIsEconomicCenterToMarket.)
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000007"),
+                MarketCode = "MKT00000007",
+                Name = "Kandy (HARTI wholesale)",
+                District = (string?)"Kandy",
+                MarketType = MarketType.Wholesale,
+                IsActive = true,
+                CreatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc)
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000008"),
+                MarketCode = "MKT00000008",
+                Name = "Meegoda Dedicated Economic Centre",
+                District = (string?)"Colombo",
+                MarketType = MarketType.DEC,
+                IsActive = true,
+                CreatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc)
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000009"),
+                MarketCode = "MKT00000009",
+                // Best-evidence classification: municipal/assembly wholesale market, not a
+                // formally-designated DEC (least certain of the three — reclassifiable).
+                Name = "Norochchole (HARTI wholesale)",
+                District = (string?)"Puttalam",
+                MarketType = MarketType.Wholesale,
+                IsActive = true,
+                CreatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc)
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000010"),
+                MarketCode = "MKT00000010",
+                Name = "Nuwara Eliya Dedicated Economic Centre",
+                District = (string?)"Nuwara Eliya",
+                MarketType = MarketType.DEC,
+                IsActive = true,
+                CreatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc)
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000011"),
+                MarketCode = "MKT00000011",
+                Name = "Bandarawela (HARTI wholesale)",
+                District = (string?)"Badulla",
+                MarketType = MarketType.Wholesale,
+                IsActive = true,
+                CreatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc)
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000012"),
+                MarketCode = "MKT00000012",
+                Name = "Veyangoda Dedicated Economic Centre",
+                District = (string?)"Gampaha",
+                MarketType = MarketType.DEC,
+                IsActive = true,
+                CreatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc)
             }
         );
     }
