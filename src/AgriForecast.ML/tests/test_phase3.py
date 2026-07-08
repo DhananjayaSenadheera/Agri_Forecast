@@ -460,14 +460,34 @@ class TestPredictHarvest:
             )
 
     def test_active_predictor_matches_promoted_model(self):
-        """activePredictor must match what the registry says (no silent override)."""
+        """activePredictor must be coherent with what the registry says (no silent
+        override).
+
+        v13 REPIN: the response `activePredictor` is now PER-CROP. For a model-
+        served (history-gated) crop it is the ARTIFACT kind the crop went through
+        (served_ml_kind, e.g. 'model'); for a non-served crop it is
+        'crop_mean_fallback'. The metadata's top-level `active_predictor` describes
+        the WHOLE shipped predictor ('hybrid' when a gate is present). So the old
+        exact-equality no longer holds across the gate; assert per-crop coherence
+        instead. BRINJAL_ID is inside the v13 served_on_crops gate."""
         from agriforecast_ml.registry import registry
+        from agriforecast_ml.serving import predict as P
         _, meta = registry.load_promoted()
         r = self._call(BRINJAL_ID)
-        assert r["activePredictor"] == meta["active_predictor"], (
-            f"Serving activePredictor {r['activePredictor']!r} does not match "
-            f"registry active_predictor {meta['active_predictor']!r}"
-        )
+        active = r["activePredictor"]
+        served = meta.get("active_predictor") in ("hybrid",) or "served_on_crops" in meta
+        if served and P._is_model_served(BRINJAL_ID) and meta.get("beats_baseline"):
+            # Gated + model wins -> response reports the artifact kind it served.
+            assert active == meta["served_ml_kind"], (
+                f"Serving activePredictor {active!r} for a gated crop must be the "
+                f"served_ml_kind {meta['served_ml_kind']!r}."
+            )
+        elif not meta.get("beats_baseline"):
+            # No ML promoted -> both must read crop_mean_fallback.
+            assert active == "crop_mean_fallback" == meta["active_predictor"]
+        else:
+            # Non-gated crop under a winning model -> fallback route.
+            assert active == "crop_mean_fallback"
 
 
 # ===========================================================================
@@ -705,20 +725,35 @@ class TestGateHonesty:
         active = meta["active_predictor"]
 
         if beats:
-            # When the model wins it must serve an ML predictor, not a fallback.
-            # Accept any recognised served ML kind (e.g. 'model', 'residual').
-            # For precision, prefer the explicit served_ml_kind field if present.
-            expected_kind = meta.get("served_ml_kind", None)
-            if expected_kind is not None:
-                assert active == expected_kind, (
-                    f"beats_baseline=True but active_predictor={active!r} does not "
-                    f"match served_ml_kind={expected_kind!r} recorded in metadata."
+            # v13 REPIN: the shipped predictor is the history-gated HYBRID (pooled
+            # model on gated crops + recency-mean baseline on thin crops), so
+            # active_predictor is now "hybrid" when the payload carries a
+            # served_on_crops gate. The ARTIFACT kind the gated crops go through is
+            # still served_ml_kind ("model"/"residual"); active_predictor describes
+            # the WHOLE served predictor, not the artifact kind, so the pre-v13
+            # active==served_ml_kind identity no longer holds by construction.
+            if "served_on_crops" in meta:
+                assert active == "hybrid", (
+                    f"beats_baseline=True with a served_on_crops gate but "
+                    f"active_predictor={active!r} (expected 'hybrid')."
+                )
+                assert meta.get("served_ml_kind") in _SERVED_ML_KINDS, (
+                    f"hybrid gated crops must go through a recognised served ML "
+                    f"kind; served_ml_kind={meta.get('served_ml_kind')!r}."
                 )
             else:
-                assert active in _SERVED_ML_KINDS, (
-                    f"beats_baseline=True but active_predictor={active!r} is not "
-                    f"a recognised served ML kind {_SERVED_ML_KINDS}."
-                )
+                # Pre-v13 payloads (no gate): active_predictor == served_ml_kind.
+                expected_kind = meta.get("served_ml_kind", None)
+                if expected_kind is not None:
+                    assert active == expected_kind, (
+                        f"beats_baseline=True but active_predictor={active!r} does not "
+                        f"match served_ml_kind={expected_kind!r} recorded in metadata."
+                    )
+                else:
+                    assert active in _SERVED_ML_KINDS, (
+                        f"beats_baseline=True but active_predictor={active!r} is not "
+                        f"a recognised served ML kind {_SERVED_ML_KINDS}."
+                    )
         else:
             assert active == "crop_mean_fallback", (
                 f"beats_baseline=False but active_predictor={active!r} -- "
@@ -748,15 +783,32 @@ class TestGateHonesty:
             )
 
     def test_best_ml_kind_matches_served_ml_kind(self):
-        """The winning ML variant in cv ('best_ml') must match served_ml_kind."""
+        """The winning ML variant in cv ('best_ml') must match served_ml_kind.
+
+        v13 REPIN: the winning candidate is now the 'hybrid' (history-gated pooled
+        model + recency-mean). The hybrid is NOT itself a servable artifact kind —
+        its gated crops go through the pooled 'model' artifact and its thin crops
+        take the baseline (routed via served_on_crops). So for a hybrid winner the
+        identity is best_ml=='hybrid' AND served_ml_kind in {model,residual}; for
+        pre-v13 winners the old identity best_ml==served_ml_kind still holds.
+        """
         meta = self._promoted_meta()
         cv = meta["cv"]
         if "best_ml" not in cv or "served_ml_kind" not in meta:
             pytest.skip("Metadata predates best_ml/served_ml_kind fields (v3-style)")
-        assert cv["best_ml"] == meta["served_ml_kind"], (
-            f"cv.best_ml={cv['best_ml']!r} but served_ml_kind={meta['served_ml_kind']!r}. "
-            f"The gate is serving a different ML variant than the one that won CV."
-        )
+        if cv["best_ml"] == "hybrid":
+            assert "served_on_crops" in meta, (
+                "best_ml='hybrid' but no served_on_crops gate recorded."
+            )
+            assert meta["served_ml_kind"] in _SERVED_ML_KINDS, (
+                f"hybrid winner but served_ml_kind={meta['served_ml_kind']!r} is "
+                f"not a servable artifact kind {_SERVED_ML_KINDS}."
+            )
+        else:
+            assert cv["best_ml"] == meta["served_ml_kind"], (
+                f"cv.best_ml={cv['best_ml']!r} but served_ml_kind={meta['served_ml_kind']!r}. "
+                f"The gate is serving a different ML variant than the one that won CV."
+            )
 
 
 class TestPromotionDecisionRegimeAware:

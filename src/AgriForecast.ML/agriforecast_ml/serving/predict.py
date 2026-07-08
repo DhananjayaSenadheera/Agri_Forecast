@@ -44,6 +44,35 @@ def _min_history_obs() -> int:
     return int(v) if v is not None else _DEFAULT_MIN_HISTORY_OBS
 
 
+# --- v13 history gate: the ML-served crop set (lowercased GUID strings) --------
+# The trainer fits the pooled model on long-history (>=min_history_obs labelled
+# rows) crops ONLY and threads that set into the payload as `served_on_crops`.
+# Serving routes any crop NOT in this set to the fallback ladder INTENTIONALLY
+# (an explicit history-gate decision), not via the _model_quantiles_safe crash
+# guard. Two consequences:
+#   * a non-served crop never reaches the model, so it can never trigger the
+#     unseen-category XGBoost raise -> the crash guard becomes a pure backstop
+#     for genuinely unexpected mismatches (e.g. a live payload trained on a
+#     different crop set), which is exactly what we want.
+#   * OLD payloads (v11/v12) predate `served_on_crops`. When the key is ABSENT we
+#     return None from _served_on_crops() and `_is_model_served` treats every crop
+#     as eligible (legacy behavior: the crash guard then catches unseen crops).
+def _served_on_crops() -> set[str] | None:
+    v = (_PAYLOAD or {}).get("served_on_crops")
+    if v is None:
+        return None
+    return {str(c).lower() for c in v}
+
+
+def _is_model_served(crop_id: str) -> bool:
+    """True iff this crop is inside the promoted model's history gate. Old payloads
+    without `served_on_crops` treat every crop as eligible (legacy compat)."""
+    served = _served_on_crops()
+    if served is None:
+        return True
+    return str(crop_id).lower() in served
+
+
 def _resolve_fallback(crop_id: str, crop_name: str | None = None) -> tuple[dict, str]:
     """Fallback ladder: per-crop (if n_obs >= threshold) -> category -> global.
 
@@ -79,7 +108,7 @@ def _resolve_fallback(crop_id: str, crop_name: str | None = None) -> tuple[dict,
 #                 outcome. Emitted ONLY when the ML model is served AND the crop has
 #                 adequate own history (tier == "crop").
 def _confidence_for(model_served: bool, tier: str, row_missing: bool = False,
-                    ml_failed: bool = False) -> str:
+                    ml_failed: bool = False, not_model_served: bool = False) -> str:
     # row_missing: the fallback path was taken because NO scoreable CropFeatureDaily
     # row exists as of the plant date. The prediction is inert-until-retrain, so it
     # must NOT inherit the resolved tier's (possibly Medium/High) trust — clamp to
@@ -91,7 +120,12 @@ def _confidence_for(model_served: bool, tier: str, row_missing: bool = False,
     # incumbent encoder never saw after a corpus widening). Equally inert-until-
     # retrain — same clamp, so a trained-crop tier can never report Medium/High for
     # a forecast the model refused to score.
-    if row_missing or ml_failed:
+    # not_model_served: the v13 history gate routed this crop to the baseline.
+    # Today the gate threshold equals the fallback "crop"-tier threshold (both
+    # _DEFAULT_MIN_HISTORY_OBS), so tier already resolves at most category/global
+    # -> Low; this explicit clamp removes that coupling so a future divergence of
+    # the two thresholds can never let a gated-out crop report Medium/High.
+    if row_missing or ml_failed or not_model_served:
         return "Low"
     if tier == "global":
         return "Low"          # unknown / no category prior — genuine cold start
@@ -103,8 +137,14 @@ def _confidence_for(model_served: bool, tier: str, row_missing: bool = False,
 
 
 def _reason_for(model_served: bool, tier: str, row_missing: bool = False,
-                ml_failed: bool = False) -> str:
+                ml_failed: bool = False, not_model_served: bool = False) -> str:
     """Human-readable justification for the confidence rung (additive field)."""
+    if not_model_served:
+        # v13 history gate: this crop has too little history for the ML model to
+        # be trained/served on it, so it is INTENTIONALLY routed to the baseline
+        # (distinct from ml_failed, which is an unexpected predict-time failure).
+        return ("This crop does not yet have enough price history for the ML "
+                "model; serving a baseline prior until it accumulates more.")
     if ml_failed:
         return ("The current model cannot score this crop yet (its data arrived "
                 "after the model was trained); serving a fallback prior with low "
@@ -300,7 +340,13 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
     # Resolve the fallback rung once (used for confidence even when ML serves, so
     # a thin-history ML-covered crop is not over-trusted).
     fb_q, tier = _resolve_fallback(crop_id, crop_name)
-    ml_attempted = bool(model_active and row is not None and gp)
+    # v13 history gate: the ML path is ATTEMPTED only for crops in the promoted
+    # model's served set (intentional routing). A non-served crop skips the model
+    # entirely and takes the fallback ladder with a distinct, non-ml_failed reason
+    # — so its fallback is a deliberate decision, not an exception the crash guard
+    # happened to catch.
+    model_served_crop = _is_model_served(crop_id)
+    ml_attempted = bool(model_active and model_served_crop and row is not None and gp)
     q = _model_quantiles_safe(row, crop_id) if ml_attempted else None
     if q is not None:
         p10, p50, p90 = q["p10"], q["p50"], q["p90"]
@@ -319,10 +365,18 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
         # (_model_quantiles_safe -> None, e.g. incumbent encoder predates this crop).
         row_missing = row is None
         ml_failed = ml_attempted and q is None
+        # not_model_served: the model is live+servable and a feature row exists,
+        # but this crop is outside the history gate -> deliberate baseline route
+        # (distinct reason from an unexpected ml_failed). Only meaningful when the
+        # row/gp exist (otherwise row_missing already explains the fallback).
+        not_model_served = bool(model_active and not model_served_crop
+                                and row is not None and gp)
         confidence = _confidence_for(model_served=False, tier=tier,
-                                     row_missing=row_missing, ml_failed=ml_failed)
+                                     row_missing=row_missing, ml_failed=ml_failed,
+                                     not_model_served=not_model_served)
         confidence_reason = _reason_for(model_served=False, tier=tier,
-                                        row_missing=row_missing, ml_failed=ml_failed)
+                                        row_missing=row_missing, ml_failed=ml_failed,
+                                        not_model_served=not_model_served)
         explanation = _fallback_explanation(tier)
 
     p10, p50, p90 = sorted([round(p10, 2), round(p50, 2), round(p90, 2)])
@@ -405,11 +459,15 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
     # Serve the ML path only when promoted AND its artifacts are present/understood
     # here (same guard as predict_harvest; protects the residual/blend trap).
     model_active = bool(_PAYLOAD.get("beats_baseline")) and _ml_servable()
-    row = _latest_feature_row(crop_id, as_of) if model_active else None
+    # v13 history gate: only fetch + score a feature row for crops in the promoted
+    # model's served set (mirrors predict_harvest). Non-served crops take the
+    # fallback ladder intentionally.
+    model_served_crop = _is_model_served(crop_id)
+    row = _latest_feature_row(crop_id, as_of) if (model_active and model_served_crop) else None
     # _model_quantiles_safe degrades (returns None) when the row is unscoreable by
     # the incumbent model (e.g. a CropId unseen by an older promoted encoder after
     # a corpus widening) -> serve the fallback ladder instead of 500-ing.
-    ml_attempted = bool(model_active and row is not None)
+    ml_attempted = bool(model_active and model_served_crop and row is not None)
     q = _model_quantiles_safe(row, crop_id) if ml_attempted else None
     if q is not None:
         p10, p50, p90 = float(q["p10"]), float(q["p50"]), float(q["p90"])
@@ -426,12 +484,18 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
         # a guard-degraded ML attempt (row present, predict failed) or a promoted-
         # model-without-scoreable-row must report "Low", never the tier's trust.
         active = "crop_mean_fallback"
-        row_missing = bool(model_active) and row is None
+        # row_missing only when the model IS meant to serve this crop but no row
+        # exists; a history-gated-out crop is not "missing a row", it is routed by
+        # the gate (not_model_served), so keep those signals distinct.
+        row_missing = bool(model_active) and model_served_crop and row is None
         ml_failed = ml_attempted and q is None
+        not_model_served = bool(model_active and not model_served_crop)
         confidence = _confidence_for(model_served=False, tier=tier,
-                                     row_missing=row_missing, ml_failed=ml_failed)
+                                     row_missing=row_missing, ml_failed=ml_failed,
+                                     not_model_served=not_model_served)
         confidence_reason = _reason_for(model_served=False, tier=tier,
-                                        row_missing=row_missing, ml_failed=ml_failed)
+                                        row_missing=row_missing, ml_failed=ml_failed,
+                                        not_model_served=not_model_served)
         explanation = (_fallback_explanation(tier) +
                        " The central forecast is flat; the band widens with "
                        "horizon to reflect growing uncertainty.")
