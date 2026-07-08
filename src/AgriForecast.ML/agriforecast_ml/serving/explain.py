@@ -8,7 +8,8 @@ can fall back to the static explanation.
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
+
+from .build_x import build_x as _build_X  # single source of truth (shared with predict.py)
 
 # Raw CropFeatureDaily column -> farmer-readable label.
 _LABELS = {
@@ -72,24 +73,45 @@ _LABELS = {
     "MacroFoodInflationYoY": "food inflation rate",
     "MacroFoodImportsYoY": "food import trend",
     "MacroPolicyRateOPR": "central bank interest rate",
+    # Cross-market spread signals (P4 step 2, ClickUp 86caheffr). Per-market
+    # point-in-time prices for the feature-safe markets + derived cross-market
+    # summaries. The 5 feature-safe markets are named explicitly so SHAP shows a
+    # farmer a market name, never a raw Mkt<Slug>AvgPrice column.
+    "MktDambullaAvgPrice": "Dambulla market price",
+    "MktDambullaLag7": "Dambulla price 7 days ago",
+    "MktKeppetipolaAvgPrice": "Keppetipola market price",
+    "MktKeppetipolaLag7": "Keppetipola price 7 days ago",
+    "MktThambuttegamaAvgPrice": "Thambuttegama market price",
+    "MktThambuttegamaLag7": "Thambuttegama price 7 days ago",
+    "MktPettahAvgPrice": "Pettah market price",
+    "MktPettahLag7": "Pettah price 7 days ago",
+    "MktNarahenpitaAvgPrice": "Narahenpita market price",
+    "MktNarahenpitaLag7": "Narahenpita price 7 days ago",
+    # 6 markets added when the HARTI parser was widened (R2 Step 6): Kandy,
+    # Meegoda, Norochchole, Nuwara Eliya, Bandarawela, Veyangoda. Slug = first
+    # word of the market Name (load._market_slug), so 'Nuwara Eliya' -> 'Nuwara'.
+    # These enter the feature contract at the R2 Step 7 rebuild+retrain.
+    "MktKandyAvgPrice": "Kandy market price",
+    "MktKandyLag7": "Kandy price 7 days ago",
+    "MktMeegodaAvgPrice": "Meegoda market price",
+    "MktMeegodaLag7": "Meegoda price 7 days ago",
+    "MktNorochcholeAvgPrice": "Norochchole market price",
+    "MktNorochcholeLag7": "Norochchole price 7 days ago",
+    "MktNuwaraAvgPrice": "Nuwara Eliya market price",
+    "MktNuwaraLag7": "Nuwara Eliya price 7 days ago",
+    "MktBandarawelaAvgPrice": "Bandarawela market price",
+    "MktBandarawelaLag7": "Bandarawela price 7 days ago",
+    "MktVeyangodaAvgPrice": "Veyangoda market price",
+    "MktVeyangodaLag7": "Veyangoda price 7 days ago",
+    "SpreadVsNational": "local price vs national average",
+    "MarketRankPct": "local price rank across markets",
+    "LeaderMarketLag7": "leading market price 7 days ago",
+    "NMarketsReporting": "number of markets reporting",
 }
 
 
 def _label(col: str) -> str:
     return _LABELS.get(col, col)
-
-
-def _build_X(row, payload) -> pd.DataFrame:
-    """Recreate the exact 1-row model input frame (mirrors predict._model_quantiles)."""
-    cols = payload["feature_cols"]
-    categorical = payload["categorical"]
-    X = pd.DataFrame([{c: row.get(c) for c in cols}])
-    for c in cols:
-        if c in categorical:
-            X[c] = X[c].astype("category")
-        else:
-            X[c] = pd.to_numeric(X[c], errors="coerce").astype("float64")
-    return X
 
 
 def top_factors(row, payload, top_n: int = 5) -> list[dict]:

@@ -367,6 +367,54 @@ class TestNameAliasMapping:
                 "Zero-data crop '%s' must NOT appear in HARTI loader crop map" % zero_crop
             )
 
+    def test_r2_step_6_1_widened_labels_in_map(self):
+        """R2 Step 6.1 (D-DF6): the 15 net-new mappable crops (21 target - 6
+        original) must all resolve to their DB crop name."""
+        from agriforecast_ml.harti.loader import _HARTI_TO_DB_NAME
+        expected = {
+            "Green Chillies": "Green Chili",
+            "Tomato": "Tomato",
+            "Leeks": "Leeks",
+            "Knolkhol": "Nnolkhol",
+            "Raddish": "Raddish",
+            "Cucumber": "Cucumber",
+            "Drumstick": "Drumsticks",
+            "Long Beans": "Yard - Long Beans",
+            "Ash Plantains": "Ash Plantain",
+            "Lime": "Lime",
+            "Sweet Potato": "Sweet Potato",
+            "Manioc": "Manioc",
+            "Brinjals": "Brinjal",
+            "Potato (Imported)": "Potatoes - Import",
+            "Potato (Welimada)": "Potatoes - Walimada",
+            "Potato (Nuwaraeliya)": "Potatoes - Nuwaraeliya",
+            "Big Onion Imported": "Big Onion Import",
+            "Big Onion Local": "Big Onion Lanka",
+        }
+        for harti_label, db_name in expected.items():
+            assert _HARTI_TO_DB_NAME.get(harti_label) == db_name, (
+                "%s should map to %s, got %s"
+                % (harti_label, db_name, _HARTI_TO_DB_NAME.get(harti_label))
+            )
+
+    def test_unmappable_labels_excluded_from_target_crops(self):
+        """Pumpkin/Carrot/Cabbage/Beetroot are deliberately NOT in
+        _TARGET_CROPS (DB has no plain/unqualified crop for any of them --
+        every DB match would require guessing a variety). The bulletin's
+        own 'Eggplant' row (HARTI's post-2023-02 relabelling of 'Dambala
+        (Wing Beans)') must also stay excluded, to avoid a false alias
+        merge with DB's distinct 'Eggplant' crop."""
+        from agriforecast_ml.harti.parser import _TARGET_CROPS
+        for unmappable in (
+            "Pumpkin", "Carrot", "Cabbage (N'Eliya)", "Cabbage (Kandy)",
+            "Beet root", "Beet Root(N'Eliya)", "Beet root (N Eliya)",
+            "Eggplant",
+        ):
+            assert unmappable not in _TARGET_CROPS, (
+                "%r must NOT be in _TARGET_CROPS (unmappable / false-merge risk)"
+                % unmappable
+            )
+
     def test_zero_data_crops_not_in_parser_targets(self):
         from agriforecast_ml.harti.parser import _TARGET_CROPS
         for zero_crop in ZERO_DATA_CROPS:
@@ -392,10 +440,13 @@ class TestNameAliasMapping:
         ]
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             result = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert result["inserted"] == 0, (
             "Zero-data crop labels should produce zero inserts, got %d" % result["inserted"]
@@ -415,10 +466,13 @@ class TestNameAliasMapping:
         rows = [ParsedPrice("2019-01-01", "Luffa", "70-80", 70.0, 80.0)]
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             result = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert result["inserted"] == 1, (
             "Luffa should resolve to Ridge Gourd and be inserted. Got: %s" % result
@@ -477,27 +531,39 @@ class TestParserOnCachedPDF:
         return [r for r in self._parse() if r.market_name == "Dambulla"]
 
     def test_six_crops_returned(self):
-        """parse_pdf() now emits rows for every locatable target market with
-        actual price data (Dambulla + Pettah + Thambuttegama for this PDF).
-        Narahenpita's header is not present in 2019-format bulletins and is
-        WARN-skipped. Keppetipola's header IS present in this PDF (9-column
-        format, "a Kappetipola" cell-split spelling) and its column IS
-        located, but every crop's Keppetipola cell is '-' (market closed /
-        no data that day) so it legitimately emits zero rows -- a located
-        column with no data is a different, expected case from a
-        not-located column (see test_keppetipola_column_located_but_empty_
-        this_pdf below) -- 6 crops x 3 markets-with-data."""
+        """R2 Step 6.1 widen (20 target crops -- 21 approved minus Pumpkin,
+        which is unmappable and excluded; 10 target markets) -- updated
+        expectations for the 2019-01-01 cached PDF (9-column format).
+
+        parse_pdf() now emits rows for every locatable target market with
+        actual price data: Dambulla, Pettah, Thambuttegama, Meegoda,
+        Norochchole, and Nuwara Eliya (77 rows total; per-market counts
+        vary because not every one of the 20 target crops trades at every
+        market that day). Narahenpita/Bandarawela/Veyangoda headers are not
+        present in this 9-column-format PDF and are WARN-skipped (fixture
+        predates their introduction into the bulletin -- Bandarawela from
+        2021-12-02, Veyangoda from 2022-02-22, both after 2019-01-01).
+        Kandy and Keppetipola headers ARE present and located (9-column
+        format includes both), but every crop's cell in both columns is
+        '-' (market closed / no data that day) so both legitimately emit
+        zero rows -- a located column with no data is a different,
+        expected case from a not-located column (see
+        test_keppetipola_column_located_but_empty_this_pdf below)."""
         rows = self._parse()
         labels = [r.harti_label for r in rows]
-        assert len(rows) == 18, (
-            "Expected 18 rows (6 crops x 3 markets with data) from 2019-01-01 "
-            "PDF, got %d: %s" % (len(rows), labels)
+        assert len(rows) == 77, (
+            "Expected 77 rows (6 markets-with-data x their respective "
+            "per-crop coverage) from 2019-01-01 PDF, got %d: %s" % (len(rows), labels)
         )
         markets = {r.market_name for r in rows}
-        assert markets == {"Dambulla", "Pettah", "Thambuttegama"}, (
-            "Expected Dambulla+Pettah+Thambuttegama markets (Narahenpita header "
-            "absent in this PDF format; Keppetipola column located but empty "
-            "for every crop that day), got %s" % markets
+        assert markets == {
+            "Dambulla", "Pettah", "Thambuttegama", "Meegoda", "Norochchole",
+            "Nuwara Eliya",
+        }, (
+            "Expected these 6 markets-with-data (Narahenpita/Bandarawela/"
+            "Veyangoda header absent in this PDF format/era; Kandy/"
+            "Keppetipola columns located but empty for every crop that "
+            "day), got %s" % markets
         )
 
     def test_keppetipola_column_located_but_empty_this_pdf(self):
@@ -524,19 +590,61 @@ class TestParserOnCachedPDF:
             "specific PDF -- must emit zero rows for it, not fabricate data"
         )
 
+    def test_kandy_column_located_but_empty_this_pdf(self):
+        """R2 Step 6.1 regression: Kandy's header IS present and located in
+        this PDF (9-column format, column 2) but every crop cell in that
+        column is '-' -- same located-but-empty distinction as Keppetipola
+        above, now exercised for a newly-widened market."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            import pdfplumber
+            from agriforecast_ml.harti.parser import _find_english_veg_page, _locate_market_column
+            with pdfplumber.open(str(SAMPLE_PDF)) as pdf:
+                _, table = _find_english_veg_page(pdf)
+        col = _locate_market_column(table, "Kandy")
+        assert col is not None, "Kandy header should be located (9-column format)"
+        assert col == 2
+
+        rows = self._parse()
+        assert "Kandy" not in {r.market_name for r in rows}, (
+            "Kandy column is located but has no price data in this "
+            "specific PDF -- must emit zero rows for it, not fabricate data"
+        )
+
     def test_dambulla_six_crops_returned(self):
-        """R1 regression: the Dambulla-only slice must still be exactly 6
-        rows, matching pre-multi-market behaviour bit-for-bit."""
+        """R2 Step 6.1 widen: the Dambulla-only slice now reflects 18 of the
+        20 mappable target crops trading at Dambulla on 2019-01-01 (Pumpkin
+        excluded as unmappable; Drumstick and the unmapped Cabbage(N'Eliya)/
+        Carrot/Beetroot rows show '-' this specific day or never reach
+        _TARGET_CROPS at all, matching the pre-existing zero-price/'-'
+        handling)."""
         rows = self._dambulla_rows()
         labels = [r.harti_label for r in rows]
-        assert len(rows) == 6, (
-            "Expected 6 Dambulla crop rows from 2019-01-01 PDF, got %d: %s" % (len(rows), labels)
+        assert len(rows) == 18, (
+            "Expected 18 Dambulla crop rows from 2019-01-01 PDF, got %d: %s" % (len(rows), labels)
         )
 
     def test_all_six_harti_labels_present(self):
+        """R2 Step 6.1: renamed in spirit (the original 6 are still all
+        present, a subset check below), but the Dambulla slice now also
+        carries the 12 newly-widened crops with real data on this date
+        (Drumstick and Pumpkin -- excluded as unmappable -- plus the
+        unmapped Cabbage/Carrot/Beetroot rows are the only target-adjacent
+        labels absent -- Drumstick is '-' this specific day; Cabbage/
+        Carrot/Beetroot never reach _TARGET_CROPS at all)."""
         rows = self._dambulla_rows()
         returned = {r.harti_label for r in rows}
-        expected = {"Beans", "Ladies Fingers", "Capsicum", "Bitter Gourd", "Luffa", "Snake Gourd"}
+        original_six = {"Beans", "Ladies Fingers", "Capsicum", "Bitter Gourd", "Luffa", "Snake Gourd"}
+        assert original_six <= returned, (
+            "Original 6 HARTI labels must still all be present, got %s" % returned
+        )
+        expected = {
+            "Beans", "Ladies Fingers", "Capsicum", "Bitter Gourd", "Luffa",
+            "Snake Gourd", "Green Chillies", "Tomato", "Leeks", "Knolkhol",
+            "Raddish", "Brinjals", "Cucumber", "Long Beans",
+            "Ash Plantains", "Lime", "Sweet Potato", "Manioc",
+        }
         assert returned == expected, (
             "Expected labels %s, got %s" % (expected, returned)
         )
@@ -626,6 +734,98 @@ class TestParserOnCachedPDF:
 
 
 # ===========================================================================
+# 4b. DAMBULLA MARKET ID RESOLUTION (R2 Step 3 -- EconomicCenterId fix)
+# ===========================================================================
+
+class TestDambullaMarketIdResolution:
+    """_dambulla_market_id() must resolve Markets.Id BY CODE (never a
+    hardcoded GUID), cache once per upsert call, and fail loudly (not NULL)
+    if the Dambulla market row is missing."""
+
+    def _engine_returning(self, fetchone_result):
+        """Build a MagicMock engine whose `with engine.connect() as conn:
+        conn.execute(...).fetchone()` chain returns `fetchone_result`."""
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.connect.return_value.__enter__.return_value = conn
+        conn.execute.return_value.fetchone.return_value = fetchone_result
+        return engine, conn
+
+    def test_resolves_id_by_market_code(self):
+        from agriforecast_ml.harti import loader
+
+        expected_id = uuid.UUID("11111111-2222-3333-4444-555555555555")
+        engine, conn = self._engine_returning((str(expected_id),))
+
+        result = loader._dambulla_market_id(engine)
+
+        assert result == expected_id
+
+    def test_queries_by_market_code_not_a_hardcoded_guid(self):
+        """The SQL text must filter on MarketCode, and the bound param must be
+        the documented Dambulla code -- never a literal GUID baked into the
+        query."""
+        from agriforecast_ml.harti import loader
+
+        expected_id = uuid.UUID("11111111-2222-3333-4444-555555555555")
+        engine, conn = self._engine_returning((str(expected_id),))
+
+        loader._dambulla_market_id(engine)
+
+        assert conn.execute.call_count == 1
+        (sql_clause, params), _kwargs = conn.execute.call_args
+        assert "MarketCode" in str(sql_clause)
+        assert params == {"code": loader._DAMBULLA_MARKET_CODE}
+        assert loader._DAMBULLA_MARKET_CODE == "MKT00000001"
+
+    def test_raises_loudly_when_dambulla_market_row_missing(self):
+        """No silent NULL / guessed GUID -- a missing Dambulla row must
+        raise, not degrade quietly."""
+        from agriforecast_ml.harti import loader
+
+        engine, conn = self._engine_returning(None)
+
+        with pytest.raises(RuntimeError, match="Dambulla market row not found"):
+            loader._dambulla_market_id(engine)
+
+    def test_cached_once_per_upsert_call_not_per_row(self):
+        """upsert_harti_prices must resolve the Dambulla market id exactly
+        once per call, mirroring _build_crop_map's cache-per-run contract --
+        not re-queried per row."""
+        from agriforecast_ml.harti.parser import ParsedPrice
+        from agriforecast_ml.harti import loader
+
+        call_count = {"n": 0}
+        dambulla_id = uuid.UUID("11111111-2222-3333-4444-555555555555")
+
+        def _counting_dambulla_market_id(_engine):
+            call_count["n"] += 1
+            return dambulla_id
+
+        fake_map = _make_fake_crop_map()
+        rows = [
+            ParsedPrice("2019-01-01", "Beans", "100-120", 100.0, 120.0),
+            ParsedPrice("2019-01-02", "Luffa", "70-80", 70.0, 80.0),
+            ParsedPrice("2019-01-03", "Capsicum", "200-250", 200.0, 250.0),
+        ]
+        original_crop_map = loader._build_crop_map
+        original_market_id = loader._dambulla_market_id
+        loader._build_crop_map = lambda _: fake_map
+        loader._dambulla_market_id = _counting_dambulla_market_id
+        try:
+            result = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
+        finally:
+            loader._build_crop_map = original_crop_map
+            loader._dambulla_market_id = original_market_id
+
+        assert call_count["n"] == 1, (
+            "_dambulla_market_id must be called exactly once per upsert call, "
+            "got %d calls" % call_count["n"]
+        )
+        assert result["inserted"] == 3
+
+
+# ===========================================================================
 # 5. IDEMPOTENCY
 # ===========================================================================
 
@@ -647,11 +847,14 @@ class TestIdempotency:
         fake_map = _make_fake_crop_map()
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             r1 = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
             r2 = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert r1["inserted"] == r2["inserted"]
         assert r1["skipped_splice"] == r2["skipped_splice"]
@@ -668,11 +871,14 @@ class TestIdempotency:
         fake_map = _make_fake_crop_map()
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             r1 = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
             r2 = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert r1["skipped_splice"] == r2["skipped_splice"]
         assert r1["inserted"] == r2["inserted"]
@@ -686,10 +892,13 @@ class TestIdempotency:
         fake_map = _make_fake_crop_map()
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             result = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert result["skipped_splice"] == 1, (
             "Capsicum at 2025-05-10 must be splice-skipped, got: %s" % result
@@ -705,10 +914,13 @@ class TestIdempotency:
         fake_map = _make_fake_crop_map()
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             result = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert result["skipped_splice"] == 0, (
             "Beans at 2025-05-10 must NOT be splice-skipped (exception window)"
@@ -727,10 +939,13 @@ class TestIdempotency:
         fake_map = _make_fake_crop_map()
         original = loader._build_crop_map
         loader._build_crop_map = lambda _: fake_map
+        original_market_id = loader._dambulla_market_id
+        loader._dambulla_market_id = lambda _: uuid.UUID("aaaaaaaa-0000-0000-0000-000000000099")
         try:
             result = loader.upsert_harti_prices(rows, engine=MagicMock(), dry_run=True)
         finally:
             loader._build_crop_map = original
+            loader._dambulla_market_id = original_market_id
 
         assert result["skipped_invalid_price"] == 2, (
             "Both zero-price rows must be rejected, got: %s" % result

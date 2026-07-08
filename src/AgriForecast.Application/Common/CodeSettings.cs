@@ -1,3 +1,4 @@
+using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Interfaces;
 
 namespace AgriForecast.Application.common;
@@ -11,27 +12,44 @@ public class CodeSettings: Result<string>
         _defaultSettingRepository = defaultSettingRepository;
     }
 
-    public async Task<string?> GetCropCode()
+    // R2 D-DF4: crops are coded per TOP-LEVEL category prefix (VEG######/FRT######), assign-once.
+    // The caller resolves the prefix from the crop's CropCategoryId via CropCategory.PrefixForCategory
+    // (Up/Low-country Vegetable roll up to VEG). Unknown prefixes default to the VEG counter.
+    public async Task<string?> GetCropCode(string prefix)
     {
         var defaultSetting = await _defaultSettingRepository.GetDefaultSetting();
-        var cropCode = defaultSetting.Crop_Prefix 
-                       + defaultSetting.Crop_Code.ToString()?.PadLeft((int)defaultSetting.Crop_Padding!, '0');
+
+        var isFruit = string.Equals(prefix, CropCategory.FruitPrefix, StringComparison.OrdinalIgnoreCase);
+
+        var codePrefix = isFruit ? defaultSetting.Frt_Prefix : defaultSetting.Veg_Prefix;
+        var counter = isFruit ? defaultSetting.Frt_Code : defaultSetting.Veg_Code;
+        var padding = isFruit ? defaultSetting.Frt_Padding : defaultSetting.Veg_Padding;
+
+        var cropCode = codePrefix + counter.ToString()?.PadLeft((int)padding!, '0');
         if (string.IsNullOrEmpty(cropCode))
             return null;
-        defaultSetting.Crop_Code += 1;
+
+        if (isFruit)
+            defaultSetting.Frt_Code += 1;
+        else
+            defaultSetting.Veg_Code += 1;
+
         _defaultSettingRepository.UpdateDefaultSetting(defaultSetting);
         return cropCode;
     }
 
-    public async Task<string?> GetEcoCode()
+    // R2 D-DF3: GetEcoCode() was removed with the EconomicCenters CRUD retirement. Economic-centre
+    // registration is now "create a Market with IsEconomicCenter=true", coded via GetMktCode().
+    public async Task<string?> GetMktCode()
     {
         var defaultSetting = await _defaultSettingRepository.GetDefaultSetting();
-        var ecoCode = defaultSetting.Eco_Prefix + defaultSetting.Eco_Code.ToString()?.PadLeft((int)defaultSetting.Eco_Padding!, '0');
-        if (string.IsNullOrEmpty(ecoCode))
+        var mktCode = defaultSetting.Mkt_Prefix
+                      + defaultSetting.Mkt_Code.ToString()?.PadLeft((int)defaultSetting.Mkt_Padding!, '0');
+        if (string.IsNullOrEmpty(mktCode))
             return null;
-        defaultSetting.Eco_Code += 1;
+        defaultSetting.Mkt_Code += 1;
         _defaultSettingRepository.UpdateDefaultSetting(defaultSetting);
-        return ecoCode;
+        return mktCode;
     }
-    
+
 }

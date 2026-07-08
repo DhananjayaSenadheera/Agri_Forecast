@@ -378,6 +378,26 @@ public class MarketDomainTests
         act.Should().Throw<ArgumentException>().And.ParamName.Should().Be("name");
     }
 
+    [Fact]
+    public void Market_CreateNew_IsEconomicCenterDefaultsFalse()
+    {
+        // R2 D-DF3: a plain market is NOT an economic centre. The flag must default false so
+        // ingestion-provisioned and CRUD-created markets stay plain unless explicitly promoted.
+        var market = Market.CreateNew("Dambulla DEC", "Matale", MarketType.DEC);
+
+        market.IsEconomicCenter.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Market_CreateNew_HonorsIsEconomicCenter_WhenTrue()
+    {
+        // A Dedicated Economic Centre registered through the factory carries the flag set —
+        // this is how "register a new economic centre" becomes a Markets row post-merge.
+        var market = Market.CreateNew("New DEC", "Kandy", MarketType.DEC, isEconomicCenter: true);
+
+        market.IsEconomicCenter.Should().BeTrue();
+    }
+
     // ──────────────────────────────────────────────────────────────────────────────
     // Market.AssignCode
     // ──────────────────────────────────────────────────────────────────────────────
@@ -469,6 +489,22 @@ public class MarketDomainTests
         var after = DateTime.UtcNow;
 
         existing.UpdatedAt.Should().BeOnOrAfter(before).And.BeOnOrBefore(after);
+    }
+
+    [Fact]
+    public void Market_ApplyUpdate_ThreadsIsEconomicCenter()
+    {
+        // The flag is settable through the update path too, so a market can be promoted to /
+        // demoted from an economic centre. Defaults false when the arg is omitted (existing
+        // 4-arg callers stay behaviourally unchanged).
+        var existing = ExistingMarket();
+        existing.IsEconomicCenter.Should().BeFalse();
+
+        existing.ApplyUpdate("Renamed", "NewDistrict", MarketType.DEC, true, isEconomicCenter: true);
+        existing.IsEconomicCenter.Should().BeTrue();
+
+        existing.ApplyUpdate("Renamed", "NewDistrict", MarketType.DEC, true);
+        existing.IsEconomicCenter.Should().BeFalse("the 4-arg overload leaves it at the default false");
     }
 
     [Fact]

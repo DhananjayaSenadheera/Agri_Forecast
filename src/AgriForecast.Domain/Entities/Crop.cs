@@ -10,17 +10,15 @@ public class Crop
     public int? ExternalProductId { get; set; }
     public string? Source { get; set; }
 
-    // --- Agronomic metadata (drives harvest-time price forecasting) ---
+    // --- Agronomic metadata ---
+    // Agronomy (GrowthPeriodDays, PlantingSeason, HarvestWindowDays) moved to
+    // CropAgronomyProfiles (1:1) in R2 Step 2.1 and dropped from Crops in Step 2.4.
+    // CropAgronomyProfiles is the sole owner; never add agronomy fields back here.
 
-    // Days from planting to first harvest. The keystone field: it maps a farmer's
-    // planting date to the harvest date whose price we forecast. Null until curated.
-    public int? GrowthPeriodDays { get; set; }
-
-    // Typical Sri Lankan cultivation season: "Yala", "Maha", or "Year-round".
-    public string? PlantingSeason { get; set; }
-
-    // How many days the crop keeps yielding once it matures (harvest spread).
-    public int? HarvestWindowDays { get; set; }
+    // Groups this crop under a CropCategory (Vegetable / Fruit + sub-categories).
+    // Nullable: the 96 existing crops are backfilled by a later subtask, not here, so
+    // existing rows stay valid. Becomes required after that name-keyed backfill.
+    public Guid? CropCategoryId { get; set; }
 
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
@@ -29,7 +27,7 @@ public class Crop
     // Encapsulates the private-set Id and the created/updated timestamps that the
     // old CreateMap<Crop_CreateDto, Crop> profile populated. CropCode is assigned
     // by the create handler after construction (matches prior behaviour).
-    public static Crop CreateForManualEntry(string name, int? externalProductId, string? source)
+    public static Crop CreateForManualEntry(string name, int? externalProductId, string? source, Guid cropCategoryId)
     {
         return new Crop
         {
@@ -37,6 +35,7 @@ public class Crop
             Name = name,
             ExternalProductId = externalProductId,
             Source = source,
+            CropCategoryId = cropCategoryId,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };

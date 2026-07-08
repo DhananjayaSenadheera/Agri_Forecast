@@ -81,6 +81,9 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
 
+                    b.Property<Guid?>("CropCategoryId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<string>("CropCode")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
@@ -88,19 +91,9 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.Property<int?>("ExternalProductId")
                         .HasColumnType("int");
 
-                    b.Property<int?>("GrowthPeriodDays")
-                        .HasColumnType("int");
-
-                    b.Property<int?>("HarvestWindowDays")
-                        .HasColumnType("int");
-
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("PlantingSeason")
-                        .HasMaxLength(20)
-                        .HasColumnType("nvarchar(20)");
 
                     b.Property<string>("Source")
                         .HasColumnType("nvarchar(max)");
@@ -110,7 +103,127 @@ namespace AgriForecast.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("CropCategoryId");
+
                     b.ToTable("Crops");
+                });
+
+            modelBuilder.Entity("AgriForecast.Domain.Entities.CropAgronomyProfile", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("CropId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("DataSource")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<int?>("GrowthPeriodDays")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("HarvestWindowDays")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("IsPerennial")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("IsVerified")
+                        .HasColumnType("bit");
+
+                    b.Property<byte?>("MahaPlantingEndMonth")
+                        .HasColumnType("tinyint");
+
+                    b.Property<byte?>("MahaPlantingStartMonth")
+                        .HasColumnType("tinyint");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("VerifiedOn")
+                        .HasColumnType("date");
+
+                    b.Property<byte?>("YalaPlantingEndMonth")
+                        .HasColumnType("tinyint");
+
+                    b.Property<byte?>("YalaPlantingStartMonth")
+                        .HasColumnType("tinyint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CropId")
+                        .IsUnique();
+
+                    b.ToTable("CropAgronomyProfiles", (string)null);
+                });
+
+            modelBuilder.Entity("AgriForecast.Domain.Entities.CropCategory", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<Guid?>("ParentId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Code")
+                        .IsUnique();
+
+                    b.HasIndex("ParentId");
+
+                    b.ToTable("CropCategories", (string)null);
+
+                    b.HasData(
+                        new
+                        {
+                            Id = new Guid("d4c40001-0000-0000-0000-000000000001"),
+                            Code = "VEG",
+                            CreatedAt = new DateTime(2026, 7, 5, 0, 0, 0, 0, DateTimeKind.Utc),
+                            Name = "Vegetable"
+                        },
+                        new
+                        {
+                            Id = new Guid("d4c40001-0000-0000-0000-000000000002"),
+                            Code = "FRT",
+                            CreatedAt = new DateTime(2026, 7, 5, 0, 0, 0, 0, DateTimeKind.Utc),
+                            Name = "Fruit"
+                        },
+                        new
+                        {
+                            Id = new Guid("d4c40001-0000-0000-0000-000000000003"),
+                            Code = "VEG-UP",
+                            CreatedAt = new DateTime(2026, 7, 5, 0, 0, 0, 0, DateTimeKind.Utc),
+                            Name = "Up-country Vegetable",
+                            ParentId = new Guid("d4c40001-0000-0000-0000-000000000001")
+                        },
+                        new
+                        {
+                            Id = new Guid("d4c40001-0000-0000-0000-000000000004"),
+                            Code = "VEG-LOW",
+                            CreatedAt = new DateTime(2026, 7, 5, 0, 0, 0, 0, DateTimeKind.Utc),
+                            Name = "Low-country Vegetable",
+                            ParentId = new Guid("d4c40001-0000-0000-0000-000000000001")
+                        });
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.CropPrice", b =>
@@ -150,26 +263,16 @@ namespace AgriForecast.Infrastructure.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
-                    b.Property<int?>("Crop_Code")
+                    b.Property<int?>("Frt_Code")
                         .HasColumnType("int");
 
-                    b.Property<int?>("Crop_Padding")
+                    b.Property<int?>("Frt_Padding")
                         .HasColumnType("int");
 
-                    b.Property<string>("Crop_Prefix")
+                    b.Property<string>("Frt_Prefix")
                         .IsRequired()
                         .HasMaxLength(10)
                         .HasColumnType("nvarchar(10)");
-
-                    b.Property<int?>("Eco_Code")
-                        .HasColumnType("int");
-
-                    b.Property<int?>("Eco_Padding")
-                        .HasColumnType("int");
-
-                    b.Property<string>("Eco_Prefix")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
 
                     b.Property<int?>("Mkt_Code")
                         .HasColumnType("int");
@@ -181,6 +284,17 @@ namespace AgriForecast.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<int?>("Veg_Code")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("Veg_Padding")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Veg_Prefix")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("nvarchar(10)");
+
                     b.HasKey("Id");
 
                     b.ToTable("DefaultSettings");
@@ -189,15 +303,15 @@ namespace AgriForecast.Infrastructure.Migrations
                         new
                         {
                             Id = 1,
-                            Crop_Code = 1,
-                            Crop_Padding = 8,
-                            Crop_Prefix = "CROP",
-                            Eco_Code = 1,
-                            Eco_Padding = 8,
-                            Eco_Prefix = "ECO",
-                            Mkt_Code = 7,
+                            Frt_Code = 27,
+                            Frt_Padding = 6,
+                            Frt_Prefix = "FRT",
+                            Mkt_Code = 13,
                             Mkt_Padding = 8,
-                            Mkt_Prefix = "MKT"
+                            Mkt_Prefix = "MKT",
+                            Veg_Code = 71,
+                            Veg_Padding = 6,
+                            Veg_Prefix = "VEG"
                         });
                 });
 
@@ -1035,6 +1149,11 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.Property<bool>("IsActive")
                         .HasColumnType("bit");
 
+                    b.Property<bool>("IsEconomicCenter")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
+
                     b.Property<string>("MarketCode")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -1123,6 +1242,72 @@ namespace AgriForecast.Infrastructure.Migrations
                             MarketType = 3,
                             Name = "CBSL national average (pseudo-market)",
                             UpdatedAt = new DateTime(2026, 7, 2, 0, 0, 0, 0, DateTimeKind.Utc)
+                        },
+                        new
+                        {
+                            Id = new Guid("b2a20001-0000-0000-0000-000000000007"),
+                            CreatedAt = new DateTime(2026, 7, 7, 0, 0, 0, 0, DateTimeKind.Utc),
+                            District = "Kandy",
+                            IsActive = true,
+                            MarketCode = "MKT00000007",
+                            MarketType = 0,
+                            Name = "Kandy (HARTI wholesale)",
+                            UpdatedAt = new DateTime(2026, 7, 7, 0, 0, 0, 0, DateTimeKind.Utc)
+                        },
+                        new
+                        {
+                            Id = new Guid("b2a20001-0000-0000-0000-000000000008"),
+                            CreatedAt = new DateTime(2026, 7, 7, 0, 0, 0, 0, DateTimeKind.Utc),
+                            District = "Colombo",
+                            IsActive = true,
+                            MarketCode = "MKT00000008",
+                            MarketType = 2,
+                            Name = "Meegoda Dedicated Economic Centre",
+                            UpdatedAt = new DateTime(2026, 7, 7, 0, 0, 0, 0, DateTimeKind.Utc)
+                        },
+                        new
+                        {
+                            Id = new Guid("b2a20001-0000-0000-0000-000000000009"),
+                            CreatedAt = new DateTime(2026, 7, 7, 0, 0, 0, 0, DateTimeKind.Utc),
+                            District = "Puttalam",
+                            IsActive = true,
+                            MarketCode = "MKT00000009",
+                            MarketType = 0,
+                            Name = "Norochchole (HARTI wholesale)",
+                            UpdatedAt = new DateTime(2026, 7, 7, 0, 0, 0, 0, DateTimeKind.Utc)
+                        },
+                        new
+                        {
+                            Id = new Guid("b2a20001-0000-0000-0000-000000000010"),
+                            CreatedAt = new DateTime(2026, 7, 7, 0, 0, 0, 0, DateTimeKind.Utc),
+                            District = "Nuwara Eliya",
+                            IsActive = true,
+                            MarketCode = "MKT00000010",
+                            MarketType = 2,
+                            Name = "Nuwara Eliya Dedicated Economic Centre",
+                            UpdatedAt = new DateTime(2026, 7, 7, 0, 0, 0, 0, DateTimeKind.Utc)
+                        },
+                        new
+                        {
+                            Id = new Guid("b2a20001-0000-0000-0000-000000000011"),
+                            CreatedAt = new DateTime(2026, 7, 7, 0, 0, 0, 0, DateTimeKind.Utc),
+                            District = "Badulla",
+                            IsActive = true,
+                            MarketCode = "MKT00000011",
+                            MarketType = 0,
+                            Name = "Bandarawela (HARTI wholesale)",
+                            UpdatedAt = new DateTime(2026, 7, 7, 0, 0, 0, 0, DateTimeKind.Utc)
+                        },
+                        new
+                        {
+                            Id = new Guid("b2a20001-0000-0000-0000-000000000012"),
+                            CreatedAt = new DateTime(2026, 7, 7, 0, 0, 0, 0, DateTimeKind.Utc),
+                            District = "Gampaha",
+                            IsActive = true,
+                            MarketCode = "MKT00000012",
+                            MarketType = 2,
+                            Name = "Veyangoda Dedicated Economic Centre",
+                            UpdatedAt = new DateTime(2026, 7, 7, 0, 0, 0, 0, DateTimeKind.Utc)
                         });
                 });
 
@@ -1164,6 +1349,8 @@ namespace AgriForecast.Infrastructure.Migrations
                         .HasColumnType("nvarchar(450)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("EconomicCenterId");
 
                     b.HasIndex("Source", "ExternalProductId", "PriceDate")
                         .IsUnique();
@@ -1449,6 +1636,31 @@ namespace AgriForecast.Infrastructure.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("AgriForecast.Domain.Entities.Crop", b =>
+                {
+                    b.HasOne("AgriForecast.Domain.Entities.CropCategory", null)
+                        .WithMany()
+                        .HasForeignKey("CropCategoryId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("AgriForecast.Domain.Entities.CropAgronomyProfile", b =>
+                {
+                    b.HasOne("AgriForecast.Domain.Entities.Crop", null)
+                        .WithMany()
+                        .HasForeignKey("CropId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("AgriForecast.Domain.Entities.CropCategory", b =>
+                {
+                    b.HasOne("AgriForecast.Domain.Entities.CropCategory", null)
+                        .WithMany()
+                        .HasForeignKey("ParentId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
             modelBuilder.Entity("AgriForecast.Domain.Entities.CropPrice", b =>
                 {
                     b.HasOne("AgriForecast.Domain.Entities.Crop", "Crop")
@@ -1457,10 +1669,10 @@ namespace AgriForecast.Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.HasOne("AgriForecast.Domain.Entities.EconomicCenter", "EconomicCenter")
+                    b.HasOne("AgriForecast.Domain.Entities.Market", "EconomicCenter")
                         .WithMany()
                         .HasForeignKey("EconomicCenterId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Crop");
@@ -1473,6 +1685,14 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.HasOne("AgriForecast.Domain.Entities.Market", null)
                         .WithMany()
                         .HasForeignKey("MarketId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("AgriForecast.Domain.Entities.MarketPrice", b =>
+                {
+                    b.HasOne("AgriForecast.Domain.Entities.Market", null)
+                        .WithMany()
+                        .HasForeignKey("EconomicCenterId")
                         .OnDelete(DeleteBehavior.Restrict);
                 });
 

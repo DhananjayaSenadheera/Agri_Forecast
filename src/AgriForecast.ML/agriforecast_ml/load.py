@@ -1,6 +1,8 @@
 """Load raw inputs from SQL Server into pandas DataFrames."""
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 
 from .db import get_engine
@@ -25,6 +27,52 @@ _CANON_DT = "datetime64[ns]"
 def _as_canon_dt(s: pd.Series) -> pd.Series:
     """Parse to datetime and pin the resolution to _CANON_DT (leakage-inert)."""
     return pd.to_datetime(s).astype(_CANON_DT)
+
+
+def _is_verified(is_verified) -> bool:
+    """True iff the agronomy profile is owner-VERIFIED (IsVerified == 1/True).
+
+    NA-safe and dtype-tolerant: a missing profile (LEFT JOIN NULL), a Python
+    False, a numpy bool, or a 0/1 int all collapse to the right answer without
+    ever raising on ``pd.NA``. Anything that is not truthy-True => not verified.
+    """
+    if is_verified is None or is_verified is pd.NA:
+        return False
+    try:
+        if pd.isna(is_verified):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return bool(is_verified) is True
+
+
+def resolve_forecast_gp(is_verified, growth_period_days) -> int | None:
+    """R2 Step 5.3 exclusion predicate (IsVerified-STRICT) — single source of
+    truth for "does this crop get an ML harvest horizon at all?".
+
+    A crop is forecastable ONLY IF its ``CropAgronomyProfiles`` row is
+    owner-verified (``IsVerified == 1``) AND still carries a usable
+    ``GrowthPeriodDays``. Returns the integer growth period when forecastable,
+    else ``None`` (the caller then degrades to the crop-mean fallback with NO
+    harvest horizon — no label at train time, no served horizon at serve time).
+
+    This is the POST-flip rule. Before Step 5.3 an unverified profile with a
+    legacy GrowthPeriodDays was honored (gp-only predicate); it is now EXCLUDED
+    exactly like a NULL-GrowthPeriodDays crop. Both the feature-build exclusion
+    path (features.build_crop_features) and the serving fallback resolver
+    (serving/predict._crop_meta) route through here so train/serve cannot skew.
+    """
+    if not _is_verified(is_verified):
+        return None
+    if growth_period_days is None or pd.isna(growth_period_days):
+        return None
+    gp = int(growth_period_days)
+    # A non-positive growth period is not a usable horizon: price.shift(-gp)
+    # with gp<=0 yields a degenerate same-/future-day label, so treat it as
+    # unforecastable (defense-in-depth for bad/zero data — no gp<=0 rows today).
+    if gp <= 0:
+        return None
+    return gp
 
 
 def load_prices() -> pd.DataFrame:
@@ -70,15 +118,257 @@ def load_prices() -> pd.DataFrame:
     return df
 
 
+# Empty-frame schema for load_price_observations so a missing/empty
+# PriceObservations table (or an unreachable Markets set) degrades to all-NaN
+# spread features rather than failing the build (mirrors the policy/macro
+# empty-frame degrade contract).
+_PRICE_OBS_COLS = ["MarketSlug", "CropId", "ObservedDate", "AvgPrice"]
+
+
+def _market_slug(name: str) -> str:
+    """Stable, human-readable column token for a market Name.
+
+    'Dambulla Dedicated Economic Centre' -> 'Dambulla';
+    'Pettah (HARTI wholesale)' -> 'Pettah'. We take the first word of the Name
+    (all 5 feature-safe markets have a distinct leading word), stripped of
+    non-alphanumerics, so the emitted feature-column names are farmer-legible
+    ('MktDambullaAvgPrice') and stable across DB row-order changes.
+    """
+    first = (name or "").strip().split()[0] if (name or "").strip() else ""
+    return re.sub(r"[^0-9A-Za-z]", "", first)
+
+
+def load_price_observations() -> pd.DataFrame:
+    """Per-(market, crop, date) confirmed prices from PriceObservations, restricted
+    to the FEATURE-SAFE market set, for the cross-market spread features (P4).
+
+    This is the ONLY source for the cross-market legs (owner decision D5,
+    2026-07-04): PriceObservations exclusively, NEVER mixed per-row with
+    MarketPrices (measured 12.6% exact-match disagreement between the two
+    tables). load_prices()/labels are untouched -- the harvest-price label still
+    reads MarketPrices; this loader only feeds the point-in-time spread context.
+
+    Filters (leakage-/quality-safe):
+      - MarketId IN get_feature_safe_market_ids() -- excludes the CBSL
+        NationalAggregate pseudo-market (already an average -> double-count) and
+        the ECOMAP-% demo twins (canonical.py). "National" is later an UNWEIGHTED
+        mean over exactly these markets, never a raw AVG over PriceObservations.
+      - IsUnitConfirmed = 1 -- the fail-closed unit quarantine; unconfirmed rows
+        must never reach features.
+      - MaxPrice > 0 AND CropId IS NOT NULL -- mirrors load_prices()'s validity
+        gate; zero/NULL-price rows are absent signal, not a 0 observation.
+
+    Per-market AvgPrice = (MinPrice + MaxPrice) / 2 -- the SAME midpoint
+    convention load_prices() uses for MarketPrices (PriceObservations'
+    Wholesale/Retail columns are unpopulated here: all 0). Multiple rows for the
+    same (market, crop, date) are averaged so the series is one value per day.
+
+    Returns a LONG frame [MarketSlug, CropId(str), ObservedDate(ns), AvgPrice]
+    sorted by (MarketSlug, CropId, ObservedDate) -- ready for a per-market
+    backward merge_asof. Missing/empty source (or unreachable feature-safe set)
+    -> empty frame with the right columns (all-NaN spread features downstream).
+    """
+    from .canonical import get_feature_safe_market_ids
+
+    try:
+        engine = get_engine()
+        safe_ids = get_feature_safe_market_ids(engine)
+    except Exception:
+        return pd.DataFrame(columns=_PRICE_OBS_COLS)
+    if not safe_ids:
+        return pd.DataFrame(columns=_PRICE_OBS_COLS)
+
+    # Parameterise the market-id IN-list. Cast to str so the driver binds the
+    # GUIDs uniformly regardless of uuid/str dtype in the set.
+    id_list = [str(i) for i in safe_ids]
+    placeholders = ", ".join(f":m{i}" for i in range(len(id_list)))
+    params = {f"m{i}": v for i, v in enumerate(id_list)}
+    sql = f"""
+        SELECT m.Name AS MarketName, po.CropId, po.ObservedDate,
+               po.MinPrice, po.MaxPrice
+        FROM PriceObservations po
+        JOIN Markets m ON m.Id = po.MarketId
+        WHERE po.MarketId IN ({placeholders})
+          AND po.IsUnitConfirmed = 1
+          AND po.MaxPrice > 0
+          AND po.CropId IS NOT NULL
+    """
+    try:
+        import sqlalchemy as sa
+        df = pd.read_sql(sa.text(sql), engine, params=params)
+    except Exception:
+        return pd.DataFrame(columns=_PRICE_OBS_COLS)
+    if df.empty:
+        return pd.DataFrame(columns=_PRICE_OBS_COLS)
+
+    df["MarketSlug"] = df["MarketName"].map(_market_slug)
+    df["CropId"] = df["CropId"].astype(str)
+    df["ObservedDate"] = _as_canon_dt(df["ObservedDate"])
+    for col in ("MinPrice", "MaxPrice"):
+        df[col] = df[col].astype(float)
+    df["AvgPrice"] = (df["MinPrice"] + df["MaxPrice"]) / 2.0
+    # Collapse any duplicate (market, crop, date) rows to one daily value.
+    out = (df.groupby(["MarketSlug", "CropId", "ObservedDate"], as_index=False)
+             ["AvgPrice"].mean())
+    return out.sort_values(["MarketSlug", "CropId", "ObservedDate"]).reset_index(drop=True)
+
+
+def feature_safe_market_slugs() -> list[str]:
+    """The stable, sorted MarketSlug set for the feature-safe markets.
+
+    Drives which per-market spread columns _attach_market_spread emits (so a
+    market with zero PriceObservations today -- e.g. Narahenpita -- still gets an
+    explicit all-NaN column rather than a silently absent one). Sorted by
+    MarketCode so column ordering is deterministic across DB row order. Empty on
+    an unreachable DB (spread features then attach with no per-market columns).
+    """
+    try:
+        import sqlalchemy as sa
+        from .canonical import get_feature_safe_market_ids
+
+        engine = get_engine()
+        safe_ids = get_feature_safe_market_ids(engine)
+        if not safe_ids:
+            return []
+        id_list = [str(i) for i in safe_ids]
+        placeholders = ", ".join(f":m{i}" for i in range(len(id_list)))
+        params = {f"m{i}": v for i, v in enumerate(id_list)}
+        with engine.connect() as conn:
+            rows = conn.execute(sa.text(
+                f"SELECT Name, MarketCode FROM Markets "
+                f"WHERE Id IN ({placeholders}) ORDER BY MarketCode"
+            ), params).fetchall()
+    except Exception:
+        return []
+    slugs: list[str] = []
+    for name, _code in rows:
+        s = _market_slug(name)
+        if s and s not in slugs:
+            slugs.append(s)
+    return slugs
+
+
 def load_crops() -> pd.DataFrame:
+    """Crop identity + agronomy (growth period / harvest window / planting season).
+
+    R2 Step 2.3 CUT-OVER: agronomy now comes from ``CropAgronomyProfiles`` (the
+    source of truth per R2 Step 2.1), NOT the legacy ``Crops.GrowthPeriodDays /
+    PlantingSeason / HarvestWindowDays`` columns (those are dropped in 2.4 -- do
+    not read them again). ``Crops`` still owns crop IDENTITY (Id/CropCode/Name);
+    the profile is joined 1:1 for the three agronomy values.
+
+    LEFT JOIN so a crop that somehow lacks a profile row still appears with NULL
+    agronomy (it is then excluded from forecasting by the label/exclusion gate,
+    exactly like a NULL GrowthPeriodDays -- see build_features / features.py).
+
+    SEASON ENCODING (binding R2 convention): PlantingSeasonEnc is derived
+    downstream (features.py) from the profile month columns -- Yala populated => 1,
+    Maha populated => 2, all-NULL => Year-round/unknown. We emit the four month
+    columns + IsPerennial so features.py can derive it; ``PlantingSeason`` is a
+    RECONSTRUCTED legacy-compatible string kept ONLY so the encoder reproduces
+    today's exact per-crop values bit-for-bit (QA acceptance pin): the legacy
+    encoder mapped 'Year-round' -> 0 but NULL -> -1, and the 2.1 copy collapsed
+    both to all-NULL month columns, so the profile alone cannot separate them.
+    The one surviving discriminator is GrowthPeriodDays (the legacy 'Year-round'
+    crops are exactly the ones with a non-NULL growth period). Reconstruction:
+    all months NULL AND gp known => 'Year-round' (enc 0); all months NULL AND gp
+    NULL => None (enc -1, the legacy "unknown" state, and these crops are excluded
+    from training anyway). Once Step 5 populates real months, Yala/Maha win here
+    regardless of gp.
+
+    IsVerified is loaded and is now PART OF the exclusion predicate (R2 Step 5.3,
+    IsVerified-strict): a crop is forecastable ONLY IF its profile is
+    ``IsVerified == 1`` AND still carries a usable ``GrowthPeriodDays``. An
+    unverified profile — even one holding a legacy GrowthPeriodDays — is EXCLUDED
+    from ML forecasting exactly like a NULL-GrowthPeriodDays crop; the caller
+    degrades to the crop-mean fallback with no harvest horizon. This loader still
+    returns the RAW DB agronomy values (audit/visibility); the strict predicate
+    itself lives in ``resolve_forecast_gp`` and is applied by the feature-build
+    exclusion path (features.build_crop_features) and the serving fallback
+    resolver (serving/predict._crop_meta), the single shared gate for train/serve
+    skew safety.
+    """
     sql = """
-        SELECT Id AS CropId, CropCode, Name AS CropName,
-               GrowthPeriodDays, PlantingSeason, HarvestWindowDays
-        FROM Crops
+        SELECT c.Id AS CropId, c.CropCode, c.Name AS CropName,
+               p.GrowthPeriodDays, p.HarvestWindowDays,
+               p.YalaPlantingStartMonth, p.YalaPlantingEndMonth,
+               p.MahaPlantingStartMonth, p.MahaPlantingEndMonth,
+               p.IsPerennial, p.IsVerified
+        FROM Crops c
+        LEFT JOIN CropAgronomyProfiles p ON p.CropId = c.Id
     """
     df = pd.read_sql(sql, get_engine())
     df["CropId"] = df["CropId"].astype(str)
+    # Reconstruct the legacy-compatible PlantingSeason string so the downstream
+    # encoder stays bit-identical (see docstring). Month columns take precedence
+    # (future-proof for Step 5); today all months are NULL so this collapses to
+    # the gp-based Year-round/None split that matches legacy exactly.
+    yala_cols = ["YalaPlantingStartMonth", "YalaPlantingEndMonth"]
+    maha_cols = ["MahaPlantingStartMonth", "MahaPlantingEndMonth"]
+    has_yala = df[yala_cols].notna().any(axis=1)
+    has_maha = df[maha_cols].notna().any(axis=1)
+    season = pd.Series([None] * len(df), index=df.index, dtype=object)
+    # all-NULL months + a known growth period => legacy 'Year-round' (enc 0);
+    # all-NULL months + NULL gp => leave None (legacy NULL -> enc -1).
+    season = season.mask(df["GrowthPeriodDays"].notna() & ~has_yala & ~has_maha,
+                         "Year-round")
+    season = season.mask(has_maha, "Maha")   # Maha months populated (Step 5+)
+    season = season.mask(has_yala, "Yala")   # Yala wins if both somehow set
+    df["PlantingSeason"] = season
     return df
+
+
+_CROP_CATEGORY_COLS = ["crop_id", "category_id", "category_code",
+                       "category_name", "parent_code"]
+
+
+def load_crop_categories() -> pd.DataFrame:
+    """Crop taxonomy: one row per crop with its category (and parent category).
+
+    The DB ``CropCategories`` table is the SOURCE OF TRUTH for crop taxonomy
+    (R2 Step 1). Consumers must NOT hardcode category maps in Python -- read this
+    loader (or the DB table) instead. The retired 11-GUID / 4-family static maps
+    are dead; do not resurrect them.
+
+    Joins Crops -> CropCategories -> parent CropCategories (LEFT, so a top-level
+    category has ``parent_code = None``). ``Crops.CropCategoryId`` is FK-backfilled
+    for all live crops; a crop whose category is somehow unmapped is dropped by the
+    inner join (it has no taxonomy to serve).
+
+    Mirrors load_policy_flags()/load_fx(): same engine, try/except -> typed
+    empty-frame degrade so a missing/empty CropCategories table yields an empty
+    taxonomy frame rather than failing the caller. GUID columns are lowercased so
+    the .NET<->Python boundary never misses on case (uppercase-GUID fallback miss
+    was a real bug).
+
+    Returns [crop_id, category_id, category_code, category_name, parent_code]:
+    crop_id/category_id lowercase str GUIDs, parent_code None for top-level
+    categories.
+    """
+    sql = """
+        SELECT c.Id           AS crop_id,
+               cat.Id         AS category_id,
+               cat.Code       AS category_code,
+               cat.Name       AS category_name,
+               parent.Code    AS parent_code
+        FROM Crops c
+        JOIN CropCategories cat ON cat.Id = c.CropCategoryId
+        LEFT JOIN CropCategories parent ON parent.Id = cat.ParentId
+    """
+    try:
+        df = pd.read_sql(sql, get_engine())
+    except Exception:
+        return pd.DataFrame(columns=_CROP_CATEGORY_COLS)
+    if df.empty:
+        return pd.DataFrame(columns=_CROP_CATEGORY_COLS)
+    # Lowercase the GUID columns (the .NET boundary emits mixed case).
+    df["crop_id"] = df["crop_id"].astype(str).str.lower()
+    df["category_id"] = df["category_id"].astype(str).str.lower()
+    df["category_code"] = df["category_code"].astype(str)
+    df["category_name"] = df["category_name"].astype(str)
+    # parent_code is NULL for top-level categories -> keep it as None, not "None".
+    df["parent_code"] = df["parent_code"].where(df["parent_code"].notna(), None)
+    return df.reset_index(drop=True)
 
 
 def load_fx() -> pd.DataFrame:

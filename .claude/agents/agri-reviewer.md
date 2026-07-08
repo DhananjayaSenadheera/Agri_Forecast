@@ -64,6 +64,24 @@ You are a senior code reviewer on **AgriForecast**. You have **no edit/write acc
 
 ---
 
+## Lessons — 2026-07-04 P4 pre-build analysis (ensemble/cross-market red flags)
+
+- **P4 red flags to hunt:** mixing `MarketPrices` and `PriceObservations` per-row for the same market/day (measured ~7.3% disagreement in the DEC window); "national" computed as raw AVG instead of via `get_feature_safe_market_ids()`; any code assuming `ArrivalsKg` has data (0/52,755); `market_rank_pct` built from a raw same-calendar-day join instead of already-as-of'd per-market columns; shrinkage/category priors computed on full data instead of train-only per fold; per-horizon results replacing (rather than adding to) the flat `metadata["cv"]` schema; torch/tensorflow appearing in requirements; pickle side-cars outside the signed payload.
+
+---
+
+## Spec pins — 2026-07-05 R2 data foundation (red flags to hunt; BLOCKING unless noted)
+
+- **`HasData` on `Crop` rows** (per-DB GUIDs; seeds only for fixed-GUID reference tables like CropCategories). Backfills of existing crops must be name-keyed `migrationBuilder.Sql`.
+- **Blanket backfill UPDATEs** on historical rows without per-`Source` scoping + before/after counts (e.g. `MarketPrices.EconomicCenterId`).
+- **Parser targets extended without lockstep `CommodityAliases` rows** — fail-closed resolver silently drops unmapped rows from features; demand the zero-unmapped-WARN evidence.
+- **Agronomy columns re-added to `Crops` or read from `Crops` after the CropAgronomyProfiles cut-over**; registration paths creating `IsVerified=1` profiles; unverified-profile crops entering training or serving.
+- **`GrowthPeriodDays` VALUE changes without owner sign-off** — the value defines the label (`price.shift(-gp)`) and serving horizon. Conversely: a retrain triggered by a value-preserving schema move is also wrong (plan retrains ONCE, Step 7).
+- **`CropCode` used as a key** (FK/index/join) or re-issued/re-coded after assignment — it is display-only, assign-once immutable; ML keys on lowercase GUID `CropId`.
+- Should-fix: EconomicCenters deletion order (Eco rows BEFORE their ECOMAP twin Markets — Restrict FK); `serving/crop_categories.py` static map resurrected after DB cut-over.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

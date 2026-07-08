@@ -31,9 +31,21 @@ Multi-market extraction (R1.1 P1 / ClickUp 86cahef3e):
 Returns (min_price, max_price) tuples — NOT midpoint — for each crop found
 in a located market column.
 
-Bitter Gourd name consolidation:
-  Pre-2023: "Bitter Gourd (Other)" and "Bitter Gourd" may both appear.
-  Post-split: they are separate.  We consolidate both to "Bitter Gourd".
+Bitter Gourd / Brinjals name consolidation:
+  Pre-2023-02: "Bitter Gourd (Other)"/"Bitter Gourd (Village)" and
+  "Brinjals (Other)"/"Brinjals (Village)" may both appear (split varieties).
+  From 2023-02-01: HARTI consolidates each pair into a single row
+  ("Bitter Gourd", "Brinjals").  We consolidate the pre-split variants to
+  the same canonical label as the post-split one.
+
+R2 Step 6.1 widen (ClickUp D-DF6, 2026-07-07):
+  _TARGET_CROPS widened from 6 to 20 mappable canonical crops (24 exact
+  label keys) and _TARGET_MARKETS/
+  _MARKET_HEADER_ALIASES widened from 4 to 10 markets (Kandy, Meegoda,
+  Norochchole, Nuwara Eliya, Bandarawela, Veyangoda added), sourced
+  entirely from the existing cached corpus (--no-download, zero new
+  scraping). See the _TARGET_CROPS and _MARKET_HEADER_ALIASES docstrings
+  for full era/spelling evidence.
 """
 from __future__ import annotations
 
@@ -76,14 +88,82 @@ def _parse_timeout_seconds() -> float:
 
 # HARTI crop labels we care about.  Keys are the exact strings seen in PDFs;
 # value is the canonical HARTI label passed to the loader for CropId mapping.
+#
+# R2 Step 6.1 widen (ClickUp D-DF6): 6 -> 20 mappable canonical crops
+# (24 exact label keys, e.g. 3x Potato / 2x Big Onion variants), full label
+# inventory verified against the cached 2,982-PDF corpus (2015-06-22 ->
+# 2026-07-01, --no-download only, zero new scraping). English WHOLESALE
+# VEGETABLE table only -- fruits (Rs/fruit units) deferred, exactly as
+# spec'd. Crop-row matching stays EXACT dict-key lookup (never substring) --
+# "Beans" and "Long Beans" are two distinct dict keys and cannot collide.
+#
+# Pre/post label-consolidation eras (verified via a 131-month, one-PDF-per-
+# calendar-month full-history sweep, 2015-06 -> 2026-07):
+#   Bitter Gourd:  "(Village)"/"(Other)" split 2015-06-22 .. 2023-01-02,
+#                  consolidated to plain "Bitter Gourd" from 2023-02-01.
+#   Brinjals:      same pattern -- "(Village)"/"(Other)" split until
+#                  2023-01-02, consolidated to plain "Brinjals" (plural)
+#                  from 2023-02-01.
+#   IMPORTANT: from 2023-02-01 a SEPARATE row literally named "Eggplant"
+#   also appears in the table, at the exact row position previously held
+#   by "Dambala (Wing Beans)" (verified: 2023-01-02 has "Dambala (Wing
+#   Beans)" immediately after "Manioc"; 2023-02-01 has "Eggplant" in that
+#   same slot, with comparable Rs/kg price levels). This is HARTI's own
+#   relabelling of the Wing Beans row, NOT a second brinjal/aubergine
+#   variety -- it is deliberately NOT added to _TARGET_CROPS (would
+#   otherwise risk a false alias merge with DB "Eggplant"/VEG000026, a
+#   genuinely different commodity). See harti_multimarket_audit.md and the
+#   Step 6.1 report for the full trace.
 _TARGET_CROPS: dict[str, str] = {
+    # --- existing 6 (unchanged) ---
     "Beans":                "Beans",
     "Ladies Fingers":       "Ladies Fingers",
     "Capsicum":             "Capsicum",
     "Bitter Gourd":         "Bitter Gourd",
-    "Bitter Gourd (Other)": "Bitter Gourd",   # pre-split variant → same slot
+    "Bitter Gourd (Other)": "Bitter Gourd",   # pre-2023-02 split variant → same slot
     "Luffa":                "Luffa",
     "Snake Gourd":          "Snake Gourd",
+
+    # --- new (R2 Step 6.1), stable spelling corpus-wide (no variant drift
+    #     observed in the 131-month sweep) ---
+    # NOTE: "Pumpkin" is deliberately EXCLUDED (bulletin has one generic
+    # "Pumpkin" row; DB only has "Pumpkin - Big"/"Pumpkin - Malashian",
+    # no plain crop -- mapping to either would be guessing a variety). See
+    # the Step 6.1 report "unmappable labels" and loader._HARTI_TO_DB_NAME.
+    "Green Chillies":  "Green Chillies",
+    "Tomato":          "Tomato",
+    "Leeks":           "Leeks",
+    "Knolkhol":        "Knolkhol",
+    "Raddish":         "Raddish",
+    "Cucumber":        "Cucumber",
+    "Drumstick":       "Drumstick",
+    "Long Beans":      "Long Beans",
+    "Ash Plantains":   "Ash Plantains",
+    "Lime":            "Lime",
+    "Sweet Potatoe":   "Sweet Potato",   # HARTI's own spelling (typo, corpus-wide)
+    "Manioc":          "Manioc",
+
+    # Brinjals: pre/post 2023-02 consolidation (mirrors Bitter Gourd's
+    # existing pattern above)
+    "Brinjals":          "Brinjals",
+    "Brinjals (Village)": "Brinjals",
+    "Brinjals (Other)":   "Brinjals",
+
+    # Potatoes: bulletin distinguishes 3 named varieties, each its own DB
+    # crop -- NOT consolidated (no plain "Potato" row exists in the
+    # bulletin nor in _TARGET_CROPS; "Potato (Imported)" appeared with a
+    # space 2021-09-01..2021-10-01 alongside the no-space
+    # "Potato(Imported)" seen every other era -- both variants kept).
+    "Potato(Imported)":     "Potato (Imported)",
+    "Potato (Imported)":    "Potato (Imported)",
+    "Potato (Welimada)":    "Potato (Welimada)",
+    "Potato (Nuwaraeliya)": "Potato (Nuwaraeliya)",
+
+    # Onions: bulletin only ever carries these 2 rows (Imported / Local) --
+    # never a plain "Big Onion" or any "Red Onion" row, so those DB crops
+    # stay unmapped (see Step 6.1 report "unmappable labels").
+    "B'Onion Imported": "Big Onion Imported",
+    "Big-onion Local":  "Big Onion Local",
 }
 
 # Cells that mean "no data / market closed"
@@ -121,7 +201,11 @@ _SINGLE_RE = re.compile(r"^([\d,]+(?:\.\d+)?)$")
 #     "Thambuththegam"    -- 2019-01-01 (a pdfplumber cell-split artifact;
 #                             the trailing "a" bleeds into the NEXT cell,
 #                             e.g. "a Kappetipola")
-#     "hambuththegam"     -- 2022-06 .. 2024-04 (the leading "T" bleeds
+#     "ambuththega"       -- 2021-12-01 .. 2021-12-09 (an EARLIER, more
+#                             extreme cell-bleed episode than "hambuththegam"
+#                             below -- both leading letters bleed backward
+#                             into Norochchole, producing "NorochcholTeh")
+#     "hambuththegam"     -- 2021-12-10 .. 2024-04 (the leading "T" bleeds
 #                             BACKWARD into the Norochchole cell, producing
 #                             "NorochcholeT" -- a genuine pdfplumber
 #                             table-extraction artifact from missing cell
@@ -132,7 +216,9 @@ _SINGLE_RE = re.compile(r"^([\d,]+(?:\.\d+)?)$")
 #   2017-03-08 (first observed 9-column PDF with a Keppetipola column).
 #   Observed header spellings:
 #     "Kappetipola"   -- 2017-03-08 .. 2022-06-16 (missing leading "e")
-#     "aKappetipola"  -- 2022-06-02 .. 2022-06-16 (cell-bleed variant of the
+#     "maKappetipola" -- 2021-12-01 .. 2021-12-09 (cell-bleed variant paired
+#                         with the "ambuththega" Thambuttegama episode above)
+#     "aKappetipola"  -- 2021-12-10 .. 2022-06-16 (cell-bleed variant of the
 #                         above, "a" bled in from the Thambuttegama cell)
 #     "aKeppetipola"  -- 2023-07-21 .. 2024-04-28 (cell-bleed variant, HARTI
 #                         corrected the spelling to "Keppetipola" but the
@@ -141,20 +227,70 @@ _SINGLE_RE = re.compile(r"^([\d,]+(?:\.\d+)?)$")
 #   Substring-safety verified (script-checked, not just by inspection): none
 #   of these new aliases is a substring of any Dambulla/Pettah/Narahenpita
 #   alias or of any OTHER market's header text in this bulletin (Kandy,
-#   Meegoda, Norochchole/NorochcholeT, Nuwaraeliya, Bandarawela, Veyangoda)
-#   -- only intra-market substring relationships exist (e.g. "Kappetipola"
-#   is a substring of "aKappetipola", both mapping to the same market),
-#   which is safe by construction.
+#   Meegoda, Norochchole/NorochcholeT/NorochcholTeh, Nuwaraeliya,
+#   Bandarawela, Veyangoda) -- only intra-market substring relationships
+#   exist (e.g. "Kappetipola" is a substring of "aKappetipola", both mapping
+#   to the same market), which is safe by construction.
+#
+# R2 Step 6.1 widen (ClickUp D-DF6): full 4 -> 10 market set. New markets'
+# header evidence (same stratified-sample + binary-search method as R1.1 P2,
+# against the cached corpus, --no-download only):
+#   Kandy       -- "Kandy" -- present from 2015-06-22 (corpus start), never
+#                  observed to drift/bleed in any sampled PDF (11 years).
+#   Meegoda     -- "Meegoda" clean 2015-2026, plus a truncated/suffixed
+#                  "Meegoda*" seen in the single malformed-header PDF
+#                  2022-11-26 (the same PDF that fails whole-page detection
+#                  per harti_multimarket_audit.md Sec 4 -- kept as a
+#                  defensive alias in case a future PDF repeats the pattern
+#                  on an otherwise-parseable page).
+#   Norochchole -- "Norochchole" clean 2015 .. 2021-11 and again 2025-02
+#                  onward; "NorochcholTeh" 2021-12-01..2021-12-09 and
+#                  "NorochcholeT" 2021-12-10..2024-04 (both cell-bleed
+#                  variants where Thambuttegama's leading letters bleed
+#                  backward into this cell -- see the Thambuttegama note
+#                  above). IMPORTANT: "Norochchole" (the clean spelling) IS
+#                  a substring of "NorochcholeT" (safe, same market) but is
+#                  NOT a substring of "NorochcholTeh" (the "e"/"h" are
+#                  transposed at the tail) -- that variant needed its own
+#                  explicit alias entry, it would otherwise WARN-skip.
+#   Nuwara Eliya -- "Nuwaraeliya" (no space) is the standard spelling
+#                  2017-03-08 onward (first appears alongside Keppetipola);
+#                  "Nuwara Eliya" (space) seen only in the malformed
+#                  2022-11-26 PDF page-text (not reachable via the normal
+#                  table-header path since that PDF fails whole-page
+#                  detection) -- kept as a defensive alias for the same
+#                  reason as "Meegoda*" above.
+#   Bandarawela -- introduced precisely between 2021-12-01 (absent, 9-column
+#                  format) and 2021-12-02 (present, 10-column format) --
+#                  binary-searched against the cache. Clean "Bandarawela"
+#                  spelling used corpus-wide from introduction, no drift
+#                  observed.
+#   Veyangoda   -- introduced precisely between 2022-02-21 (absent,
+#                  10-column format) and 2022-02-22 (present, 11-column
+#                  format) -- binary-searched against the cache (NOTE this
+#                  corrects harti_multimarket_audit.md's informal "~2022"
+#                  estimate to an exact date). Clean "Veyangoda" spelling
+#                  from introduction; a truncated/suffixed "Veyangod*" seen
+#                  only in the malformed 2022-11-26 PDF (same defensive
+#                  reasoning as Meegoda/Nuwara Eliya above).
 _MARKET_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "Dambulla":     ("Dambulla",),
-    "Pettah":       ("Pettah", "Peliyagoda", "Peliyagod"),
+    "Pettah":       ("Pettah", "Peliyagoda", "Peliyagod", "Petha"),
     "Narahenpita":  ("Narahenpita",),
     "Thambuttegama": (
         "Thambuththegama", "T'thegama", "Thambuththegam", "hambuththegam",
+        "ambuththega",
     ),
     "Keppetipola": (
         "Kappetipola", "Keppetipola", "aKappetipola", "aKeppetipola",
+        "maKappetipola",
     ),
+    "Kandy":        ("Kandy",),
+    "Meegoda":      ("Meegoda",),
+    "Norochchole":  ("Norochchole", "NorochcholeT", "NorochcholTeh"),
+    "Nuwara Eliya": ("Nuwaraeliya", "Nuwara Eliya"),
+    "Bandarawela":  ("Bandarawela",),
+    "Veyangoda":    ("Veyangoda", "Veyangod"),
 }
 
 # Header text that marks an arrivals/volume column, if the bulletin ever
@@ -313,8 +449,14 @@ def _parse_arrivals_cell(cell: object) -> float | None:
 # unaffected by the new markets appended after it.  Thambuttegama and
 # Keppetipola (ClickUp 86cahef44, R1.1 P2) are appended after the R1.1 P1
 # trio for the same reason -- existing ordering/back-compat is preserved.
+# R2 Step 6.1 (D-DF6) appends the remaining 6 markets (Kandy, Meegoda,
+# Norochchole, Nuwara Eliya, Bandarawela, Veyangoda) at the end for the same
+# back-compat-by-append reason -- this completes the full 10-market bulletin
+# set.
 _TARGET_MARKETS: tuple[str, ...] = (
     "Dambulla", "Pettah", "Narahenpita", "Thambuttegama", "Keppetipola",
+    "Kandy", "Meegoda", "Norochchole", "Nuwara Eliya", "Bandarawela",
+    "Veyangoda",
 )
 
 

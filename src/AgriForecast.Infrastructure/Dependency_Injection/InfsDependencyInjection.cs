@@ -29,8 +29,14 @@ public static class InfsDependencyInjection
         services.AddScoped<IUnitofWorkRepository, UnitOfWorkRepository>();
         services.AddScoped<IDefaultSettingRepository, DefaultSettingRepository>();
         services.AddScoped<ICropRepository, CropRepository>();
-        services.AddScoped<IEconimicCenterRepository, EconimicCenterRepository>();
+        services.AddScoped<ICropCategoryRepository, CropCategoryRepository>();
         services.AddScoped<IMarketPriceRepository, MarketPriceRepository>();
+        // R2 D-DF4: the ingestion auto-provision path now stamps category-prefixed CropCodes via
+        // CodeSettings (same counter as the manual CQRS path). The Ingestion worker wires only the
+        // Infrastructure layer (not AddApplicationLayer), so register CodeSettings here too — its
+        // only dependency, IDefaultSettingRepository, is registered above. Matches the Transient
+        // lifetime used in ApplicationDependencyInjection (the API registers both; harmless dup).
+        services.AddTransient<AgriForecast.Application.common.CodeSettings>();
         services.AddScoped<IMarketPriceIngestionService, MarketPriceIngestionService>();
         services.AddScoped<IWeatherIngestionService, WeatherIngestionService>();
         services.AddScoped<IEconomicIngestionService, EconomicIngestionService>();

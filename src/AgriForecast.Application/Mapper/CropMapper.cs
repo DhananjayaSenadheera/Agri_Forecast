@@ -9,13 +9,15 @@ public static class CropMapper
 {
     // Crop_CreateDto -> Crop
     // Mirrors CreateMap<Crop_CreateDto, Crop>: new Guid Id, UtcNow timestamps,
-    // straight copy of Name / ExternalProductId / Source. CropCode is set by the handler.
+    // straight copy of Name / ExternalProductId / Source / CropCategoryId. CropCode is
+    // set by the handler. CropCategoryId is validated (NotEmpty + must exist) upstream.
     public static Crop ToEntity(this Crop_CreateDto src)
     {
         return Crop.CreateForManualEntry(
             name: src.Name,
             externalProductId: src.ExternalProductId,
-            source: src.Source);
+            source: src.Source,
+            cropCategoryId: src.CropCategoryId);
     }
 
     // Crop_UpdateDto -> Crop (mutate-in-place onto the tracked entity)

@@ -65,6 +65,24 @@ You are a data engineer on **AgriForecast**, supplying clean, trustworthy histor
 
 ---
 
+## Lessons — 2026-07-04 P4 pre-build analysis (cross-market data reality)
+
+- **`PriceObservations.ArrivalsKg` exists in schema but is 0/52,755 populated** — a stub, never build a feature on it. Arrivals live in HARTI's separate weekly bulletin (never ingested).
+- **Two-table splice measured:** HARTI-vs-HARTI rows identical (corr 1.0); DEC-window Dambulla vs MarketPrices only 12.6% exact match, ~7.3% median diff — never mix the two tables per-row for the same market/day.
+- **`gap_report()` groups by raw `ExternalCommodityName`** (e.g. "Luffa"), not resolved `Crop.Name` — translate before cross-referencing.
+- **Missingness conventions differ per table:** zero-price rows exist in MarketPrices (kept as market-closed signal) but NOT in PriceObservations.
+- Feature builds on PriceObservations must filter **`IsUnitConfirmed = 1`** (canonical.py docstring contract; 537 held rows corpus-wide).
+
+---
+
+## Spec pins — 2026-07-05 R2 data foundation (owner-approved plan; binding)
+
+- **Aliases in LOCKSTEP (fail-closed).** Extending parser targets (`_TARGET_CROPS`, market aliases) REQUIRES extending DB `CommodityAliases` in the SAME change — the resolver is fail-closed: unmapped external names → `CropId NULL` + WARN, and those rows silently drop out of features. Acceptance for any parser-widening change: **zero unmapped WARNs on re-parse**, then run `heal_price_observation_crops()`.
+- **Backfills of historical rows are PER-SOURCE, never blanket** — one UPDATE per `Source` with before/after row counts verified and reported, even when the target value happens to be the same across sources.
+- **HARTI conventions frozen:** store min/max, never a midpoint; zero-price = missing, not signal (opposite of MarketPrices — the 196 known clustered zero rows are gaps); `IsUnitConfirmed=0` rows are quarantined from features. The 2,977-PDF corpus (2015-06-22 → 2026-07-01) is already cached in `src/AgriForecast.ML/harti_cache/` — re-parse with `--no-download`, ZERO new scraping. Market spelling variants/eras: see `src/AgriForecast.ML/harti_multimarket_audit.md`.
+
+---
+
 ## Ecosystem coordination protocol (AgriForecast — apply every task)
 
 You are **one node in a coordinated fleet**, not a solo worker. The **main thread is the hub** — you never spawn or message other agents. Coordination is **asynchronous via shared files** in the memory dir:

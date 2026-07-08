@@ -38,31 +38,42 @@ IDEMPOTENCY (PriceObservations path — upsert_harti_price_observations, R1.1 P1
   updated in place, not duplicated.
 
 CROP MAP:
-  Only 6 crops are ingested.  4 uncovered crops (Winged Bean, Ginger, Cooking
-  Melon, Watermelon) have no usable HARTI Dambulla data — skip them.
+  R2 Step 6.1 (D-DF6, 2026-07-07) widened this from 6 to 20 mappable
+  canonical crops (24 exact label keys incl. potato/onion variants)
+  -- see _HARTI_TO_DB_NAME for the full current mapping and the excluded/
+  unmappable labels list (Pumpkin, Carrot, Cabbage, Beetroot: DB only has
+  region/variety-qualified names, no plain crop, so mapping would mean
+  guessing a variety -- deliberately not done). 4 ORIGINALLY-uncovered
+  crops (Winged Bean, Ginger, Cooking Melon, Watermelon) still have no
+  usable HARTI Dambulla data under their own DB names — skip them. (NOTE:
+  from 2023-02-01 the bulletin carries a row literally labelled "Eggplant"
+  at the position formerly held by "Dambala (Wing Beans)" — this is HARTI's
+  own relabelling of the Wing Beans row, not DB's distinct "Eggplant" crop,
+  and is deliberately excluded from _TARGET_CROPS/_HARTI_TO_DB_NAME to avoid
+  a false alias merge; see parser.py's _TARGET_CROPS docstring.)
 
-  HARTI label            → DB crop Name
-  "Beans"               → "Beans"
-  "Ladies Fingers"      → "Lady's Fingers"
-  "Capsicum"            → "Capsicum"
-  "Bitter Gourd"        → "Bitter Gourd"   (includes pre-split "Bitter Gourd (Other)")
-  "Luffa"               → "Ridge Gourd"
-  "Snake Gourd"         → "Snake Gourd"
-
-MARKET MAP (R1.1 P1 + R1.1 P2):
+MARKET MAP (R1.1 P1 + R1.1 P2 + R2 Step 6.1):
   parser.ParsedPrice.market_name values ("Dambulla", "Pettah", "Narahenpita",
-  "Thambuttegama", "Keppetipola") are resolved against the DB Markets
-  dimension BY NAME (never a hardcoded GUID) — see _build_market_map().
-  Seeded rows (migration AddMultiMarketAndPointInTimeData): Dambulla
-  Dedicated Economic Centre (MKT00000001), Keppetipola Dedicated Economic
-  Centre (MKT00000002), Thambuttegama Dedicated Economic Centre
-  (MKT00000003), "Pettah (HARTI wholesale)" (MKT00000004), "Narahenpita
-  (HARTI retail)" (MKT00000005).  Note Keppetipola/Thambuttegama use their
-  plain DEC name (same pattern as Dambulla) — unlike Pettah/Narahenpita they
-  do NOT carry a "(HARTI wholesale/retail)" suffix, because (like Dambulla)
-  they are seeded as their own first-class DEC market rows, not
-  HARTI-only aliases of a market that also has other sources. A parsed
-  market_name that does not resolve is WARN-skipped, never invented.
+  "Thambuttegama", "Keppetipola", "Kandy", "Meegoda", "Norochchole",
+  "Nuwara Eliya", "Bandarawela", "Veyangoda") are resolved against the DB
+  Markets dimension BY NAME (never a hardcoded GUID) — see
+  _build_market_map().  Seeded rows (migration
+  AddMultiMarketAndPointInTimeData): Dambulla Dedicated Economic Centre
+  (MKT00000001), Keppetipola Dedicated Economic Centre (MKT00000002),
+  Thambuttegama Dedicated Economic Centre (MKT00000003), "Pettah (HARTI
+  wholesale)" (MKT00000004), "Narahenpita (HARTI retail)" (MKT00000005).
+  Note Keppetipola/Thambuttegama use their plain DEC name (same pattern as
+  Dambulla) — unlike Pettah/Narahenpita they do NOT carry a "(HARTI
+  wholesale/retail)" suffix, because (like Dambulla) they are seeded as
+  their own first-class DEC market rows, not HARTI-only aliases of a
+  market that also has other sources. A parsed market_name that does not
+  resolve is WARN-skipped, never invented.
+
+  The 6 R2 Step 6.1 markets (Kandy, Meegoda, Norochchole, Nuwara Eliya,
+  Bandarawela, Veyangoda) have NO Markets row yet (live-queried, confirmed
+  absent — subtask 6.2's job) — _PARSER_MARKET_TO_DB_NAME carries
+  PLACEHOLDER "(HARTI wholesale)"-suffixed names for them today, which
+  legitimately WARN-skip every row until 6.2 creates the matching rows.
 
 PRICE COLUMNS (PriceObservations):
   HARTI rows ALWAYS populate MinPrice/MaxPrice and ALWAYS leave
@@ -141,13 +152,40 @@ SOURCE = "HARTI"
 # Per-label synthetic ExternalProductIds for HARTI.
 # MUST be distinct (the unique index is (Source, ExternalProductId, PriceDate)
 # — NOT including CropId).  Negative values avoid collision with DEC range 1-101.
+#
+# R2 Step 6.1 (D-DF6) note: this dict backs ONLY upsert_harti_prices() (the
+# legacy Dambulla-only MarketPrices path), which filters to market_name ==
+# "Dambulla" before ever looking up an ExternalProductId -- so only crops
+# with real Dambulla-column data need an entry here. New IDs continue the
+# existing negative-integer numbering (-7, -8, ...), never colliding with
+# the original -1..-6 or the DEC positive range (1-101).
 _HARTI_PRODUCT_IDS: dict[str, int] = {
-    "Beans":         -1,
-    "Ladies Fingers": -2,
-    "Capsicum":      -3,
-    "Bitter Gourd":  -4,
-    "Luffa":         -5,
-    "Snake Gourd":   -6,
+    "Beans":          -1,
+    "Ladies Fingers":  -2,
+    "Capsicum":       -3,
+    "Bitter Gourd":   -4,
+    "Luffa":          -5,
+    "Snake Gourd":    -6,
+    "Green Chillies": -7,
+    "Tomato":         -8,
+    "Leeks":          -9,
+    "Knolkhol":      -10,
+    "Raddish":       -11,
+    # -12 intentionally unused (was Pumpkin -- removed, see parser.py
+    # _TARGET_CROPS docstring: Pumpkin is unmappable, never reaches this dict)
+    "Cucumber":      -13,
+    "Drumstick":     -14,
+    "Long Beans":    -15,
+    "Ash Plantains": -16,
+    "Lime":          -17,
+    "Sweet Potato":  -18,
+    "Manioc":        -19,
+    "Brinjals":      -20,
+    "Potato (Imported)":     -21,
+    "Potato (Welimada)":     -22,
+    "Potato (Nuwaraeliya)":  -23,
+    "Big Onion Imported":    -24,
+    "Big Onion Local":       -25,
 }
 
 # --------------------------------------------------------------------------
@@ -167,12 +205,35 @@ _HARTI_PRODUCT_IDS: dict[str, int] = {
 # row's spelling, which was seeded independently of HARTI's bulletin text) —
 # this dict is exactly the name-alias mapping that bridges that spelling gap,
 # same role it already plays for Pettah->"Peliyagoda"-family HARTI headers.
+#
+# R2 Step 6.2 (D-DF6): the 6 additional markets (Kandy, Meegoda,
+# Norochchole, Nuwara Eliya, Bandarawela, Veyangoda) now have live Markets
+# rows (MKT00000007..MKT00000012, seeded by SeedMarkets in
+# AgriForecastDbContext.cs).  These Name strings are byte-for-byte the
+# seeded Market.Name values.  Classification was owner web-verified in 6.2
+# and split: Meegoda / Nuwara Eliya / Veyangoda are formally-designated
+# Dedicated Economic Centres; Kandy / Norochchole / Bandarawela are
+# municipal/assembly wholesale markets ("(HARTI wholesale)" suffix, like
+# Pettah).  Per the fail-closed contract in _build_market_map() below, an
+# unresolved DB name is WARN-skipped at runtime, never invented -- kept as
+# a live safety net if a name ever drifts.
 _PARSER_MARKET_TO_DB_NAME: dict[str, str] = {
-    "Dambulla":     "Dambulla Dedicated Economic Centre",
-    "Pettah":       "Pettah (HARTI wholesale)",
-    "Narahenpita":  "Narahenpita (HARTI retail)",
+    "Dambulla":      "Dambulla Dedicated Economic Centre",
+    "Pettah":        "Pettah (HARTI wholesale)",
+    "Narahenpita":   "Narahenpita (HARTI retail)",
     "Thambuttegama": "Thambuttegama Dedicated Economic Centre",
-    "Keppetipola":  "Keppetipola Dedicated Economic Centre",
+    "Keppetipola":   "Keppetipola Dedicated Economic Centre",
+    # -- R2 Step 6.2: live Markets rows now exist (MKT00000007..MKT00000012).
+    #    Names are byte-for-byte the seeded Market.Name values (SeedMarkets in
+    #    AgriForecastDbContext.cs). Classification per owner web-verification:
+    #    Meegoda / Nuwara Eliya / Veyangoda = Dedicated Economic Centres;
+    #    Kandy / Norochchole / Bandarawela = "(HARTI wholesale)" markets. --
+    "Kandy":         "Kandy (HARTI wholesale)",
+    "Meegoda":       "Meegoda Dedicated Economic Centre",
+    "Norochchole":   "Norochchole (HARTI wholesale)",
+    "Nuwara Eliya":  "Nuwara Eliya Dedicated Economic Centre",
+    "Bandarawela":   "Bandarawela (HARTI wholesale)",
+    "Veyangoda":     "Veyangoda Dedicated Economic Centre",
 }
 
 # --------------------------------------------------------------------------
@@ -189,18 +250,53 @@ _SPLICE_EXCEPTION_END: date = date(2025, 6, 30)
 # --------------------------------------------------------------------------
 # HARTI label → DB Crop.Name mapping
 # --------------------------------------------------------------------------
+# R2 Step 6.1 (D-DF6) note: this dict backs upsert_harti_prices() (the
+# legacy Dambulla-only MarketPrices path) ONLY -- it is NOT the
+# CommodityAliases fail-closed resolver that upsert_harti_price_
+# observations() uses for the PriceObservations multi-market path (see
+# CommodityAliasResolver in canonical.py, extended separately in subtask
+# 6.2). Keys are the CANONICAL harti_label values emitted by parser.
+# _TARGET_CROPS (i.e. the post-consolidation label -- "Brinjals", not the
+# raw pre-2023 "Brinjals (Village)"/"Brinjals (Other)" PDF cell text).
 _HARTI_TO_DB_NAME: dict[str, str] = {
-    "Beans":         "Beans",
-    "Ladies Fingers":"Lady's Fingers",
-    "Capsicum":      "Capsicum",
-    "Bitter Gourd":  "Bitter Gourd",
-    "Luffa":         "Ridge Gourd",
-    "Snake Gourd":   "Snake Gourd",
+    "Beans":          "Beans",
+    "Ladies Fingers": "Lady's Fingers",
+    "Capsicum":       "Capsicum",
+    "Bitter Gourd":   "Bitter Gourd",
+    "Luffa":          "Ridge Gourd",
+    "Snake Gourd":    "Snake Gourd",
+    "Green Chillies": "Green Chili",
+    "Tomato":         "Tomato",
+    "Leeks":          "Leeks",
+    "Knolkhol":       "Nnolkhol",           # DB's own spelling (verified live)
+    "Raddish":        "Raddish",             # DB's own spelling (verified live)
+    "Cucumber":       "Cucumber",
+    "Drumstick":      "Drumsticks",
+    "Long Beans":     "Yard - Long Beans",
+    "Ash Plantains":  "Ash Plantain",
+    "Lime":           "Lime",
+    "Sweet Potato":   "Sweet Potato",
+    "Manioc":         "Manioc",
+    "Brinjals":       "Brinjal",
+    "Potato (Imported)":    "Potatoes - Import",
+    "Potato (Welimada)":    "Potatoes - Walimada",
+    "Potato (Nuwaraeliya)": "Potatoes - Nuwaraeliya",
+    "Big Onion Imported":   "Big Onion Import",
+    "Big Onion Local":      "Big Onion Lanka",
+    # NOT mapped (deliberately excluded from _TARGET_CROPS -- see parser.py
+    # docstring and the Step 6.1 report "unmappable labels" for the full
+    # reasoning): Pumpkin (DB only has "Pumpkin - Big"/"Pumpkin - Malashian",
+    # no plain "Pumpkin" -- picking one would be guessing); Carrot, Cabbage,
+    # Beetroot (DB only has region-qualified variants, no plain crop; the
+    # bulletin's own region-qualified rows -- e.g. "Cabbage (Kandy)" --
+    # still don't line up 1:1 with DB's region choices without guessing).
 }
 
 
 def _build_crop_map(engine: sa.engine.Engine) -> dict[str, tuple[uuid.UUID, str]]:
-    """Return {harti_label: (CropId_uuid, db_crop_name)} for the 6 target crops."""
+    """Return {harti_label: (CropId_uuid, db_crop_name)} for the target crops
+    (24 label keys / 20 canonical crops as of R2 Step 6.1 -- see
+    _HARTI_TO_DB_NAME)."""
     db_names = list(_HARTI_TO_DB_NAME.values())
     placeholders = ", ".join(f":n{i}" for i in range(len(db_names)))
     params = {f"n{i}": n for i, n in enumerate(db_names)}
@@ -231,7 +327,10 @@ def _build_crop_map(engine: sa.engine.Engine) -> dict[str, tuple[uuid.UUID, str]
             continue
         result[harti_label] = (db_name_to_id[db_name], db_name)
 
-    logger.info("Crop map built: %d of 6 entries resolved", len(result))
+    logger.info(
+        "Crop map built: %d of %d entries resolved",
+        len(result), len(_HARTI_TO_DB_NAME),
+    )
     return result
 
 
@@ -293,6 +392,44 @@ def _build_market_map(engine: sa.engine.Engine) -> dict[str, uuid.UUID]:
         len(result), len(_PARSER_MARKET_TO_DB_NAME),
     )
     return result
+
+
+# MarketCode of the sole Dambulla market row (Markets.MarketCode is a stable
+# business code, seeded by migration -- NEVER hardcode the row's GUID, which
+# is per-DB; see D-DF3 / R2 Step 3 in the project memory).
+_DAMBULLA_MARKET_CODE = "MKT00000001"
+
+
+def _dambulla_market_id(engine: sa.engine.Engine) -> uuid.UUID:
+    """Resolve the Dambulla Markets.Id at runtime (BY CODE, never a hardcoded
+    GUID -- GUIDs are per-DB).
+
+    Used to populate MarketPrices.EconomicCenterId for HARTI rows written by
+    upsert_harti_prices() (the legacy Dambulla-only MarketPrices path): the
+    R2 Step-3 Markets/EconomicCenters merge repoints EconomicCenterId at
+    Markets.Id, and both DAMBULLA_DEC and HARTI rows resolve to the same
+    Dambulla market row (hub-adjudicated -- the legacy HARTI splice loader
+    IS Dambulla prices).
+
+    Cache-per-run: callers should call this once per upsert call (mirrors
+    _build_crop_map() / _build_market_map()), not per row.
+
+    Raises RuntimeError if the Dambulla market row is missing -- fails
+    loudly rather than silently writing NULL/a guessed GUID.
+    """
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa.text("SELECT Id FROM Markets WHERE MarketCode = :code"),
+            {"code": _DAMBULLA_MARKET_CODE},
+        ).fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            f"Dambulla market row not found (MarketCode={_DAMBULLA_MARKET_CODE!r}) "
+            "-- cannot resolve EconomicCenterId for HARTI MarketPrices rows. "
+            "Refusing to insert with a NULL/guessed value."
+        )
+    return _parse_guid(row[0])
 
 
 # --------------------------------------------------------------------------
@@ -414,6 +551,15 @@ def upsert_harti_prices(
     second Dambulla copy) land in PriceObservations instead — see
     upsert_harti_price_observations().
 
+    EconomicCenterId (R2 Step 3, Markets/EconomicCenters merge): every row
+    written/updated here gets EconomicCenterId = the Dambulla Markets.Id,
+    resolved at runtime BY CODE via _dambulla_market_id() (never a
+    hardcoded GUID — GUIDs are per-DB) and cached once per call. Both
+    DAMBULLA_DEC and HARTI rows resolve to the same Dambulla market row
+    (hub-adjudicated: this legacy splice loader IS Dambulla prices). Raises
+    RuntimeError if the Dambulla market row is missing rather than writing
+    NULL/a guessed value.
+
     Args:
         parsed_rows:  Output of parser.parse_many().
         engine:       SQLAlchemy engine; created from config if None.
@@ -427,6 +573,7 @@ def upsert_harti_prices(
         engine = get_engine()
 
     crop_map = _build_crop_map(engine)
+    dambulla_market_id = _dambulla_market_id(engine)  # cached once per run, not per row
     now_utc = datetime.now(timezone.utc)
 
     counters = dict(
@@ -527,6 +674,7 @@ def upsert_harti_prices(
                         """UPDATE MarketPrices
                            SET MinPrice = :min_price,
                                MaxPrice = :max_price,
+                               EconomicCenterId = :economic_center_id,
                                RetrievedAtUtc = :retrieved_at
                            WHERE CONVERT(varchar(36), CropId) = :crop_id
                              AND PriceDate = :price_date
@@ -535,6 +683,7 @@ def upsert_harti_prices(
                     {
                         "min_price": row["min_price"],
                         "max_price": row["max_price"],
+                        "economic_center_id": str(dambulla_market_id),
                         "retrieved_at": now_utc,
                         "crop_id": crop_id_str,
                         "price_date": row["price_date"],
@@ -552,13 +701,14 @@ def upsert_harti_prices(
                             ExternalProductName, PriceDate, MinPrice, MaxPrice,
                             Source, RetrievedAtUtc)
                            VALUES
-                           (:id, :crop_id, NULL, :ext_prod_id,
+                           (:id, :crop_id, :economic_center_id, :ext_prod_id,
                             :ext_prod_name, :price_date, :min_price, :max_price,
                             :source, :retrieved_at)"""
                     ),
                     {
                         "id": new_id,
                         "crop_id": crop_id_str,
+                        "economic_center_id": str(dambulla_market_id),
                         "ext_prod_id": row["ext_prod_id"],
                         "ext_prod_name": row["harti_label"],
                         "price_date": row["price_date"],

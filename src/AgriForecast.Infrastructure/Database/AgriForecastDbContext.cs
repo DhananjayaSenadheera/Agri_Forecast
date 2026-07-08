@@ -7,6 +7,8 @@ namespace AgriForecast.Infrastructure.Database;
 public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> options) : DbContext(options) 
 {
     public DbSet<Crop> Crops { get; set; }
+    public DbSet<CropCategory> CropCategories { get; set; }
+    public DbSet<CropAgronomyProfile> CropAgronomyProfiles { get; set; }
     public DbSet<EconomicCenter> EconomicCenters { get; set; }
     public DbSet<DefaultSetting> DefaultSettings { get; set; }
     public DbSet<MarketPrice> MarketPrices { get; set; }
@@ -37,21 +39,75 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
         modelBuilder.Entity<DefaultSetting>().HasData(new DefaultSetting
         {
             Id = 1,
-            Crop_Code = 1,
-            Crop_Padding = 8,
-            Crop_Prefix = "CROP",
-            Eco_Code = 1,
-            Eco_Padding = 8,
-            Eco_Prefix = "ECO",
-            // Next manual market code = MKT00000007 (7 seeded markets occupy 1..6).
-            Mkt_Code = 7,
+            // R2 D-DF4: per-category-prefix crop-code counters. Seeded to next-free after the 96
+            // existing crops were re-coded (VEG000001..VEG000070 ⇒ next 71; FRT000001..FRT000026
+            // ⇒ next 27); padding 6 → VEG######/FRT######.
+            Veg_Code = 71,
+            Veg_Padding = 6,
+            Veg_Prefix = CropCategory.VegetablePrefix,
+            Frt_Code = 27,
+            Frt_Padding = 6,
+            Frt_Prefix = CropCategory.FruitPrefix,
+            // Next manual market code = MKT00000013 (12 seeded markets occupy 1..12 after
+            // R2 Step 6.2 added MKT00000007..MKT00000012). Bumped 7 → 13 so runtime market
+            // registration (CodeSettings.GetMktCode) can never re-issue a seeded code.
+            Mkt_Code = 13,
             Mkt_Padding = 8,
             Mkt_Prefix = "MKT",
         });
         
+        modelBuilder.Entity<CropCategory>(e =>
+        {
+            e.ToTable("CropCategories");
+            e.HasKey(x => x.Id);
+
+            e.Property(x => x.Code).HasMaxLength(50).IsRequired();
+            e.Property(x => x.Name).HasMaxLength(100).IsRequired();
+
+            // Self-FK for sub-categories. Restrict: a parent category can never be
+            // deleted while a child still references it.
+            e.HasOne<CropCategory>()
+                .WithMany()
+                .HasForeignKey(x => x.ParentId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // Code is the human-facing business key — unique.
+            e.HasIndex(x => x.Code).IsUnique();
+        });
+
+        SeedCropCategories(modelBuilder);
+
         modelBuilder.Entity<Crop>(e =>
         {
-            e.Property(x => x.PlantingSeason).HasMaxLength(20);
+            // Optional grouping under a CropCategory. Restrict: a category can never be
+            // deleted while a crop still references it. Nullable until the later backfill.
+            e.HasOne<CropCategory>()
+                .WithMany()
+                .HasForeignKey(x => x.CropCategoryId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<CropAgronomyProfile>(e =>
+        {
+            e.ToTable("CropAgronomyProfiles");
+            e.HasKey(x => x.Id);
+
+            e.Property(x => x.DataSource).HasMaxLength(500);
+
+            // VerifiedOn is a curation record-date, stored date-only (no hidden time) —
+            // mirrors the date-only discipline used across the reference entities.
+            e.Property(x => x.VerifiedOn).HasColumnType("date");
+
+            // 1:1 with Crop. Unique CropId enforces one agronomy profile per crop. Restrict:
+            // a Crop can never be deleted while its profile references it (mirrors the
+            // CommodityAlias -> Crop Restrict FK; agronomy is owned reference data, not a
+            // detach-on-delete child).
+            e.HasOne<Crop>()
+                .WithMany()
+                .HasForeignKey(x => x.CropId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasIndex(x => x.CropId).IsUnique();
         });
 
         modelBuilder.Entity<WeatherRecord>(e =>
@@ -143,6 +199,14 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
         {
             e.Property(x => x.AveragePrice).HasPrecision(18, 2);
             e.HasIndex(x => new { x.CropId, x.EconomicCenterId, x.Month }).IsUnique();
+
+            // R2 D-DF3: EconomicCenterId now references Markets (the EconomicCenters CRUD dimension
+            // retired; a Dedicated Economic Centre is a Markets row with IsEconomicCenter=1).
+            // Restrict so a Market can never be deleted out from under a CropPrice row.
+            e.HasOne(x => x.EconomicCenter)
+                .WithMany()
+                .HasForeignKey(x => x.EconomicCenterId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<MarketPrice>(e =>
@@ -153,6 +217,17 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             // prevents duplicates even if worker runs twice
             e.HasIndex(x => new { x.Source, x.ExternalProductId, x.PriceDate })
                 .IsUnique();
+
+            // R2 Step 3.3 / D-DF3: EconomicCenterId references Markets (the EconomicCenters
+            // CRUD dimension is retired; a Dedicated Economic Centre is a Markets row with
+            // IsEconomicCenter=1). MarketPrice has no nav property, so the FK is declared
+            // without a reference navigation. Restrict so a Market can never be deleted out
+            // from under a price row. Column stays nullable in the DB (an unlinked source
+            // may exist before its per-source backfill runs).
+            e.HasOne<Market>()
+                .WithMany()
+                .HasForeignKey(x => x.EconomicCenterId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<Market>(e =>
@@ -163,6 +238,12 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.Property(x => x.Name).HasMaxLength(200).IsRequired();
             e.Property(x => x.District).HasMaxLength(100);
             e.Property(x => x.MarketType).HasConversion<int>().IsRequired();
+
+            // IsEconomicCenter folds the retiring EconomicCenters dimension into Markets
+            // (R2 D-DF3). NOT NULL, default false — existing rows and ingestion-provisioned
+            // markets stay plain markets until explicitly promoted; the Dambulla DEC row is
+            // flagged in the same migration via a MarketCode-keyed UPDATE.
+            e.Property(x => x.IsEconomicCenter).IsRequired().HasDefaultValue(false);
 
             // MarketCode is the human-facing business key — unique.
             e.HasIndex(x => x.MarketCode).IsUnique();
@@ -369,6 +450,147 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 IsActive = true,
                 CreatedAt = seededAt,
                 UpdatedAt = seededAt
+            },
+            // ── R2 Step 6.2 — 6 additional HARTI bulletin markets ─────────────────────────
+            // Added in lockstep with the 6.1 parser widening (10 real markets). Classification
+            // is owner-verified best-evidence (web): Meegoda / Nuwara Eliya / Veyangoda are
+            // formally-designated Dedicated Economic Centres (MarketType.DEC); Kandy /
+            // Norochchole / Bandarawela are municipal/assembly wholesale markets
+            // (MarketType.Wholesale, "(HARTI wholesale)" suffix like Pettah). Norochchole's
+            // classification is the least certain of the three and is reclassifiable if
+            // stronger evidence surfaces.
+            //
+            // IsEconomicCenter is deliberately NOT set here: per the R2 Step 3.1 convention
+            // only MKT00000001 (Dambulla) carries IsEconomicCenter=1 today — Keppetipola /
+            // Thambuttegama are MarketType.DEC yet IsEconomicCenter=0. MarketType classifies
+            // the market *kind*; IsEconomicCenter=1 flags the single feature-reference DEC.
+            // These 3 new DEC rows therefore keep the column default (false), matching the
+            // existing seeded DEC rows. (Column defaultValue=false from migration
+            // 20260706161839_AddIsEconomicCenterToMarket.)
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000007"),
+                MarketCode = "MKT00000007",
+                Name = "Kandy (HARTI wholesale)",
+                District = (string?)"Kandy",
+                MarketType = MarketType.Wholesale,
+                IsActive = true,
+                CreatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc)
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000008"),
+                MarketCode = "MKT00000008",
+                Name = "Meegoda Dedicated Economic Centre",
+                District = (string?)"Colombo",
+                MarketType = MarketType.DEC,
+                IsActive = true,
+                CreatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc)
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000009"),
+                MarketCode = "MKT00000009",
+                // Best-evidence classification: municipal/assembly wholesale market, not a
+                // formally-designated DEC (least certain of the three — reclassifiable).
+                Name = "Norochchole (HARTI wholesale)",
+                District = (string?)"Puttalam",
+                MarketType = MarketType.Wholesale,
+                IsActive = true,
+                CreatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc)
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000010"),
+                MarketCode = "MKT00000010",
+                Name = "Nuwara Eliya Dedicated Economic Centre",
+                District = (string?)"Nuwara Eliya",
+                MarketType = MarketType.DEC,
+                IsActive = true,
+                CreatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc)
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000011"),
+                MarketCode = "MKT00000011",
+                Name = "Bandarawela (HARTI wholesale)",
+                District = (string?)"Badulla",
+                MarketType = MarketType.Wholesale,
+                IsActive = true,
+                CreatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc)
+            },
+            new
+            {
+                Id = Guid.Parse("b2a20001-0000-0000-0000-000000000012"),
+                MarketCode = "MKT00000012",
+                Name = "Veyangoda Dedicated Economic Centre",
+                District = (string?)"Gampaha",
+                MarketType = MarketType.DEC,
+                IsActive = true,
+                CreatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc),
+                UpdatedAt = new DateTime(2026, 07, 07, 0, 0, 0, DateTimeKind.Utc)
+            }
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────
+    // CROP CATEGORIES — reference dimension, manual update path (NO ingestion / CQRS / endpoint).
+    //
+    // Fixed lowercase GUIDs + a FIXED CreatedAt keep the seed deterministic and idempotent
+    // across migrations (a UtcNow here would churn the diff every build). Mirrors the HARTI
+    // bulletin grouping: top-level Vegetable / Fruit, plus Up-country / Low-country Vegetable
+    // sub-categories whose ParentId points at Vegetable.
+    //
+    // NEVER HasData on Crop rows — crops are auto-provisioned at runtime with per-DB GUIDs.
+    // Assigning categories onto the existing crops is a separate name-keyed backfill (subtask 1.2),
+    // not seeded here.
+    //
+    // TO ADD A CATEGORY: add a seed row with a new fixed lowercase GUID + a unique Code, add a
+    // migration and apply it.
+    private static void SeedCropCategories(ModelBuilder modelBuilder)
+    {
+        var seededAt = new DateTime(2026, 07, 05, 0, 0, 0, DateTimeKind.Utc);
+
+        var vegetableId = Guid.Parse("d4c40001-0000-0000-0000-000000000001");
+        var fruitId = Guid.Parse("d4c40001-0000-0000-0000-000000000002");
+
+        modelBuilder.Entity<CropCategory>().HasData(
+            new CropCategory
+            {
+                Id = vegetableId,
+                Code = "VEG",
+                Name = "Vegetable",
+                ParentId = null,
+                CreatedAt = seededAt
+            },
+            new CropCategory
+            {
+                Id = fruitId,
+                Code = "FRT",
+                Name = "Fruit",
+                ParentId = null,
+                CreatedAt = seededAt
+            },
+            new CropCategory
+            {
+                Id = Guid.Parse("d4c40001-0000-0000-0000-000000000003"),
+                Code = "VEG-UP",
+                Name = "Up-country Vegetable",
+                ParentId = vegetableId,
+                CreatedAt = seededAt
+            },
+            new CropCategory
+            {
+                Id = Guid.Parse("d4c40001-0000-0000-0000-000000000004"),
+                Code = "VEG-LOW",
+                Name = "Low-country Vegetable",
+                ParentId = vegetableId,
+                CreatedAt = seededAt
             }
         );
     }
