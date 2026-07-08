@@ -18,8 +18,14 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
     private readonly IMarketPriceRepository _marketPriceRepository;
     private readonly ICropRepository _cropRepository;
     private readonly IGenericRepository<CropAgronomyProfile> _agronomyProfileRepository;
+    private readonly IGenericRepository<Market> _marketRepository;
     private readonly CodeSettings _codeSettings;
     private const string SourceName = "DAMBULLA_DEC";
+
+    // Every DAMBULLA_DEC row is a Dambulla economic-centre price, so inserts must carry the
+    // Dambulla Markets link (FK added in R2 Step 3.3). Resolved at runtime by MarketCode —
+    // never a hardcoded GUID (same rule as the Step 3.3 backfill migration and HARTI loader).
+    private const string DambullaMarketCode = "MKT00000001";
 
     // Default category for auto-provisioned crops = top-level Vegetable (fixed seed GUID).
     // Fruit-by-keyword refinement bumps obvious fruits to top-level Fruit instead.
@@ -37,7 +43,7 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         "banana", "mango", "papaya", "pineapple", "guava", "avocado", "avacado"
     };
 
-    public MarketPriceIngestionService(IDambullaApiClient client, IConfiguration config, ILogger<MarketPriceIngestionService> logger, IUnitofWorkRepository unitofWorkRepository, IMarketPriceRepository marketPriceRepository, ICropRepository cropRepository, IGenericRepository<CropAgronomyProfile> agronomyProfileRepository, CodeSettings codeSettings)
+    public MarketPriceIngestionService(IDambullaApiClient client, IConfiguration config, ILogger<MarketPriceIngestionService> logger, IUnitofWorkRepository unitofWorkRepository, IMarketPriceRepository marketPriceRepository, ICropRepository cropRepository, IGenericRepository<CropAgronomyProfile> agronomyProfileRepository, IGenericRepository<Market> marketRepository, CodeSettings codeSettings)
     {
         _client = client;
         _config = config;
@@ -46,12 +52,19 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         _marketPriceRepository = marketPriceRepository;
         _cropRepository = cropRepository;
         _agronomyProfileRepository = agronomyProfileRepository;
+        _marketRepository = marketRepository;
         _codeSettings = codeSettings;
     }
 
     public async Task IngestAsync(CancellationToken ct)
     {
         var maxProductId = int.Parse(_config["MarketPriceSources:DambullaDec:MaxProductId"] ?? "101");
+
+        // Fail-closed: without the Dambulla Markets row we cannot link inserts, and inserting
+        // unlinked rows would silently recreate the NULL-EconomicCenterId gap this guards against.
+        var dambullaMarket = await _marketRepository.GetOneAsyncInclude(m => m.MarketCode == DambullaMarketCode)
+            ?? throw new InvalidOperationException(
+                $"Market '{DambullaMarketCode}' (Dambulla DEC) not found; aborting ingestion rather than inserting unlinked price rows.");
 
         // 1. Build ExternalProductId -> CropId lookup from crops already mapped to this source.
         var crops = await _cropRepository.GetAllAsync();
@@ -163,6 +176,7 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
                         ExternalProductId = p.ProductId,
                         ExternalProductName = p.Product?.Name ?? "",
                         CropId = cropId,
+                        EconomicCenterId = dambullaMarket.Id,
                         PriceDate = date,
                         MinPrice = p.MinPrice,
                         MaxPrice = p.MaxPrice,

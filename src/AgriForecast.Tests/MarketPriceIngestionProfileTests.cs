@@ -55,13 +55,14 @@ public class MarketPriceIngestionProfileTests
         public void Dispose() { }
     }
 
-    // MarketPrice store: returns the distinct products the service self-heals from, and no-ops
-    // the rest so the feed loop stays empty (the DambullaApiClient returns no chart items).
+    // MarketPrice store: returns the distinct products the service self-heals from, captures
+    // inserts, and no-ops the rest so the feed loop stays empty unless a test feeds items.
     private sealed class FakeMarketPriceRepository : IMarketPriceRepository
     {
         public List<ExternalProduct> DistinctProducts = new();
+        public readonly List<MarketPrice> Inserted = new();
         public Task AddAsync(MarketPrice marketPrice, CancellationToken ct = default) => Task.CompletedTask;
-        public Task AddRangeAsync(IEnumerable<MarketPrice> marketPrices, CancellationToken ct = default) => Task.CompletedTask;
+        public Task AddRangeAsync(IEnumerable<MarketPrice> marketPrices, CancellationToken ct = default) { Inserted.AddRange(marketPrices); return Task.CompletedTask; }
         public Task<bool> ExistsAsync(string source, int externalProductId, DateOnly priceDate, CancellationToken ct = default) => Task.FromResult(false);
         public Task<HashSet<DateOnly>> GetExistingDatesAsync(string source, int externalProductId, CancellationToken ct = default) => Task.FromResult(new HashSet<DateOnly>());
         public Task<int> BackfillCropIdAsync(string source, int externalProductId, Guid cropId, CancellationToken ct = default) => Task.FromResult(0);
@@ -74,6 +75,19 @@ public class MarketPriceIngestionProfileTests
     {
         public Task<List<DambullaChartItemDto>?> GetProductPriceChartAsync(int productId, CancellationToken ct)
             => Task.FromResult<List<DambullaChartItemDto>?>(new List<DambullaChartItemDto>());
+    }
+
+    private sealed class SingleItemDambullaClient : IDambullaApiClient
+    {
+        public Task<List<DambullaChartItemDto>?> GetProductPriceChartAsync(int productId, CancellationToken ct)
+            => Task.FromResult<List<DambullaChartItemDto>?>(new List<DambullaChartItemDto>
+            {
+                new()
+                {
+                    Id = 1, ProductId = productId, MinPrice = 100m, MaxPrice = 150m,
+                    Date = "2026-07-08", Product = new DambullaProductDto { Name = "Tomato" }
+                }
+            });
     }
 
     // Backs CodeSettings so the auto-provision path can stamp category-prefixed CropCodes
@@ -91,22 +105,33 @@ public class MarketPriceIngestionProfileTests
         public void UpdateDefaultSetting(DefaultSetting defaultSetting) { }
     }
 
-    private static IConfiguration Config()
-        => new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?> { ["MarketPriceSources:DambullaDec:MaxProductId"] = "0" })
-            .Build();
+    // Seeds the Dambulla Markets row the service resolves by MarketCode (mirrors the
+    // MKT00000001 HasData seed). Tests that want the fail-closed path clear the repo.
+    private static FakeGenericRepository<Market> MarketsWithDambulla()
+    {
+        var markets = new FakeGenericRepository<Market>();
+        var dambulla = Market.CreateNew("Dambulla Dedicated Economic Centre", "Matale",
+            AgriForecast.Domain.Enums.MarketType.DEC, isEconomicCenter: true);
+        dambulla.AssignCode("MKT00000001");
+        markets.Items.Add(dambulla);
+        return markets;
+    }
 
     private static (MarketPriceIngestionService svc, FakeCropRepository crops,
-                    FakeGenericRepository<CropAgronomyProfile> profiles, FakeMarketPriceRepository prices, FakeUnitOfWork uow) Build()
+                    FakeGenericRepository<CropAgronomyProfile> profiles, FakeMarketPriceRepository prices, FakeUnitOfWork uow) Build(
+        IDambullaApiClient? client = null, FakeGenericRepository<Market>? markets = null, string maxProductId = "0")
     {
         var crops = new FakeCropRepository();
         var profiles = new FakeGenericRepository<CropAgronomyProfile>();
         var prices = new FakeMarketPriceRepository();
         var uow = new FakeUnitOfWork();
         var codeSettings = new AgriForecast.Application.common.CodeSettings(new FakeDefaultSettingRepository());
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["MarketPriceSources:DambullaDec:MaxProductId"] = maxProductId })
+            .Build();
         var svc = new MarketPriceIngestionService(
-            new EmptyDambullaClient(), Config(), NullLogger<MarketPriceIngestionService>.Instance,
-            uow, prices, crops, profiles, codeSettings);
+            client ?? new EmptyDambullaClient(), config, NullLogger<MarketPriceIngestionService>.Instance,
+            uow, prices, crops, profiles, markets ?? MarketsWithDambulla(), codeSettings);
         return (svc, crops, profiles, prices, uow);
     }
 
@@ -161,5 +186,35 @@ public class MarketPriceIngestionProfileTests
         profile.CropId.Should().Be(newCrop.Id);
         profile.IsVerified.Should().BeFalse();
         profile.DataSource.Should().Be(CropAgronomyProfile.PendingRegistrationSource);
+    }
+
+    // ── EconomicCenterId: every inserted DEC row must link to the Dambulla market ────────────
+
+    [Fact]
+    public async Task InsertedRows_CarryDambullaEconomicCenterId()
+    {
+        var markets = MarketsWithDambulla();
+        var (svc, crops, _, prices, _) = Build(new SingleItemDambullaClient(), markets, maxProductId: "1");
+        var crop = Crop.CreateFromExternalSource("Tomato", 1, "DAMBULLA_DEC", "VEG000007");
+        crops.Crops.Add(crop);
+
+        await svc.IngestAsync(CancellationToken.None);
+
+        var row = prices.Inserted.Should().ContainSingle().Which;
+        row.EconomicCenterId.Should().Be(markets.Items.Single().Id,
+            "every DAMBULLA_DEC insert must link to the Dambulla Markets row — a NULL here silently recreates the Step 3.3 gap");
+    }
+
+    [Fact]
+    public async Task MissingDambullaMarket_FailsClosed_InsertsNothing()
+    {
+        var emptyMarkets = new FakeGenericRepository<Market>();
+        var (svc, _, _, prices, _) = Build(new SingleItemDambullaClient(), emptyMarkets, maxProductId: "1");
+
+        var act = () => svc.IngestAsync(CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*MKT00000001*");
+        prices.Inserted.Should().BeEmpty("unlinked rows must never be inserted");
     }
 }
