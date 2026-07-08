@@ -118,12 +118,15 @@ public class MarketPriceIngestionProfileTests
     }
 
     private static (MarketPriceIngestionService svc, FakeCropRepository crops,
-                    FakeGenericRepository<CropAgronomyProfile> profiles, FakeMarketPriceRepository prices, FakeUnitOfWork uow) Build(
-        IDambullaApiClient? client = null, FakeGenericRepository<Market>? markets = null, string maxProductId = "0")
+                    FakeGenericRepository<CropAgronomyProfile> profiles, FakeMarketPriceRepository prices,
+                    FakeGenericRepository<CommodityAlias> aliases, FakeUnitOfWork uow) Build(
+        IDambullaApiClient? client = null, FakeGenericRepository<Market>? markets = null, string maxProductId = "0",
+        FakeGenericRepository<CommodityAlias>? aliases = null)
     {
         var crops = new FakeCropRepository();
         var profiles = new FakeGenericRepository<CropAgronomyProfile>();
         var prices = new FakeMarketPriceRepository();
+        var aliasRepo = aliases ?? new FakeGenericRepository<CommodityAlias>();
         var uow = new FakeUnitOfWork();
         var codeSettings = new AgriForecast.Application.common.CodeSettings(new FakeDefaultSettingRepository());
         var config = new ConfigurationBuilder()
@@ -131,8 +134,8 @@ public class MarketPriceIngestionProfileTests
             .Build();
         var svc = new MarketPriceIngestionService(
             client ?? new EmptyDambullaClient(), config, NullLogger<MarketPriceIngestionService>.Instance,
-            uow, prices, crops, profiles, markets ?? MarketsWithDambulla(), codeSettings);
-        return (svc, crops, profiles, prices, uow);
+            uow, prices, crops, profiles, markets ?? MarketsWithDambulla(), aliasRepo, codeSettings);
+        return (svc, crops, profiles, prices, aliasRepo, uow);
     }
 
     // ── Self-heal: a crop with no profile gets a PENDING one ─────────────────────────────────
@@ -140,7 +143,7 @@ public class MarketPriceIngestionProfileTests
     [Fact]
     public async Task SelfHeals_CropWithoutProfile_ByStagingPendingProfile()
     {
-        var (svc, crops, profiles, _, _) = Build();
+        var (svc, crops, profiles, _, _, _) = Build();
         var orphan = Crop.CreateFromExternalSource("Legacy Carrot", 42, "DAMBULLA_DEC", "DMB000042");
         crops.Crops.Add(orphan);
 
@@ -159,7 +162,7 @@ public class MarketPriceIngestionProfileTests
     [Fact]
     public async Task DoesNotDuplicate_ProfileForCropThatAlreadyHasOne()
     {
-        var (svc, crops, profiles, _, _) = Build();
+        var (svc, crops, profiles, _, _, _) = Build();
         var crop = Crop.CreateFromExternalSource("Tomato", 7, "DAMBULLA_DEC", "DMB000007");
         crops.Crops.Add(crop);
         profiles.Items.Add(CropAgronomyProfile.CreatePending(crop.Id));   // pre-existing profile
@@ -174,7 +177,7 @@ public class MarketPriceIngestionProfileTests
     [Fact]
     public async Task AutoProvisionedCrop_FromExistingProduct_AlsoGetsPendingProfile()
     {
-        var (svc, crops, profiles, prices, _) = Build();
+        var (svc, crops, profiles, prices, _, _) = Build();
         // A product with price history but no crop yet -> service creates the crop AND its profile.
         prices.DistinctProducts.Add(new ExternalProduct(99, "New Brinjal"));
 
@@ -194,7 +197,7 @@ public class MarketPriceIngestionProfileTests
     public async Task InsertedRows_CarryDambullaEconomicCenterId()
     {
         var markets = MarketsWithDambulla();
-        var (svc, crops, _, prices, _) = Build(new SingleItemDambullaClient(), markets, maxProductId: "1");
+        var (svc, crops, _, prices, _, _) = Build(new SingleItemDambullaClient(), markets, maxProductId: "1");
         var crop = Crop.CreateFromExternalSource("Tomato", 1, "DAMBULLA_DEC", "VEG000007");
         crops.Crops.Add(crop);
 
@@ -209,12 +212,119 @@ public class MarketPriceIngestionProfileTests
     public async Task MissingDambullaMarket_FailsClosed_InsertsNothing()
     {
         var emptyMarkets = new FakeGenericRepository<Market>();
-        var (svc, _, _, prices, _) = Build(new SingleItemDambullaClient(), emptyMarkets, maxProductId: "1");
+        var (svc, _, _, prices, _, _) = Build(new SingleItemDambullaClient(), emptyMarkets, maxProductId: "1");
 
         var act = () => svc.IngestAsync(CancellationToken.None);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*MKT00000001*");
         prices.Inserted.Should().BeEmpty("unlinked rows must never be inserted");
+    }
+
+    // ── R2 Step 8.1: alias-route (CommodityAliases) parallel-run vs legacy ExternalProductId ──
+
+    // Alias-route resolution: a DEC alias keyed on the stringified ProductId that AGREES with the
+    // legacy Crops.ExternalProductId route yields shadow diff = 0.
+    [Fact]
+    public async Task AliasRoute_MatchingLegacy_YieldsZeroShadowDiff()
+    {
+        var crop = Crop.CreateFromExternalSource("Tomato", 11, "DAMBULLA_DEC", "VEG000065");
+        var aliases = new FakeGenericRepository<CommodityAlias>();
+        aliases.Items.Add(CommodityAlias.CreateNew("11", crop.Id, "DAMBULLA_DEC"));
+        var (svc, crops, _, _, _, _) = Build(aliases: aliases);
+        crops.Crops.Add(crop);
+
+        await svc.IngestAsync(CancellationToken.None);
+
+        Assert.NotNull(svc.LastShadowDiff);
+        svc.LastShadowDiff!.Compared.Should().Be(1);
+        svc.LastShadowDiff.Agreements.Should().Be(1);
+        svc.LastShadowDiff.ShadowDiffCount.Should().Be(0);
+    }
+
+    // Shadow-diff detection must actually FIRE: a DEC alias pointing at a DIFFERENT crop than the
+    // legacy route is counted as a divergence (and legacy still governs — nothing is misassigned).
+    [Fact]
+    public async Task AliasRoute_PointingAtDifferentCrop_IsCountedAsDivergence()
+    {
+        var legacyCrop = Crop.CreateFromExternalSource("Tomato", 11, "DAMBULLA_DEC", "VEG000065");
+        var otherCrop = Crop.CreateFromExternalSource("Cabbage", 1, "DAMBULLA_DEC", "VEG000014");
+        var aliases = new FakeGenericRepository<CommodityAlias>();
+        // Alias for product 11 wrongly points at the Cabbage crop, not the Tomato crop.
+        aliases.Items.Add(CommodityAlias.CreateNew("11", otherCrop.Id, "DAMBULLA_DEC"));
+        var (svc, crops, _, _, _, _) = Build(aliases: aliases);
+        crops.Crops.Add(legacyCrop);
+        crops.Crops.Add(otherCrop);
+
+        await svc.IngestAsync(CancellationToken.None);
+
+        // product 11: legacy=Tomato, alias=Cabbage -> divergence.
+        // product 1 (Cabbage): legacy present, no alias -> legacyOnly.
+        svc.LastShadowDiff!.Divergences.Should().Be(1);
+        svc.LastShadowDiff.LegacyOnly.Should().Be(1);
+        svc.LastShadowDiff.ShadowDiffCount.Should().BeGreaterThan(0, "a real divergence must surface");
+    }
+
+    // An active alias with no legacy counterpart is counted AliasOnly (still a non-zero shadow diff).
+    [Fact]
+    public async Task AliasRoute_WithoutLegacyCounterpart_IsCountedAliasOnly()
+    {
+        var crop = Crop.CreateFromExternalSource("Tomato", 11, "DAMBULLA_DEC", "VEG000065");
+        var aliases = new FakeGenericRepository<CommodityAlias>();
+        aliases.Items.Add(CommodityAlias.CreateNew("11", crop.Id, "DAMBULLA_DEC"));
+        var (svc, crops, _, _, _, _) = Build(aliases: aliases);
+        // Crop has NO ExternalProductId -> legacy route empty; alias route has product 11.
+        crops.Crops.Add(Crop.CreateForManualEntry("Manual Tomato", null, null, CropCategory.VegetableId));
+
+        await svc.IngestAsync(CancellationToken.None);
+
+        svc.LastShadowDiff!.AliasOnly.Should().Be(1);
+        svc.LastShadowDiff.LegacyOnly.Should().Be(0);
+        svc.LastShadowDiff.Divergences.Should().Be(0);
+    }
+
+    // WRITE-BOTH: a brand-new feed product must populate BOTH routes — Crops.ExternalProductId AND
+    // a DEC CommodityAlias row keyed on the stringified ProductId — and stay shadow-diff = 0.
+    [Fact]
+    public async Task AutoProvisionedCrop_WritesBothLegacyAndAliasRoutes()
+    {
+        // Product with price history but no crop yet -> service creates crop + alias (self-heal
+        // path via FakeMarketPriceRepository.DistinctProducts).
+        var (svc, crops, _, prices, aliasRepo, _) = Build(aliases: new FakeGenericRepository<CommodityAlias>());
+        prices.DistinctProducts.Add(new ExternalProduct(99, "New Brinjal"));
+
+        await svc.IngestAsync(CancellationToken.None);
+
+        var newCrop = crops.Crops.Should().ContainSingle(c => c.ExternalProductId == 99).Which;
+        newCrop.ExternalProductId.Should().Be(99, "legacy route (Crops.ExternalProductId) still written during the parallel-run window");
+        aliasRepo.Items.Should().ContainSingle(a =>
+            a.Alias == "99" && a.Source == "DAMBULLA_DEC" && a.CropId == newCrop.Id && a.IsActive,
+            "auto-provision must also stage the DEC alias row (write-both)");
+        svc.LastShadowDiff!.ShadowDiffCount.Should().Be(0, "write-both keeps the two routes in lockstep");
+    }
+
+    // ASSIGNMENT ROUTE PIN (Step 8.1 invariant): even when the alias route diverges, the LEGACY
+    // route must be the one that assigns CropId on inserted rows. The alias route is shadow-only
+    // until the 8.2 cut-over; a silent flip here is the regression this test exists to catch.
+    [Fact]
+    public async Task InsertedRows_AreAssignedByLegacyRoute_EvenWhenAliasDiverges()
+    {
+        var legacyCrop = Crop.CreateFromExternalSource("Tomato", 1, "DAMBULLA_DEC", "VEG000065");
+        var otherCrop = Crop.CreateFromExternalSource("Cabbage", 55, "DAMBULLA_DEC", "VEG000014");
+        var aliases = new FakeGenericRepository<CommodityAlias>();
+        // Alias for product 1 wrongly points at the Cabbage crop.
+        aliases.Items.Add(CommodityAlias.CreateNew("1", otherCrop.Id, "DAMBULLA_DEC"));
+        var (svc, crops, _, prices, _, _) = Build(new SingleItemDambullaClient(), maxProductId: "1",
+                                                  aliases: aliases);
+        crops.Crops.Add(legacyCrop);
+        crops.Crops.Add(otherCrop);
+
+        await svc.IngestAsync(CancellationToken.None);
+
+        var row = prices.Inserted.Should().ContainSingle().Which;
+        row.CropId.Should().Be(legacyCrop.Id,
+            "the legacy ExternalProductId route governs assignment until the 8.2 cut-over — "
+            + "the divergent alias must never win");
+        svc.LastShadowDiff!.Divergences.Should().BeGreaterThan(0, "the divergence must still be surfaced");
     }
 }
