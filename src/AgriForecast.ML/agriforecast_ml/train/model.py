@@ -28,10 +28,89 @@ def make_model(alpha: float) -> XGBRegressor:
     )
 
 
-def _fit_predict_log(model, X_tr, y_tr, X_te):
+def _fit_predict_log(model, X_tr, y_tr, X_te, sample_weight=None):
     # train on log1p target (price is right-skewed); invert for output
-    model.fit(X_tr, np.log1p(y_tr))
+    model.fit(X_tr, np.log1p(y_tr), sample_weight=sample_weight)
     return np.expm1(model.predict(X_te))
+
+
+# --- v14: exponential recency sample-weighting ------------------------------
+# Grid of candidate half-lives (days) for the pooled gated fit, plus the
+# UNWEIGHTED control (halflife=None => all-ones weights). Tuned leakage-safe on
+# inner splits of each fold's TRAIN window only; the fold's test block is NEVER
+# touched during tuning. If the tuned choice is the unweighted control that is a
+# valid, honest outcome and is reported as such.
+_HALFLIFE_GRID: list[float | None] = [90.0, 180.0, 365.0, 730.0, None]
+
+
+def recency_weights(observation_dates: pd.Series, halflife_days: float | None,
+                    t_ref: "pd.Timestamp | None" = None) -> np.ndarray:
+    """Per-row exponential recency weight ``w = 0.5 ** (age_days / halflife)``.
+
+    ``age_days`` is measured from ``t_ref`` (default = the MAX ObservationDate in
+    ``observation_dates``) so the most-recent training row has weight 1.0 and
+    older rows decay. POINT-IN-TIME: ``t_ref`` must be the max of the CURRENT
+    train window only — never a future/global max — so this stays leakage-safe
+    when called per fold (the caller passes the fold's train slice, or its inner
+    train slice during tuning).
+
+    ``halflife_days=None`` (or non-positive) is the UNWEIGHTED control: all-ones
+    weights, i.e. exactly the pre-v14 fit. This equivalence is pinned by a test.
+    """
+    n = len(observation_dates)
+    if halflife_days is None or halflife_days <= 0:
+        return np.ones(n, dtype=float)
+    ref = observation_dates.max() if t_ref is None else t_ref
+    age = (ref - observation_dates).dt.days.to_numpy(dtype=float)
+    return 0.5 ** (age / float(halflife_days))
+
+
+def _tune_halflife(df_tr: pd.DataFrame, X_tr: pd.DataFrame, y_tr: pd.Series,
+                   grid: list | None = None):
+    """Leakage-safe half-life selection on inner splits of the fold's TRAIN
+    window. Holds out the most-recent ~15% of the train window (purged: an inner-
+    train row is dropped if its harvest label date falls on/after the inner
+    cutoff) as an inner-validation block, fits the pooled gated model at each grid
+    half-life with recency weights computed on the INNER-TRAIN window only, and
+    picks the half-life with the lowest inner-val MAE. NEVER touches the fold's
+    test block.
+
+    Returns ``(best_halflife, inner_scores)`` where ``inner_scores`` maps each
+    grid value (float or None) to its inner-val MAE (or None if the inner split
+    was degenerate / could not be scored). If the inner split itself is
+    degenerate (too few dates/rows), returns ``(None, {})`` — the caller then
+    uses the unweighted control, reported honestly.
+    """
+    grid = grid if grid is not None else _HALFLIFE_GRID
+    obs = df_tr["ObservationDate"]
+    uniq = np.sort(obs.unique())
+    if len(uniq) < 5:
+        return None, {}
+    cut = pd.Timestamp(uniq[int(len(uniq) * 0.85)])
+    lbl = obs + pd.to_timedelta(df_tr["GrowthPeriodDays"].astype(int), unit="D")
+    inner_tr = ((obs < cut) & (lbl < cut)).to_numpy()   # purged inner-train
+    inner_val = (obs >= cut).to_numpy()
+    if inner_tr.sum() < 50 or inner_val.sum() < 20:
+        return None, {}
+
+    Xi_tr, yi_tr = X_tr[inner_tr], y_tr[inner_tr]
+    Xi_val, yi_val = X_tr[inner_val], y_tr[inner_val]
+    obs_itr = obs[inner_tr]
+    t_ref = obs_itr.max()   # inner-train max only — no leak from val block
+    yv = yi_val.to_numpy(dtype=float)
+
+    scores: dict = {}
+    for hl in grid:
+        w = recency_weights(obs_itr, hl, t_ref=t_ref)
+        pred = _fit_predict_log(make_model(0.5), Xi_tr, yi_tr, Xi_val, sample_weight=w)
+        scores[hl] = float(np.mean(np.abs(pred - yv)))
+    # Pick the lowest inner-val MAE. Tie-break toward the unweighted control
+    # (None) to avoid adding weighting on noise, else toward the longer half-life
+    # (gentler weighting) — both conservative.
+    best = min(scores, key=lambda k: (scores[k],
+                                      0 if k is None else 1,
+                                      -(k or 0)))
+    return best, scores
 
 
 def _residual_pred(X_tr, y_tr, X_te, off_tr, off_te):
@@ -85,6 +164,35 @@ def history_gated_crops(df: pd.DataFrame,
     """
     counts = df.groupby("CropId").size()
     return set(counts[counts >= int(min_history_obs)].index)
+
+
+def _incumbent_hybrid_mae() -> float | None:
+    """CV hybrid MAE recorded by the currently-promoted version, if any.
+
+    v14 must beat the INCUMBENT hybrid (not just a naive baseline). The value is
+    read from the live promoted metadata's cv block. Returns None when nothing is
+    promoted yet or the incumbent predates the hybrid field — the incumbent gate
+    then becomes a no-op and the naive-baseline gate governs alone.
+    Same-regime by construction: the v14 store == the v13 store (v14 changes the
+    FIT, not the data), so the incumbent's recorded hybrid MAE is measured on the
+    same rows/folds as v14's.
+    """
+    from ..registry import registry
+    live = registry.load_promoted_metadata()
+    if not live:
+        return None
+    cv = live.get("cv") or {}
+    v = cv.get("hybrid_MAE")
+    return float(v) if v is not None else None
+
+
+def _incumbent_gate(hybrid_mae: float) -> tuple[bool, float | None]:
+    """(beats_incumbent, incumbent_hybrid_mae). Brick-safe: when nothing is
+    promoted or the incumbent predates the hybrid field, the gate is a NO-OP
+    (True, None) — it must never fail-closed into a state where nothing can
+    ever be promoted."""
+    incumbent = _incumbent_hybrid_mae()
+    return (incumbent is None or hybrid_mae < incumbent), incumbent
 
 
 def _blend_winner_crops(df_tr, X_tr, y_tr):
@@ -165,9 +273,29 @@ def purged_walk_forward(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, n_folds
         gated = history_gated_crops(dtr, _DEFAULT_MIN_HISTORY_OBS)
         g_tr = dtr["CropId"].isin(gated).to_numpy()
         use_model = dte["CropId"].isin(gated).to_numpy()
+        # v14: tune the recency half-life on INNER splits of the GATED train
+        # window only (leakage-safe — never sees this fold's test block). Then fit
+        # the pooled gated model with recency weights at the chosen half-life,
+        # computed on the (full) gated train window with its own max as t_ref.
+        chosen_hl, inner_scores = None, {}
+        exp_thin_weighted_mae = None
         if g_tr.sum() >= 50 and use_model.any():
+            dtr_g, Xtr_g, ytr_g = dtr[g_tr], Xtr[g_tr], ytr[g_tr]
+            chosen_hl, inner_scores = _tune_halflife(dtr_g, Xtr_g, ytr_g)
+            w_g = recency_weights(dtr_g["ObservationDate"], chosen_hl)
             hybrid_model_pred = _fit_predict_log(
-                make_model(0.5), Xtr[g_tr], ytr[g_tr], Xte)
+                make_model(0.5), Xtr_g, ytr_g, Xte, sample_weight=w_g)
+            # --- exploratory (report-only): weighted pooled model on THIN crops.
+            # Fit the pooled model on ALL train crops (thin included) with recency
+            # weights at the same chosen half-life, score the thin test segment.
+            # Evidence for a FUTURE served-set widening; changes NO behavior.
+            if (~use_model).any():
+                w_all = recency_weights(dtr["ObservationDate"], chosen_hl)
+                thin_pred_all = _fit_predict_log(
+                    make_model(0.5), Xtr, ytr, Xte, sample_weight=w_all)
+                yte_thin = yte.to_numpy(dtype=float)[~use_model]
+                exp_thin_weighted_mae = float(
+                    np.mean(np.abs(thin_pred_all[~use_model] - yte_thin)))
         else:
             # Degenerate fold (no gated crops / too little gated train) -> the
             # hybrid is all-baseline. Keep the array shape.
@@ -181,6 +309,11 @@ def purged_walk_forward(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, n_folds
                     if use_model.any() else None)
         seg_thin = (regression_metrics(yte_np[~use_model], rw_pred[~use_model])["MAE"]
                     if (~use_model).any() else None)
+        # Exploratory thin-segment: recency-mean baseline MAE on the SAME thin
+        # rows, for a like-for-like weighted-pooled-vs-recency-mean comparison.
+        exp_thin_recmean_mae = (
+            regression_metrics(yte_np[~use_model], rw_pred[~use_model])["MAE"]
+            if (~use_model).any() else None)
 
         # --- candidate approaches (leakage-safe) -----------------------------
         # (2) residual model on a per-crop crop-mean offset
@@ -220,7 +353,18 @@ def purged_walk_forward(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, n_folds
                  hybrid_MAE=hybrid["MAE"],
                  hybrid_model_frac=round(float(use_model.mean()), 3),
                  n_gated_crops=len(gated),
-                 hybrid_long_seg_MAE=seg_long, hybrid_thin_seg_MAE=seg_thin)
+                 hybrid_long_seg_MAE=seg_long, hybrid_thin_seg_MAE=seg_thin,
+                 # v14 recency-weighting: chosen half-life this fold + the inner-
+                 # tuning scores (grid val -> inner-val MAE). None == unweighted
+                 # control chosen (or inner split degenerate).
+                 recency_halflife=chosen_hl,
+                 recency_inner_scores={("inf" if k is None else k): round(v, 3)
+                                       for k, v in inner_scores.items()},
+                 # v14 exploratory (report-only): weighted pooled model vs recency-
+                 # mean on the THIN (<365) test segment. Evidence for a future
+                 # served-set widening; NO behavior change this iteration.
+                 exp_thin_weighted_MAE=exp_thin_weighted_mae,
+                 exp_thin_recmean_MAE=exp_thin_recmean_mae)
         fold_rows.append(m)
     return fold_rows
 
@@ -333,6 +477,17 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
 
     beats_baseline = best_ml_mae < best_baseline_mae
 
+    # --- v14 incumbent gate: must also beat the promoted v13 hybrid MAE -------
+    # v14 (recency-weighted gated fit) is only shippable if it improves on the
+    # INCUMBENT v13 hybrid, not merely on the recency-mean baseline. Same
+    # 3-fold purged walk-forward, same rows/denominator — v14 changes only the
+    # FIT. Brick-safe no-op when nothing is promoted / older shape (see
+    # _incumbent_gate). Deliberately does NOT flip beats_baseline: that flag
+    # (and everything derived from it — active_predictor, payload) must keep
+    # telling the true baseline story; losing to the incumbent only blocks
+    # PROMOTION, decided at the guardrail below.
+    beats_incumbent, _incumbent_mae = _incumbent_gate(hybrid_mae)
+
     # --- v13 fold corridor: guard against a pass driven by fold averaging -----
     # The gate is not just CV MAE < best baseline; the SHIPPED hybrid must also
     # not regress vs recency-mean in the volatile fold-3 regime, and the long-
@@ -367,14 +522,23 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
     if verbose:
         print("\n=== Walk-forward folds ===")
         for i, f in enumerate(folds, 1):
+            _hl = f.get("recency_halflife")
+            _hl_s = "inf" if _hl is None else f"{_hl:g}d"
             print(f"  fold {i}: train={f['train']} test={f['test']} "
                   f"HYBRID={f['hybrid_MAE']}(served {f['hybrid_model_frac']}, "
                   f"{f['n_gated_crops']} crops; long-seg={f['hybrid_long_seg_MAE']} "
-                  f"thin-seg={f['hybrid_thin_seg_MAE']}) "
+                  f"thin-seg={f['hybrid_thin_seg_MAE']}; hl={_hl_s}) "
                   f"| pooled={f['MAE']} resid={f['residual_MAE']} "
                   f"blend={f['blend_MAE']} "
                   f"| cropmean={f['cropmean_MAE']} recmean={f['recencymean_MAE']} "
                   f"carry={f['carry_MAE']}")
+            if f.get("recency_inner_scores"):
+                print(f"          inner-tune MAE: " + ", ".join(
+                    f"{k}={v}" for k, v in f["recency_inner_scores"].items()))
+            if f.get("exp_thin_weighted_MAE") is not None:
+                print(f"          [exploratory thin-seg] weighted-pooled="
+                      f"{f['exp_thin_weighted_MAE']:.2f} vs recency-mean="
+                      f"{f['exp_thin_recmean_MAE']:.2f}")
         print("\n--- ML candidates (CV MAE) ---")
         print(f"  HYBRID (shipped): {hybrid_mae:.2f}  <- history-gated pooled+recency")
         print(f"  pooled model    : {model_mae:.2f}  (MAPE {model_mape:.1f}%)")
@@ -393,15 +557,37 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
               f"recency : {_da('recencymean_dir_acc')}")
         print(f"\nServed ML candidate : {best_ml_name} ({best_ml_mae:.2f})")
         print(f"Best baseline       : {best_baseline_name} ({best_baseline_mae:.2f})")
+        if _incumbent_mae is not None:
+            _cmp = "<" if beats_incumbent else ">="
+            print(f"Incumbent v13 hybrid: {_incumbent_mae:.2f} "
+                  f"(v14 {hybrid_mae:.2f} {_cmp} incumbent -> "
+                  f"{'beats' if beats_incumbent else 'DOES NOT beat'} incumbent)")
+        else:
+            print("Incumbent v13 hybrid: n/a (no recorded hybrid_MAE) -> "
+                  "incumbent gate is a no-op")
         if corridor_notes:
             print("Corridor breaches   : " + "; ".join(corridor_notes))
         else:
             print("Corridor            : OK (final-fold not worse than recency-mean; "
                   "long-history segment within ceiling)")
-        verdict = (f"PROMOTE ({best_ml_name} beats {best_baseline_name}, corridor OK)"
-                   if beats_baseline
-                   else f"DO NOT PROMOTE ('{best_ml_name}' worse than "
-                        f"'{best_baseline_name}' or corridor breach) -> serve fallback")
+        if beats_baseline and beats_incumbent:
+            verdict = (f"PROMOTE ({best_ml_name} {best_ml_mae:.2f} beats "
+                       f"{best_baseline_name} {best_baseline_mae:.2f} AND incumbent, "
+                       f"corridor OK)")
+        else:
+            # Distinguish the failure mode: baseline gate vs v14 incumbent gate
+            # vs corridor. Do NOT say "worse than baseline" when v14 actually
+            # beat the baseline but lost to the incumbent (honest reporting).
+            beat_bl = best_ml_mae < best_baseline_mae
+            if not beat_bl:
+                why = f"'{best_ml_name}' {best_ml_mae:.2f} not below best baseline {best_baseline_mae:.2f}"
+            elif not beats_incumbent:
+                why = (f"'{best_ml_name}' {best_ml_mae:.2f} beats baseline "
+                       f"{best_baseline_mae:.2f} BUT not incumbent v13 "
+                       f"{_incumbent_mae:.2f}")
+            else:
+                why = "corridor breach"
+            verdict = f"DO NOT PROMOTE ({why}) -> keep incumbent / serve fallback"
         print(f"Gate: {verdict}")
         # Festival-feature honesty (R1.1 P2): the festival columns
         # (HarvestInFestivalLeadup / DaysFromHarvestToNextFestival /
@@ -444,14 +630,29 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
     # serve time. Fitting on gated-only also keeps the pooled encoder's category
     # set == served_on_crops, so a non-served CropId can never reach the model.
     X_g, y_g = X[g_final_mask].copy(), y[g_final_mask]
+    df_g = df[g_final_mask]
     # Drop unused CropId categories so the categorical encoder's known set is
     # exactly the gated crops (unseen-category raise stays the crash-guard's job).
     for c in dataset.CATEGORICAL_COLS:
         if c in X_g.columns and str(X_g[c].dtype) == "category":
             X_g[c] = X_g[c].cat.remove_unused_categories()
+    # v14: tune the recency half-life on inner splits of the FULL gated training
+    # frame (leakage-safe: inner split has no test block at final-fit time — this
+    # IS all training data), then apply the SAME half-life's recency weights to
+    # EVERY quantile head so p10/p50/p90 stay consistent. t_ref = the gated
+    # frame's max ObservationDate (most-recent train row => weight 1.0).
+    final_halflife, final_inner_scores = _tune_halflife(df_g, X_g, y_g)
+    w_final = recency_weights(df_g["ObservationDate"], final_halflife)
     final = {q: make_model(a) for q, a in QUANTILES.items()}
     for q, mdl in final.items():
-        mdl.fit(X_g, np.log1p(y_g))
+        mdl.fit(X_g, np.log1p(y_g), sample_weight=w_final)
+    if verbose:
+        _hl_str = "unweighted (inf)" if final_halflife is None else f"{final_halflife:g}d"
+        print(f"\nv14 recency-weighting (final fit): chosen half-life = {_hl_str}")
+        if final_inner_scores:
+            print("  inner-tuning (final gated frame) grid MAE: " + ", ".join(
+                f"{'inf' if k is None else f'{k:g}d'}={v:.2f}"
+                for k, v in final_inner_scores.items()))
 
     # Final residual quantile models (the "residual" kind). Each predicts the
     # multiplicative residual log1p(price) - log1p(offset); serving adds the
@@ -488,6 +689,10 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
                "best_baseline_MAE": round(best_baseline_mae, 2),
                # v13 corridor verdict + per-fold segment MAEs (within-fold checks).
                "corridor_ok": corridor_ok, "corridor_notes": corridor_notes, "folds": folds,
+               # v14 incumbent gate: v14 must beat BOTH the naive baseline AND the
+               # promoted v13 hybrid MAE (same rows/folds; v14 changes only the fit).
+               "incumbent_hybrid_MAE": _incumbent_mae,
+               "beats_incumbent": beats_incumbent,
                # Directional accuracy (go/no-go signal) -- REPORTING ONLY, not a
                # gate input. Pooled = mean over folds (folds carry per-fold
                # *_dir_acc keys). Reference price = AvgPrice known at obs date.
@@ -519,6 +724,19 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
         "min_history_obs": _DEFAULT_MIN_HISTORY_OBS,
         "n_train_rows": int(len(df)),
         "n_crops": int(df["CropId"].nunique()),
+        # v14: exponential recency sample-weighting on the pooled gated fit. The
+        # half-life is tuned leakage-safe on inner splits of the (gated) train
+        # window; None == the unweighted control was chosen. Recorded for audit
+        # and reproducibility — the WEIGHTS themselves are a deterministic
+        # function of ObservationDate + this half-life (see recency_weights).
+        "recency_weighting": {
+            "final_halflife_days": final_halflife,
+            "grid": [("inf" if h is None else h) for h in _HALFLIFE_GRID],
+            "final_inner_scores": {("inf" if k is None else k): round(v, 3)
+                                   for k, v in final_inner_scores.items()},
+            "per_fold_halflife": [("inf" if f.get("recency_halflife") is None
+                                   else f.get("recency_halflife")) for f in folds],
+        },
     }
     payload = {"models": final, "feature_cols": cols, "categorical": dataset.CATEGORICAL_COLS,
                "log_target": True, "quantiles": QUANTILES,
@@ -529,6 +747,10 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
                # v13: the model-served crop set. Serving MUST route a crop not in
                # this set to the fallback ladder (intentional, not exception-driven).
                "served_on_crops": served_on_crops,
+               # v14: half-life used for the recency-weighted gated fit (audit
+               # only; the fitted models already bake in the weights). Serving
+               # does NOT need to recompute weights — additive, ignorable field.
+               "recency_halflife_days": final_halflife,
                "residual_models": residual_models,
                "residual_offsets": residual_offsets,
                "residual_offset_global": residual_offset_global}
@@ -542,8 +764,18 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
     # active (no-op promotion / rollback).
     # The ML path's served MAE is the best leakage-safe ML candidate; the fallback
     # path's served MAE is the best baseline.
-    promote, reason = _promotion_decision(best_ml_mae, best_baseline_mae, beats_baseline,
-                                          candidate_cropmean_mae=cropmean_mae)
+    # v14 incumbent short-circuit: a candidate that honestly beats its baselines
+    # but not the live incumbent's hybrid MAE is NOT promoted — with its own
+    # explicit reason, so _promotion_decision's baseline-centric wording is never
+    # borrowed for an incumbent loss. beats_baseline stays true in the metadata.
+    if beats_baseline and not beats_incumbent:
+        promote = False
+        reason = (f"Candidate hybrid MAE {hybrid_mae:.2f} beats its own baselines "
+                  f"but not the incumbent's recorded hybrid MAE {_incumbent_mae:.2f} "
+                  f"(same store/folds) -> incumbent stays promoted.")
+    else:
+        promote, reason = _promotion_decision(best_ml_mae, best_baseline_mae, beats_baseline,
+                                              candidate_cropmean_mae=cropmean_mae)
     metadata["promotion_decision"] = reason
     metadata["promotion_recommended"] = promote  # the guardrail's verdict (for review)
 
