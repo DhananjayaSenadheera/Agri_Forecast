@@ -96,7 +96,11 @@ builder.Services.AddCors(options =>
         {
             policy.WithOrigins(corsOrigins)
                 .AllowAnyMethod()
-                .AllowAnyHeader();
+                .AllowAnyHeader()
+                // Cookie-based auth (the refresh-token flow) requires credentialed CORS.
+                // Safe here because origins are an explicit allow-list (never AllowAnyOrigin) —
+                // AllowCredentials() with a wildcard origin is forbidden by the CORS spec anyway.
+                .AllowCredentials();
         });
 });
 
