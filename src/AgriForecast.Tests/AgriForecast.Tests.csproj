@@ -21,10 +21,17 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <!-- The API reference (+ ASP.NET framework ref) lets us unit-test AuthController's
+       cookie I/O and endpoint behaviour with a DefaultHttpContext, no TestServer needed. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\AgriForecast.Application\AgriForecast.Application.csproj" />
     <ProjectReference Include="..\AgriForecast.Domain\AgriForecast.Domain.csproj" />
     <ProjectReference Include="..\AgriForecast.Infrastructure\AgriForecast.Infrastructure.csproj" />
+    <ProjectReference Include="..\AgriForecast.API\AgriForecast.API.csproj" />
   </ItemGroup>
 
 </Project>
