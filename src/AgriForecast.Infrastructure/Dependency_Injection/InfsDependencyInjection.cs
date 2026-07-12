@@ -47,6 +47,8 @@ public static class InfsDependencyInjection
         services.AddScoped<IPolicyFlagRepository, PolicyFlagRepository>();
         services.AddScoped<IForecastingService, ForecastingService>();
         services.AddScoped<IRecommendationService, RecommendationService>();
+        // Read-only market-overview snapshot store (GET /api/forecast/market-overview).
+        services.AddScoped<IMarketOverviewStore, AgriForecast.Infrastructure.Services.MarketOverview.MarketOverviewStore>();
 
         // R1.1 P1 Step 6: per-source ingestion watermark store + the CBSL ingestion service.
         // (The HARTI + CBSL typed HttpClients are registered further down alongside the other

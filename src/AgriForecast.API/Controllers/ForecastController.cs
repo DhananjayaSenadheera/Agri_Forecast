@@ -1,5 +1,6 @@
 using AgriForecast.Application.Requests.Crop.Quaries.GetBest;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetHarvest;
+using AgriForecast.Application.Requests.Forecast.Quaries.GetMarketOverview;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetMonthly;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetTimeline;
 using MediatR;
@@ -52,6 +53,18 @@ public class ForecastController(IMediator mediator) : ControllerBase
     public async Task<IActionResult> GetBestCrops([FromQuery] int lookbackMonths = 3)
     {
         var result = await mediator.Send(new GetBestCropsQuery { LookbackMonths = lookbackMonths });
+        if (result.IsSuccess)
+            return Ok(result.Data);
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
+    // Read-only market snapshot for the farmer-app landing screen. days is clamped
+    // to [7, 90] in the handler (default 30). Empty data returns a 200 with empty
+    // arrays + null asOf, never a 404.
+    [HttpGet("market-overview")]
+    public async Task<IActionResult> GetMarketOverview([FromQuery] int days = 30)
+    {
+        var result = await mediator.Send(new GetMarketOverviewQuery { Days = days });
         if (result.IsSuccess)
             return Ok(result.Data);
         return BadRequest(ToErrorResponse(result.Error));
