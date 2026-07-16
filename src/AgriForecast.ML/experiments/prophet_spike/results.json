@@ -1,0 +1,1099 @@
+{
+  "crops": {
+    "VEG000015": {
+      "gp": 75,
+      "horizons": {
+        "gp": {
+          "horizon": "gp",
+          "n_total_origins": 169,
+          "n_matched": 169,
+          "n_dropped": 0,
+          "overall": {
+            "prophet": {
+              "MAE": 224.29,
+              "RMSE": 278.5,
+              "MAPE": 70.85,
+              "dir_acc": 0.6568,
+              "n": 169
+            },
+            "snaive": {
+              "MAE": 222.37,
+              "RMSE": 275.52,
+              "MAPE": 62.61,
+              "dir_acc": 0.7219,
+              "n": 169
+            },
+            "carry": {
+              "MAE": 264.07,
+              "RMSE": 339.67,
+              "MAPE": 75.08,
+              "dir_acc": 0.0059,
+              "n": 169
+            },
+            "v13": {
+              "MAE": 184.89,
+              "RMSE": 243.06,
+              "MAPE": 43.63,
+              "dir_acc": 0.7456,
+              "n": 169
+            }
+          },
+          "by_fold": {
+            "1": {
+              "prophet": {
+                "MAE": 236.0,
+                "RMSE": 261.95,
+                "MAPE": 81.52,
+                "dir_acc": 0.4677,
+                "n": 62
+              },
+              "snaive": {
+                "MAE": 153.15,
+                "RMSE": 189.22,
+                "MAPE": 56.85,
+                "dir_acc": 0.6452,
+                "n": 62
+              },
+              "carry": {
+                "MAE": 223.71,
+                "RMSE": 271.69,
+                "MAPE": 72.87,
+                "dir_acc": 0.0161,
+                "n": 62
+              },
+              "v13": {
+                "MAE": 160.86,
+                "RMSE": 195.8,
+                "MAPE": 50.52,
+                "dir_acc": 0.6129,
+                "n": 62
+              }
+            },
+            "2": {
+              "prophet": {
+                "MAE": 151.82,
+                "RMSE": 200.07,
+                "MAPE": 23.28,
+                "dir_acc": 0.8302,
+                "n": 53
+              },
+              "snaive": {
+                "MAE": 248.77,
+                "RMSE": 299.63,
+                "MAPE": 41.85,
+                "dir_acc": 0.7736,
+                "n": 53
+              },
+              "carry": {
+                "MAE": 235.19,
+                "RMSE": 293.36,
+                "MAPE": 39.81,
+                "dir_acc": 0.0,
+                "n": 53
+              },
+              "v13": {
+                "MAE": 236.07,
+                "RMSE": 289.68,
+                "MAPE": 37.53,
+                "dir_acc": 0.7547,
+                "n": 53
+              }
+            },
+            "3": {
+              "prophet": {
+                "MAE": 281.96,
+                "RMSE": 353.09,
+                "MAPE": 105.28,
+                "dir_acc": 0.7037,
+                "n": 54
+              },
+              "snaive": {
+                "MAE": 275.93,
+                "RMSE": 329.16,
+                "MAPE": 89.61,
+                "dir_acc": 0.7593,
+                "n": 54
+              },
+              "carry": {
+                "MAE": 338.75,
+                "RMSE": 438.03,
+                "MAPE": 112.23,
+                "dir_acc": 0.0,
+                "n": 54
+              },
+              "v13": {
+                "MAE": 162.24,
+                "RMSE": 241.91,
+                "MAPE": 41.71,
+                "dir_acc": 0.8889,
+                "n": 54
+              }
+            }
+          },
+          "drop_reasons_any_nan": {}
+        },
+        "7": {
+          "horizon": "7",
+          "n_total_origins": 169,
+          "n_matched": 169,
+          "n_dropped": 0,
+          "overall": {
+            "prophet": {
+              "MAE": 189.3,
+              "RMSE": 233.2,
+              "MAPE": 52.99,
+              "dir_acc": 0.4675,
+              "n": 169
+            },
+            "snaive": {
+              "MAE": 211.3,
+              "RMSE": 264.57,
+              "MAPE": 58.48,
+              "dir_acc": 0.5266,
+              "n": 169
+            },
+            "carry": {
+              "MAE": 77.23,
+              "RMSE": 106.7,
+              "MAPE": 17.54,
+              "dir_acc": 0.071,
+              "n": 169
+            }
+          },
+          "by_fold": {
+            "1": {
+              "prophet": {
+                "MAE": 185.05,
+                "RMSE": 228.84,
+                "MAPE": 52.95,
+                "dir_acc": 0.4677,
+                "n": 62
+              },
+              "snaive": {
+                "MAE": 155.97,
+                "RMSE": 195.83,
+                "MAPE": 51.76,
+                "dir_acc": 0.5806,
+                "n": 62
+              },
+              "carry": {
+                "MAE": 64.11,
+                "RMSE": 83.28,
+                "MAPE": 16.58,
+                "dir_acc": 0.0645,
+                "n": 62
+              }
+            },
+            "2": {
+              "prophet": {
+                "MAE": 173.48,
+                "RMSE": 221.52,
+                "MAPE": 40.04,
+                "dir_acc": 0.4906,
+                "n": 53
+              },
+              "snaive": {
+                "MAE": 195.85,
+                "RMSE": 231.15,
+                "MAPE": 42.11,
+                "dir_acc": 0.5472,
+                "n": 53
+              },
+              "carry": {
+                "MAE": 73.87,
+                "RMSE": 97.86,
+                "MAPE": 15.14,
+                "dir_acc": 0.0755,
+                "n": 53
+              }
+            },
+            "3": {
+              "prophet": {
+                "MAE": 209.7,
+                "RMSE": 248.82,
+                "MAPE": 65.74,
+                "dir_acc": 0.4444,
+                "n": 54
+              },
+              "snaive": {
+                "MAE": 290.0,
+                "RMSE": 350.13,
+                "MAPE": 82.25,
+                "dir_acc": 0.4444,
+                "n": 54
+              },
+              "carry": {
+                "MAE": 95.6,
+                "RMSE": 135.17,
+                "MAPE": 21.0,
+                "dir_acc": 0.0741,
+                "n": 54
+              }
+            }
+          },
+          "drop_reasons_any_nan": {}
+        },
+        "30": {
+          "horizon": "30",
+          "n_total_origins": 169,
+          "n_matched": 169,
+          "n_dropped": 0,
+          "overall": {
+            "prophet": {
+              "MAE": 242.21,
+              "RMSE": 289.7,
+              "MAPE": 70.18,
+              "dir_acc": 0.5917,
+              "n": 169
+            },
+            "snaive": {
+              "MAE": 219.99,
+              "RMSE": 272.27,
+              "MAPE": 60.34,
+              "dir_acc": 0.6213,
+              "n": 169
+            },
+            "carry": {
+              "MAE": 190.44,
+              "RMSE": 251.11,
+              "MAPE": 44.66,
+              "dir_acc": 0.0533,
+              "n": 169
+            }
+          },
+          "by_fold": {
+            "1": {
+              "prophet": {
+                "MAE": 272.69,
+                "RMSE": 315.37,
+                "MAPE": 80.89,
+                "dir_acc": 0.5161,
+                "n": 62
+              },
+              "snaive": {
+                "MAE": 155.32,
+                "RMSE": 198.15,
+                "MAPE": 52.8,
+                "dir_acc": 0.6774,
+                "n": 62
+              },
+              "carry": {
+                "MAE": 150.89,
+                "RMSE": 200.53,
+                "MAPE": 38.99,
+                "dir_acc": 0.0645,
+                "n": 62
+              }
+            },
+            "2": {
+              "prophet": {
+                "MAE": 198.53,
+                "RMSE": 251.76,
+                "MAPE": 43.44,
+                "dir_acc": 0.6415,
+                "n": 53
+              },
+              "snaive": {
+                "MAE": 207.55,
+                "RMSE": 242.59,
+                "MAPE": 42.13,
+                "dir_acc": 0.6415,
+                "n": 53
+              },
+              "carry": {
+                "MAE": 212.74,
+                "RMSE": 260.49,
+                "MAPE": 42.59,
+                "dir_acc": 0.0189,
+                "n": 53
+              }
+            },
+            "3": {
+              "prophet": {
+                "MAE": 250.07,
+                "RMSE": 293.7,
+                "MAPE": 84.11,
+                "dir_acc": 0.6296,
+                "n": 54
+              },
+              "snaive": {
+                "MAE": 306.44,
+                "RMSE": 359.38,
+                "MAPE": 86.86,
+                "dir_acc": 0.537,
+                "n": 54
+              },
+              "carry": {
+                "MAE": 213.98,
+                "RMSE": 290.81,
+                "MAPE": 53.19,
+                "dir_acc": 0.0741,
+                "n": 54
+              }
+            }
+          },
+          "drop_reasons_any_nan": {}
+        }
+      },
+      "splice": {
+        "gp_pre_splice": {
+          "horizon": "gp",
+          "n_total_origins": 110,
+          "n_matched": 110,
+          "n_dropped": 0,
+          "overall": {
+            "prophet": {
+              "MAE": 195.6,
+              "RMSE": 235.36,
+              "MAPE": 55.73,
+              "dir_acc": 0.6545,
+              "n": 110
+            },
+            "snaive": {
+              "MAE": 183.09,
+              "RMSE": 224.97,
+              "MAPE": 49.08,
+              "dir_acc": 0.7273,
+              "n": 110
+            },
+            "carry": {
+              "MAE": 234.55,
+              "RMSE": 286.97,
+              "MAPE": 59.57,
+              "dir_acc": 0.0091,
+              "n": 110
+            },
+            "v13": {
+              "MAE": 186.66,
+              "RMSE": 233.16,
+              "MAPE": 44.16,
+              "dir_acc": 0.7,
+              "n": 110
+            }
+          },
+          "by_fold": {
+            "1": {
+              "prophet": {
+                "MAE": 236.0,
+                "RMSE": 261.95,
+                "MAPE": 81.52,
+                "dir_acc": 0.4677,
+                "n": 62
+              },
+              "snaive": {
+                "MAE": 153.15,
+                "RMSE": 189.22,
+                "MAPE": 56.85,
+                "dir_acc": 0.6452,
+                "n": 62
+              },
+              "carry": {
+                "MAE": 223.71,
+                "RMSE": 271.69,
+                "MAPE": 72.87,
+                "dir_acc": 0.0161,
+                "n": 62
+              },
+              "v13": {
+                "MAE": 160.86,
+                "RMSE": 195.8,
+                "MAPE": 50.52,
+                "dir_acc": 0.6129,
+                "n": 62
+              }
+            },
+            "2": {
+              "prophet": {
+                "MAE": 143.42,
+                "RMSE": 195.75,
+                "MAPE": 22.41,
+                "dir_acc": 0.8958,
+                "n": 48
+              },
+              "snaive": {
+                "MAE": 221.77,
+                "RMSE": 264.08,
+                "MAPE": 39.05,
+                "dir_acc": 0.8333,
+                "n": 48
+              },
+              "carry": {
+                "MAE": 248.54,
+                "RMSE": 305.59,
+                "MAPE": 42.39,
+                "dir_acc": 0.0,
+                "n": 48
+              },
+              "v13": {
+                "MAE": 219.99,
+                "RMSE": 273.98,
+                "MAPE": 35.95,
+                "dir_acc": 0.8125,
+                "n": 48
+              }
+            }
+          },
+          "drop_reasons_any_nan": {}
+        },
+        "gp_post_splice": {
+          "horizon": "gp",
+          "n_total_origins": 59,
+          "n_matched": 59,
+          "n_dropped": 0,
+          "overall": {
+            "prophet": {
+              "MAE": 277.77,
+              "RMSE": 344.8,
+              "MAPE": 99.04,
+              "dir_acc": 0.661,
+              "n": 59
+            },
+            "snaive": {
+              "MAE": 295.59,
+              "RMSE": 350.82,
+              "MAPE": 87.84,
+              "dir_acc": 0.7119,
+              "n": 59
+            },
+            "carry": {
+              "MAE": 319.11,
+              "RMSE": 420.64,
+              "MAPE": 103.99,
+              "dir_acc": 0.0,
+              "n": 59
+            },
+            "v13": {
+              "MAE": 181.58,
+              "RMSE": 260.52,
+              "MAPE": 42.65,
+              "dir_acc": 0.8305,
+              "n": 59
+            }
+          },
+          "by_fold": {
+            "2": {
+              "prophet": {
+                "MAE": 232.51,
+                "RMSE": 237.57,
+                "MAPE": 31.66,
+                "dir_acc": 0.2,
+                "n": 5
+              },
+              "snaive": {
+                "MAE": 508.0,
+                "RMSE": 531.19,
+                "MAPE": 68.72,
+                "dir_acc": 0.2,
+                "n": 5
+              },
+              "carry": {
+                "MAE": 107.0,
+                "RMSE": 125.48,
+                "MAPE": 15.0,
+                "dir_acc": 0.0,
+                "n": 5
+              },
+              "v13": {
+                "MAE": 390.5,
+                "RMSE": 410.91,
+                "MAPE": 52.7,
+                "dir_acc": 0.2,
+                "n": 5
+              }
+            },
+            "3": {
+              "prophet": {
+                "MAE": 281.96,
+                "RMSE": 353.09,
+                "MAPE": 105.28,
+                "dir_acc": 0.7037,
+                "n": 54
+              },
+              "snaive": {
+                "MAE": 275.93,
+                "RMSE": 329.16,
+                "MAPE": 89.61,
+                "dir_acc": 0.7593,
+                "n": 54
+              },
+              "carry": {
+                "MAE": 338.75,
+                "RMSE": 438.03,
+                "MAPE": 112.23,
+                "dir_acc": 0.0,
+                "n": 54
+              },
+              "v13": {
+                "MAE": 162.24,
+                "RMSE": 241.91,
+                "MAPE": 41.71,
+                "dir_acc": 0.8889,
+                "n": 54
+              }
+            }
+          },
+          "drop_reasons_any_nan": {}
+        },
+        "n_pre": 110,
+        "n_post": 59
+      }
+    },
+    "VEG000057": {
+      "gp": 65,
+      "horizons": {
+        "gp": {
+          "horizon": "gp",
+          "n_total_origins": 171,
+          "n_matched": 171,
+          "n_dropped": 0,
+          "overall": {
+            "prophet": {
+              "MAE": 88.59,
+              "RMSE": 106.61,
+              "MAPE": 56.92,
+              "dir_acc": 0.7018,
+              "n": 171
+            },
+            "snaive": {
+              "MAE": 85.56,
+              "RMSE": 104.44,
+              "MAPE": 50.61,
+              "dir_acc": 0.7076,
+              "n": 171
+            },
+            "carry": {
+              "MAE": 106.74,
+              "RMSE": 136.51,
+              "MAPE": 65.32,
+              "dir_acc": 0.0292,
+              "n": 171
+            },
+            "v13": {
+              "MAE": 84.07,
+              "RMSE": 106.46,
+              "MAPE": 47.09,
+              "dir_acc": 0.7135,
+              "n": 171
+            }
+          },
+          "by_fold": {
+            "1": {
+              "prophet": {
+                "MAE": 92.83,
+                "RMSE": 108.53,
+                "MAPE": 67.51,
+                "dir_acc": 0.6613,
+                "n": 62
+              },
+              "snaive": {
+                "MAE": 58.51,
+                "RMSE": 69.31,
+                "MAPE": 39.77,
+                "dir_acc": 0.7742,
+                "n": 62
+              },
+              "carry": {
+                "MAE": 99.35,
+                "RMSE": 121.22,
+                "MAPE": 69.59,
+                "dir_acc": 0.0161,
+                "n": 62
+              },
+              "v13": {
+                "MAE": 75.5,
+                "RMSE": 90.92,
+                "MAPE": 49.89,
+                "dir_acc": 0.7581,
+                "n": 62
+              }
+            },
+            "2": {
+              "prophet": {
+                "MAE": 54.1,
+                "RMSE": 64.47,
+                "MAPE": 23.96,
+                "dir_acc": 0.7037,
+                "n": 54
+              },
+              "snaive": {
+                "MAE": 98.98,
+                "RMSE": 117.64,
+                "MAPE": 44.05,
+                "dir_acc": 0.6852,
+                "n": 54
+              },
+              "carry": {
+                "MAE": 74.17,
+                "RMSE": 95.82,
+                "MAPE": 34.3,
+                "dir_acc": 0.0556,
+                "n": 54
+              },
+              "v13": {
+                "MAE": 72.68,
+                "RMSE": 92.87,
+                "MAPE": 31.08,
+                "dir_acc": 0.6667,
+                "n": 54
+              }
+            },
+            "3": {
+              "prophet": {
+                "MAE": 117.68,
+                "RMSE": 134.08,
+                "MAPE": 77.33,
+                "dir_acc": 0.7455,
+                "n": 55
+              },
+              "snaive": {
+                "MAE": 102.86,
+                "RMSE": 122.1,
+                "MAPE": 69.29,
+                "dir_acc": 0.6545,
+                "n": 55
+              },
+              "carry": {
+                "MAE": 147.05,
+                "RMSE": 179.88,
+                "MAPE": 90.95,
+                "dir_acc": 0.0182,
+                "n": 55
+              },
+              "v13": {
+                "MAE": 104.9,
+                "RMSE": 132.1,
+                "MAPE": 59.66,
+                "dir_acc": 0.7091,
+                "n": 55
+              }
+            }
+          },
+          "drop_reasons_any_nan": {}
+        },
+        "7": {
+          "horizon": "7",
+          "n_total_origins": 171,
+          "n_matched": 171,
+          "n_dropped": 0,
+          "overall": {
+            "prophet": {
+              "MAE": 69.04,
+              "RMSE": 81.5,
+              "MAPE": 45.28,
+              "dir_acc": 0.5322,
+              "n": 171
+            },
+            "snaive": {
+              "MAE": 80.29,
+              "RMSE": 100.76,
+              "MAPE": 48.53,
+              "dir_acc": 0.5439,
+              "n": 171
+            },
+            "carry": {
+              "MAE": 37.4,
+              "RMSE": 49.0,
+              "MAPE": 21.08,
+              "dir_acc": 0.0585,
+              "n": 171
+            }
+          },
+          "by_fold": {
+            "1": {
+              "prophet": {
+                "MAE": 57.52,
+                "RMSE": 67.91,
+                "MAPE": 37.4,
+                "dir_acc": 0.5323,
+                "n": 62
+              },
+              "snaive": {
+                "MAE": 54.52,
+                "RMSE": 65.64,
+                "MAPE": 32.94,
+                "dir_acc": 0.5968,
+                "n": 62
+              },
+              "carry": {
+                "MAE": 33.95,
+                "RMSE": 42.83,
+                "MAPE": 19.66,
+                "dir_acc": 0.0484,
+                "n": 62
+              }
+            },
+            "2": {
+              "prophet": {
+                "MAE": 69.59,
+                "RMSE": 81.14,
+                "MAPE": 40.71,
+                "dir_acc": 0.6111,
+                "n": 54
+              },
+              "snaive": {
+                "MAE": 85.74,
+                "RMSE": 102.87,
+                "MAPE": 42.39,
+                "dir_acc": 0.5741,
+                "n": 54
+              },
+              "carry": {
+                "MAE": 33.8,
+                "RMSE": 45.16,
+                "MAPE": 17.88,
+                "dir_acc": 0.037,
+                "n": 54
+              }
+            },
+            "3": {
+              "prophet": {
+                "MAE": 81.47,
+                "RMSE": 94.82,
+                "MAPE": 58.64,
+                "dir_acc": 0.4545,
+                "n": 55
+              },
+              "snaive": {
+                "MAE": 104.0,
+                "RMSE": 127.76,
+                "MAPE": 72.12,
+                "dir_acc": 0.4545,
+                "n": 55
+              },
+              "carry": {
+                "MAE": 44.82,
+                "RMSE": 58.27,
+                "MAPE": 25.84,
+                "dir_acc": 0.0909,
+                "n": 55
+              }
+            }
+          },
+          "drop_reasons_any_nan": {}
+        },
+        "30": {
+          "horizon": "30",
+          "n_total_origins": 171,
+          "n_matched": 171,
+          "n_dropped": 0,
+          "overall": {
+            "prophet": {
+              "MAE": 79.97,
+              "RMSE": 95.38,
+              "MAPE": 52.94,
+              "dir_acc": 0.6608,
+              "n": 171
+            },
+            "snaive": {
+              "MAE": 82.27,
+              "RMSE": 104.37,
+              "MAPE": 49.24,
+              "dir_acc": 0.7135,
+              "n": 171
+            },
+            "carry": {
+              "MAE": 77.98,
+              "RMSE": 97.58,
+              "MAPE": 45.26,
+              "dir_acc": 0.0351,
+              "n": 171
+            }
+          },
+          "by_fold": {
+            "1": {
+              "prophet": {
+                "MAE": 71.47,
+                "RMSE": 83.14,
+                "MAPE": 55.68,
+                "dir_acc": 0.6613,
+                "n": 62
+              },
+              "snaive": {
+                "MAE": 52.38,
+                "RMSE": 63.52,
+                "MAPE": 37.3,
+                "dir_acc": 0.8226,
+                "n": 62
+              },
+              "carry": {
+                "MAE": 62.46,
+                "RMSE": 76.09,
+                "MAPE": 41.17,
+                "dir_acc": 0.0161,
+                "n": 62
+              }
+            },
+            "2": {
+              "prophet": {
+                "MAE": 71.09,
+                "RMSE": 85.41,
+                "MAPE": 35.47,
+                "dir_acc": 0.6667,
+                "n": 54
+              },
+              "snaive": {
+                "MAE": 90.69,
+                "RMSE": 111.52,
+                "MAPE": 39.81,
+                "dir_acc": 0.5926,
+                "n": 54
+              },
+              "carry": {
+                "MAE": 74.72,
+                "RMSE": 88.52,
+                "MAPE": 35.58,
+                "dir_acc": 0.0556,
+                "n": 54
+              }
+            },
+            "3": {
+              "prophet": {
+                "MAE": 98.28,
+                "RMSE": 115.47,
+                "MAPE": 66.99,
+                "dir_acc": 0.6545,
+                "n": 55
+              },
+              "snaive": {
+                "MAE": 107.68,
+                "RMSE": 130.81,
+                "MAPE": 71.95,
+                "dir_acc": 0.7091,
+                "n": 55
+              },
+              "carry": {
+                "MAE": 98.68,
+                "RMSE": 124.02,
+                "MAPE": 59.37,
+                "dir_acc": 0.0364,
+                "n": 55
+              }
+            }
+          },
+          "drop_reasons_any_nan": {}
+        }
+      },
+      "splice": {
+        "gp_pre_splice": {
+          "horizon": "gp",
+          "n_total_origins": 111,
+          "n_matched": 111,
+          "n_dropped": 0,
+          "overall": {
+            "prophet": {
+              "MAE": 75.39,
+              "RMSE": 91.28,
+              "MAPE": 48.15,
+              "dir_acc": 0.6667,
+              "n": 111
+            },
+            "snaive": {
+              "MAE": 77.0,
+              "RMSE": 94.62,
+              "MAPE": 41.43,
+              "dir_acc": 0.7297,
+              "n": 111
+            },
+            "carry": {
+              "MAE": 85.63,
+              "RMSE": 108.74,
+              "MAPE": 52.31,
+              "dir_acc": 0.036,
+              "n": 111
+            },
+            "v13": {
+              "MAE": 72.72,
+              "RMSE": 90.32,
+              "MAPE": 40.26,
+              "dir_acc": 0.7117,
+              "n": 111
+            }
+          },
+          "by_fold": {
+            "1": {
+              "prophet": {
+                "MAE": 92.83,
+                "RMSE": 108.53,
+                "MAPE": 67.51,
+                "dir_acc": 0.6613,
+                "n": 62
+              },
+              "snaive": {
+                "MAE": 58.51,
+                "RMSE": 69.31,
+                "MAPE": 39.77,
+                "dir_acc": 0.7742,
+                "n": 62
+              },
+              "carry": {
+                "MAE": 99.35,
+                "RMSE": 121.22,
+                "MAPE": 69.59,
+                "dir_acc": 0.0161,
+                "n": 62
+              },
+              "v13": {
+                "MAE": 75.5,
+                "RMSE": 90.92,
+                "MAPE": 49.89,
+                "dir_acc": 0.7581,
+                "n": 62
+              }
+            },
+            "2": {
+              "prophet": {
+                "MAE": 53.34,
+                "RMSE": 63.0,
+                "MAPE": 23.66,
+                "dir_acc": 0.6735,
+                "n": 49
+              },
+              "snaive": {
+                "MAE": 100.41,
+                "RMSE": 119.19,
+                "MAPE": 43.53,
+                "dir_acc": 0.6735,
+                "n": 49
+              },
+              "carry": {
+                "MAE": 68.27,
+                "RMSE": 90.51,
+                "MAPE": 30.44,
+                "dir_acc": 0.0612,
+                "n": 49
+              },
+              "v13": {
+                "MAE": 69.2,
+                "RMSE": 89.57,
+                "MAPE": 28.08,
+                "dir_acc": 0.6531,
+                "n": 49
+              }
+            }
+          },
+          "drop_reasons_any_nan": {}
+        },
+        "gp_post_splice": {
+          "horizon": "gp",
+          "n_total_origins": 60,
+          "n_matched": 60,
+          "n_dropped": 0,
+          "overall": {
+            "prophet": {
+              "MAE": 113.0,
+              "RMSE": 130.3,
+              "MAPE": 73.13,
+              "dir_acc": 0.7667,
+              "n": 60
+            },
+            "snaive": {
+              "MAE": 101.38,
+              "RMSE": 120.5,
+              "MAPE": 67.61,
+              "dir_acc": 0.6667,
+              "n": 60
+            },
+            "carry": {
+              "MAE": 145.79,
+              "RMSE": 176.73,
+              "MAPE": 89.38,
+              "dir_acc": 0.0167,
+              "n": 60
+            },
+            "v13": {
+              "MAE": 105.06,
+              "RMSE": 131.18,
+              "MAPE": 59.73,
+              "dir_acc": 0.7167,
+              "n": 60
+            }
+          },
+          "by_fold": {
+            "2": {
+              "prophet": {
+                "MAE": 61.5,
+                "RMSE": 77.38,
+                "MAPE": 26.96,
+                "dir_acc": 1.0,
+                "n": 5
+              },
+              "snaive": {
+                "MAE": 85.0,
+                "RMSE": 101.27,
+                "MAPE": 49.12,
+                "dir_acc": 0.8,
+                "n": 5
+              },
+              "carry": {
+                "MAE": 132.0,
+                "RMSE": 137.37,
+                "MAPE": 72.12,
+                "dir_acc": 0.0,
+                "n": 5
+              },
+              "v13": {
+                "MAE": 106.79,
+                "RMSE": 120.55,
+                "MAPE": 60.51,
+                "dir_acc": 0.8,
+                "n": 5
+              }
+            },
+            "3": {
+              "prophet": {
+                "MAE": 117.68,
+                "RMSE": 134.08,
+                "MAPE": 77.33,
+                "dir_acc": 0.7455,
+                "n": 55
+              },
+              "snaive": {
+                "MAE": 102.86,
+                "RMSE": 122.1,
+                "MAPE": 69.29,
+                "dir_acc": 0.6545,
+                "n": 55
+              },
+              "carry": {
+                "MAE": 147.05,
+                "RMSE": 179.88,
+                "MAPE": 90.95,
+                "dir_acc": 0.0182,
+                "n": 55
+              },
+              "v13": {
+                "MAE": 104.9,
+                "RMSE": 132.1,
+                "MAPE": 59.66,
+                "dir_acc": 0.7091,
+                "n": 55
+              }
+            }
+          },
+          "drop_reasons_any_nan": {}
+        },
+        "n_pre": 111,
+        "n_post": 60
+      }
+    }
+  },
+  "verdict": {
+    "VEG000015": {
+      "prophet_MAE": 224.29,
+      "snaive_MAE": 222.37,
+      "v13_MAE": 184.89,
+      "beats_snaive": false,
+      "beats_v13": false,
+      "passes": false
+    },
+    "VEG000057": {
+      "prophet_MAE": 88.59,
+      "snaive_MAE": 85.56,
+      "v13_MAE": 84.07,
+      "beats_snaive": false,
+      "beats_v13": false,
+      "passes": false
+    }
+  },
+  "ship_gate_pass": false
+}
