@@ -1,3 +1,5 @@
+using System.Text.Json;
+using AgriForecast.Application.Services;
 using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Application.Requests.Forecast.DTOs;
@@ -25,6 +27,14 @@ public class HarvestForecast_GetDto
     public string ActivePredictor { get; set; } = string.Empty;
     public string? ModelVersion { get; set; }
     public string Explanation { get; set; } = string.Empty;
+
+    // Additive (API-5) - passed straight through from the ML service. reasonCode/
+    // reasonParams are ALWAYS present from a current ML service; topFactors is null
+    // when the ML omits it (fallback path) - the FE reads null as "no breakdown"
+    // and must never receive an empty [] instead.
+    public string? ReasonCode { get; set; }
+    public Dictionary<string, JsonElement>? ReasonParams { get; set; }
+    public List<TopFactorDto>? TopFactors { get; set; }
 
     // Our recommendation matrix output.
     public RecommendationLevel RecommendationLevel { get; set; }

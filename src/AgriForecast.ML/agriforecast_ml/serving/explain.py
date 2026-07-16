@@ -114,38 +114,52 @@ def _label(col: str) -> str:
     return _LABELS.get(col, col)
 
 
+def _shap_contributions(row, payload):
+    """Per-feature SHAP contributions of the p50 prediction for one feature row.
+
+    Returns ``(feature_cols, sv)`` where ``sv`` is a 1-D numpy array of signed
+    per-feature contributions aligned with ``feature_cols``, or ``None`` on any
+    unexpected shape. Shared by ``top_factors`` (legacy label output) and
+    ``top_factor_codes`` (API-5 factor codes) so the two can never drift.
+
+    Explains the p50 model that actually produced the forecast: the residual p50
+    model when the residual path is served, else the pooled p50. The per-crop
+    offset is an additive log-space shift, so it does NOT change SHAP signs or
+    ranking of the feature drivers. SHAP values are in log-space (log1p target),
+    but their SIGN and relative MAGNITUDE are what we surface, so log-space is
+    fine for ranking and direction. Deterministic for a fixed model + input.
+    """
+    if row is None or payload is None:
+        return None
+    if payload.get("served_ml_kind") == "residual" and "residual_models" in payload:
+        model = payload["residual_models"]["p50"]
+    else:
+        model = payload["models"]["p50"]
+    X = _build_X(row, payload)
+
+    import shap
+
+    explainer = shap.TreeExplainer(model)
+    sv = np.asarray(explainer.shap_values(X)).reshape(-1)  # single row -> per-feature
+    cols = payload["feature_cols"]
+    if sv.shape[0] != len(cols):
+        return None
+    return cols, sv
+
+
 def top_factors(row, payload, top_n: int = 5) -> list[dict]:
     """Top-N SHAP drivers of the p50 prediction for one feature row.
 
     Returns [{name: str, direction: "up"|"down", weight: float}] sorted by
-    descending |SHAP|. The p50 model is trained on the log1p target; SHAP
-    values are in log-space but their SIGN and relative MAGNITUDE (what pushed
-    the price up vs down, and by how much) are what we surface, so log-space is
-    fine for ranking and direction. Returns [] on any error.
+    descending |SHAP|. LEGACY (English-label) surface, retained for backward
+    compatibility; serving now emits `top_factor_codes` instead. Returns [] on
+    any error.
     """
     try:
-        if row is None or payload is None:
+        contrib = _shap_contributions(row, payload)
+        if contrib is None:
             return []
-        # Explain the p50 model that actually produced the forecast: the residual
-        # p50 model when the residual path is served, else the pooled p50. The
-        # per-crop offset is an additive log-space shift, so it does NOT change
-        # SHAP signs/ranking of the feature drivers — explaining the residual
-        # model's drivers is correct for the residual prediction.
-        if payload.get("served_ml_kind") == "residual" and "residual_models" in payload:
-            model = payload["residual_models"]["p50"]
-        else:
-            model = payload["models"]["p50"]
-        X = _build_X(row, payload)
-
-        import shap
-
-        explainer = shap.TreeExplainer(model)
-        sv = explainer.shap_values(X)
-        sv = np.asarray(sv).reshape(-1)  # single row -> per-feature contributions
-        cols = payload["feature_cols"]
-        if sv.shape[0] != len(cols):
-            return []
-
+        cols, sv = contrib
         order = np.argsort(np.abs(sv))[::-1][:top_n]
         out: list[dict] = []
         for i in order:
@@ -157,6 +171,135 @@ def top_factors(row, payload, top_n: int = 5) -> list[dict]:
                 "direction": "up" if val > 0 else "down",
                 "weight": round(abs(val), 4),
             })
+        return out
+    except Exception:
+        return []
+
+
+# ===========================================================================
+# API-5: machine-stable, translatable FACTOR CODES
+# ===========================================================================
+# The trilingual FE renders farmer-facing factor labels from stable snake_case
+# CODES (i18n keys under `factor.codes.*`), never by parsing English prose. Raw
+# model feature columns are grouped into a handful of farmer-meaningful factors;
+# the FE owns the Sinhala/Tamil renderings.
+#
+# FE i18n coverage (ForecastUI src/i18n/locales/*/translation `factor.codes`):
+#   recent_price_trend, festival_demand, seasonal_supply, weather_monsoon  -> KNOWN
+#   market_conditions, economic_conditions                                 -> NEW
+# Unknown codes render as muted raw text on the FE (safe); the two NEW codes
+# are flagged in the API-5 report so the i18n files gain entries.
+FACTOR_RECENT_PRICE_TREND = "recent_price_trend"
+FACTOR_FESTIVAL_DEMAND = "festival_demand"
+FACTOR_SEASONAL_SUPPLY = "seasonal_supply"
+FACTOR_WEATHER_MONSOON = "weather_monsoon"
+FACTOR_MARKET_CONDITIONS = "market_conditions"
+FACTOR_ECONOMIC_CONDITIONS = "economic_conditions"
+
+# Price levels / lags / rolling stats / momentum -> "recent price trend".
+_PRICE_TREND_COLS = {
+    "AvgPrice", "MaxPrice", "MinPrice",
+    "RollMean7", "RollMean30", "RollMean90",
+    "RollStd30", "RollStd90",
+    "Lag7", "Lag30", "Lag60", "Lag90",
+    "Momentum", "PctChange30", "PriceZScore90",
+}
+# Festival / national-calendar countdown features -> "festival demand".
+_FESTIVAL_COLS = {
+    "IsFestival",  # legacy column still in older promoted feature_cols
+    "HarvestInFestivalLeadup", "DaysFromHarvestToNextFestival",
+    "DaysToNextFestivalAny", "InLeadupAvurudu", "InLeadupChristmas",
+}
+# Month / season / day-of-year encodings -> "seasonal supply".
+_SEASON_COLS = {
+    "SeasonMaha", "PlantingSeasonEnc", "MonthNum",
+    "DayOfYear", "WeekOfYear", "SinDoy", "CosDoy",
+}
+# Weather-EVENT news ratios grouped with measured weather (all `Wx*` cols) ->
+# "weather and monsoon" (a farmer reads drought/flood coverage as weather).
+_WEATHER_EXTRA_COLS = {"DroughtRatio", "FloodRatio"}
+# Cross-market summaries grouped with all per-market `Mkt*` cols -> "market
+# conditions".
+_MARKET_EXTRA_COLS = {
+    "SpreadVsNational", "MarketRankPct", "LeaderMarketLag7", "NMarketsReporting",
+}
+# FX / CBSL macro / policy / news-sentiment -> "economic conditions".
+_ECON_COLS = {
+    "FxUsdLkr", "MeanSentiment", "PolicyRatio",
+    "ActivePolicyNetDirection", "ActivePolicyCount",
+    "PolicyImportBanActive", "PolicyPriceCeilingActive",
+    "PolicyFertiliserSubsidyActive",
+    "MacroFoodInflationYoY", "MacroFoodImportsYoY", "MacroPolicyRateOPR",
+}
+# Crop-STATIC identity / agronomy columns: not an actionable per-forecast factor
+# (CropId is the crop's baseline level, growth/harvest windows are fixed agronomy)
+# -> intentionally DROPPED from the factor breakdown.
+_DROP_COLS = {"CropId", "GrowthPeriodDays", "HarvestWindowDays"}
+
+# A factor whose share of the total absolute contribution is below this is
+# reported as 'neutral' rather than up/down (near-zero net push).
+_NEUTRAL_SHARE = 0.01
+
+
+def factor_code_for(col: str) -> str | None:
+    """Map a raw model feature column to a farmer-meaningful factor CODE, or
+    None if the column is intentionally dropped / unmapped (drop from breakdown).
+    Prefix rules (`Wx*`, `Mkt*`) cover the point-in-time market/weather families
+    so a future column in those families maps without a code change."""
+    if col in _DROP_COLS:
+        return None
+    if col in _PRICE_TREND_COLS:
+        return FACTOR_RECENT_PRICE_TREND
+    if col in _FESTIVAL_COLS:
+        return FACTOR_FESTIVAL_DEMAND
+    if col in _SEASON_COLS:
+        return FACTOR_SEASONAL_SUPPLY
+    if col.startswith("Wx") or col in _WEATHER_EXTRA_COLS:
+        return FACTOR_WEATHER_MONSOON
+    if col.startswith("Mkt") or col in _MARKET_EXTRA_COLS:
+        return FACTOR_MARKET_CONDITIONS
+    if col in _ECON_COLS:
+        return FACTOR_ECONOMIC_CONDITIONS
+    return None
+
+
+def top_factor_codes(row, payload, top_n: int = 4) -> list[dict]:
+    """Top-N farmer-meaningful factor CODES driving the p50 prediction.
+
+    Returns [{code: str, direction: "up"|"down"|"neutral", weight: float}]:
+      * code      — stable snake_case i18n key (see `factor_code_for`).
+      * direction — sign of the code's NET (summed) SHAP contribution; 'neutral'
+                    when its share of total attribution is below `_NEUTRAL_SHARE`.
+      * weight    — the code's share (0..1, rounded 3dp) of the total absolute
+                    contribution across all MAPPED codes (a relative strength the
+                    FE renders as a percentage bar).
+
+    Per-feature SHAP contributions are aggregated by factor code (multiple price
+    lags collapse into one `recent_price_trend`, etc.), ranked by |net
+    contribution|, ties broken by code name so the output is deterministic for a
+    fixed model + input. Returns [] on any error (caller falls back to prose).
+    """
+    try:
+        contrib = _shap_contributions(row, payload)
+        if contrib is None:
+            return []
+        cols, sv = contrib
+        agg: dict[str, float] = {}
+        for col, val in zip(cols, sv):
+            code = factor_code_for(col)
+            if code is None:
+                continue
+            agg[code] = agg.get(code, 0.0) + float(val)
+        total = sum(abs(v) for v in agg.values())
+        if not agg or total <= 0.0:
+            return []
+        # Descending |net contribution|; deterministic tie-break on code name.
+        ranked = sorted(agg.items(), key=lambda kv: (-abs(kv[1]), kv[0]))[:top_n]
+        out: list[dict] = []
+        for code, val in ranked:
+            share = abs(val) / total
+            direction = "neutral" if share < _NEUTRAL_SHARE else ("up" if val > 0 else "down")
+            out.append({"code": code, "direction": direction, "weight": round(share, 3)})
         return out
     except Exception:
         return []

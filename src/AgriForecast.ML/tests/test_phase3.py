@@ -439,24 +439,26 @@ class TestPredictHarvest:
         )
 
     def test_top_factors_empty_unless_model_active(self):
-        """Honesty contract: SHAP factors are surfaced when an ML model is active
-        (active_predictor in _SERVED_ML_KINDS) and must be EMPTY under the
-        crop_mean_fallback (there is nothing to explain about a historical average).
-        Bidirectional: factors non-empty for a known crop with ML serving; empty
-        when fallback serves."""
+        """Honesty contract: factor codes are surfaced when an ML model is active
+        (active_predictor in _SERVED_ML_KINDS) and must be OMITTED under the
+        crop_mean_fallback (there is nothing to explain about a historical
+        average; the FE shows a "no breakdown" note). API-5 changed the fallback
+        behavior from `topFactors: []` to omitting the key entirely.
+        Bidirectional: factors present + non-empty for a known crop with ML
+        serving; key absent when fallback serves."""
         r = self._call(BRINJAL_ID)
         active = r["activePredictor"]
         if active in _SERVED_ML_KINDS:
-            # ML model is serving: SHAP factors must be surfaced for a known crop.
+            # ML model is serving: factor codes must be surfaced for a known crop.
             assert r["topFactors"] != [], (
                 f"topFactors must be non-empty when ML kind {active!r} is active "
                 f"and the crop is known (BRINJAL_ID), got []"
             )
         else:
-            # Fallback (crop_mean_fallback): nothing to explain.
-            assert r["topFactors"] == [], (
-                f"topFactors must be [] under fallback predictor {active!r}, "
-                f"got {r['topFactors']}"
+            # Fallback (crop_mean_fallback): the key is omitted entirely.
+            assert "topFactors" not in r, (
+                f"topFactors must be OMITTED under fallback predictor {active!r}, "
+                f"got {r.get('topFactors')}"
             )
 
     def test_active_predictor_matches_promoted_model(self):

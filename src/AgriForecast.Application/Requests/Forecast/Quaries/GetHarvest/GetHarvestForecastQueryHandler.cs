@@ -84,6 +84,11 @@ public class GetHarvestForecastQueryHandler
             ActivePredictor = prediction.ActivePredictor,
             ModelVersion = prediction.ModelVersion,
             Explanation = prediction.Explanation,
+            // Additive ML fields pass straight through. TopFactors stays null when the
+            // ML omitted it (fallback path) - preserve omitted-vs-empty for the FE.
+            ReasonCode = prediction.ReasonCode,
+            ReasonParams = prediction.ReasonParams,
+            TopFactors = prediction.TopFactors,
             RecommendationLevel = level,
             Reason = reason,
             UpsidePct = Math.Round(upside * 100m, 1),
