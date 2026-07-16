@@ -72,6 +72,10 @@ public static class InfsDependencyInjection
         services.AddScoped<IUserRepository, UserRepository>();
         services.AddScoped<IPasswordHasher, PasswordHasher>();
         services.AddScoped<IJwtTokenGenerator, JwtTokenGenerator>();
+        // Refresh-token revocation store (persisted jti / token-family). Scoped: shares the
+        // request-scoped DbContext with the user repo so an admin delete + revoke commit together.
+        services.AddScoped<IRefreshTokenRepository, RefreshTokenRepository>();
+        services.AddScoped<IRefreshTokenService, RefreshTokenService>();
         services.Configure<JwtSettings>(configuration.GetSection(JwtSettings.SectionName));
         services.AddHttpClient<IDambullaApiClient, DambullaApiClient>(http =>
         {

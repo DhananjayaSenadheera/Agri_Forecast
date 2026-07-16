@@ -22,6 +22,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<NewsEventCrop> NewsEventCrops { get; set; }
     public DbSet<NewsEventMarket> NewsEventMarkets { get; set; }
     public DbSet<User> Users { get; set; }
+    public DbSet<RefreshTokenRecord> RefreshTokens { get; set; }
     public DbSet<Market> Markets { get; set; }
     public DbSet<PriceObservation> PriceObservations { get; set; }
     public DbSet<CommodityAlias> CommodityAliases { get; set; }
@@ -37,6 +38,38 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.Property(x => x.Role).HasMaxLength(50).IsRequired();
             e.HasIndex(x => x.Username).IsUnique();
             e.HasIndex(x => x.Email).IsUnique();
+        });
+
+        // Refresh-token revocation store (jti / token-family). Additive, net-new table — no seed,
+        // no backfill. UsedAtUtc / RevokedAtUtc are nullable (null = current / not revoked); the
+        // timestamps are full datetime2 security-audit instants, NOT date-only ML reference dates.
+        modelBuilder.Entity<RefreshTokenRecord>(e =>
+        {
+            e.ToTable("RefreshTokens");
+            e.HasKey(x => x.Id);
+
+            e.Property(x => x.Jti).IsRequired();
+            e.Property(x => x.FamilyId).IsRequired();
+            e.Property(x => x.UserId).IsRequired();
+            e.Property(x => x.IssuedAtUtc).IsRequired();
+            e.Property(x => x.ExpiresAtUtc).IsRequired();
+
+            // Jti is the rotation lookup key AND the dedup guarantee — unique.
+            e.HasIndex(x => x.Jti).IsUnique();
+            // Revoke-family scan (logout + reuse-detection theft response).
+            e.HasIndex(x => x.FamilyId);
+            // Revoke-all-for-user scan (admin delete/demote) + supports the FK.
+            e.HasIndex(x => x.UserId);
+
+            // CASCADE (deliberate deviation from the prevailing Restrict posture on reference
+            // dimensions): a RefreshTokenRecord is a per-user session artifact OWNED by the user,
+            // not shared reference data. Deleting a user physically removes their token rows — the
+            // strongest possible revocation, and a defence-in-depth backstop even if the explicit
+            // RevokeAllForUserAsync in the delete handler were ever removed.
+            e.HasOne<User>()
+                .WithMany()
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<DefaultSetting>().HasData(new DefaultSetting
