@@ -69,6 +69,11 @@ public class AdminAuthorizationWiringTests
     [InlineData(typeof(PolicyFlagController), nameof(PolicyFlagController.GetAll))]
     [InlineData(typeof(ForecastController), nameof(ForecastController.GetMarketOverview))]
     [InlineData(typeof(ForecastController), nameof(ForecastController.GetBestCrops))]
+    // API-11: economic-indicator + macro-series reads are authenticated-only (not Admin-gated) —
+    // non-personal national reference data, no more privileged than market-overview.
+    [InlineData(typeof(IndicatorsController), nameof(IndicatorsController.GetIndicators))]
+    [InlineData(typeof(IndicatorsController), nameof(IndicatorsController.GetMacroSeries))]
+    [InlineData(typeof(IndicatorsController), nameof(IndicatorsController.GetCatalog))]
     public void ReadEndpoints_RequireAuth_ButNotAdmin(Type controller, string method)
     {
         RequiresAuthOnly(controller, method).Should().BeTrue(
