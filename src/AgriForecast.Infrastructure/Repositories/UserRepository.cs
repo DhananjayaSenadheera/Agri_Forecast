@@ -37,4 +37,23 @@ public class UserRepository : IUserRepository
     {
         return await _userRepository.GetAllAsync();
     }
+
+    public async Task UpdateAsync(User user)
+    {
+        await _userRepository.UpdateAsync(user);
+    }
+
+    public async Task DeleteAsync(User user)
+    {
+        await _userRepository.DeleteAsync(user);
+    }
+
+    public async Task<int> CountByRoleAsync(string role)
+    {
+        // The users table is tiny (admins + registered farmers), so an in-memory count over the
+        // scoped DbContext read is cheap and keeps this on the existing IGenericRepository surface.
+        // Case-insensitive so a "admin"/"Admin" data drift can never bypass the last-admin guard.
+        var all = await _userRepository.GetAllAsync();
+        return all.Count(u => string.Equals(u.Role, role, StringComparison.OrdinalIgnoreCase));
+    }
 }

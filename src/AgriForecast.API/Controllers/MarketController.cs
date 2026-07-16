@@ -1,5 +1,6 @@
 using AgriForecast.Application.Requests.Market.Commands.Create;
 using AgriForecast.Application.Requests.Market.Quaries.GetAll;
+using AgriForecast.Domain.Constants;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -23,7 +24,9 @@ public class MarketController(IMediator mediator) : ControllerBase
         }
     };
 
+    // Registering a market / economic centre mutates the market dimension — Admin-only (API-9).
     [HttpPost("create")]
+    [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Create([FromBody] MarketCreateCommand command)
     {
         var result = await mediator.Send(command);
