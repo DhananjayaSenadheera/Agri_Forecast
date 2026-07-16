@@ -172,6 +172,18 @@ def build_crop_features(crop_id, group: pd.DataFrame, meta: pd.Series,
                         weather_by_month: dict, rain_clim: dict) -> pd.DataFrame:
     # --- 1. Continuous daily grid (calendar-consistent windows) ---
     g = group.sort_values("PriceDate").set_index("PriceDate")
+    if g.index.has_duplicates:
+        # Defense-in-depth (the loader is the primary fix): load_prices() already
+        # collapses duplicate (crop, source, date) rows to their mean, and the
+        # HARTI/DEC splice guarantees a single source per (crop, date). If dup
+        # PriceDates still reach here, collapse the numeric price columns by mean
+        # so reindex() below cannot raise "cannot reindex on an axis with
+        # duplicate labels". Deterministic, NaN-safe, and only touched when
+        # duplicates actually exist (a strict no-op for unique input). Runs BEFORE
+        # is_trading is captured so the trading-day mask is unique too.
+        # mean(AvgPrice) == (mean(Min)+mean(Max))/2 since Avg=(Min+Max)/2 per row,
+        # so collapsing Avg directly equals recomputing it from collapsed Min/Max.
+        g = g[["MinPrice", "MaxPrice", "AvgPrice"]].groupby(level=0).mean()
     full = pd.date_range(g.index.min(), g.index.max(), freq="D")
     is_trading = g.index  # original trading days
     daily = g.reindex(full)
