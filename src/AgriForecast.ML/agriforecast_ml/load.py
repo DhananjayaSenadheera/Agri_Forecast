@@ -92,7 +92,7 @@ def load_prices() -> pd.DataFrame:
     # no (CropId, PriceDate) reaches the feature build from both sources.
     # DEC rows are NOT deleted from the DB -- this filter is the only gate.
     sql = """
-        SELECT mp.CropId, c.CropCode, c.Name AS CropName,
+        SELECT mp.CropId, c.CropCode, c.Name AS CropName, mp.Source,
                mp.PriceDate, mp.MinPrice, mp.MaxPrice
         FROM MarketPrices mp
         JOIN Crops c ON c.Id = mp.CropId
@@ -114,6 +114,29 @@ def load_prices() -> pd.DataFrame:
     df["PriceDate"] = _as_canon_dt(df["PriceDate"])
     for col in ("MinPrice", "MaxPrice"):
         df[col] = df[col].astype(float)
+    # DEDUP (generic, not a Passion special-case): one crop can carry >1
+    # MarketPrices row for the SAME (Source, PriceDate) when the upstream feed
+    # lists the commodity under multiple ExternalProductIds that resolve to the
+    # same crop (e.g. Passion under Dambulla-DEC ids 43 & 76, deliberately merged
+    # into a single crop in step 8.2 -> 2 near-identical rows/date BY DESIGN).
+    # The per-crop feature build (build_crop_features) reindexes onto a unique
+    # daily grid and raises "cannot reindex on an axis with duplicate labels" if
+    # any (crop, date) is doubled. Collapse to one daily value = mean of
+    # MinPrice/MaxPrice per (CropId, Source, PriceDate).
+    #
+    # WHY GROUP WITHIN Source: the aggregation happens strictly inside a single
+    # source, so it NEVER blends HARTI with DAMBULLA_DEC. The cross-source
+    # HARTI/DEC precedence (the 2025-05-05 splice + the Ridge Gourd/Beans DEC-
+    # launch exclusion enforced by the WHERE clause above) is untouched. sort=True
+    # (default) makes the output order independent of DB row order -> deterministic.
+    # A strict no-op for already-unique (crop, source, date) data. Source is a
+    # grouping key only and is dropped so the returned schema is unchanged.
+    # dropna=False: a NULL in any group key must NOT silently delete the row
+    # (pandas' default dropna=True would) — keep it and let downstream fail loud.
+    df = (df.groupby(["CropId", "CropCode", "CropName", "Source", "PriceDate"],
+                     as_index=False, sort=True, dropna=False)[["MinPrice", "MaxPrice"]]
+            .mean())
+    df = df.drop(columns=["Source"])
     df["AvgPrice"] = (df["MinPrice"] + df["MaxPrice"]) / 2.0
     return df
 

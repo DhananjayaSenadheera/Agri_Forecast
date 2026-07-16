@@ -259,8 +259,10 @@ class TestLiveAgronomyProfilePin:
     CONTRACTS.md update / deliberate data change is a regression."""
 
     def test_load_crops_shape_and_dtypes(self):
+        """REPINNED 2026-07-17: 96 -> 95 crops after the R2 Step 8.2 Passion
+        duplicate merge (FRT000020 deleted, survivor FRT000019, PR #25)."""
         df = _db_or_skip()
-        assert len(df) == 96, f"expected 96 crops post-cut-over, got {len(df)}"
+        assert len(df) == 95, f"expected 95 crops post-Passion-merge, got {len(df)}"
         for col in ("CropId", "CropCode", "CropName", "GrowthPeriodDays",
                     "HarvestWindowDays", "YalaPlantingStartMonth",
                     "YalaPlantingEndMonth", "MahaPlantingStartMonth",
@@ -277,16 +279,19 @@ class TestLiveAgronomyProfilePin:
         state: migration 20260706... (RecodeAgronomyProfilesDoaVerifiedBatch2,
         commit a9c472b) verified the remaining 81 crops, landing 84 gp-non-null
         crops total (was 13 after Step 5 Phase 1) split Yala=54/Year-round=27/
-        Maha=3 (was: 13 gp-known crops, all 'Yala', after Phase 1)."""
+        Maha=3 (was: 13 gp-known crops, all 'Yala', after Phase 1).
+        REPINNED 2026-07-17: 84 -> 83 gp-non-null, Year-round 27 -> 26, after
+        the Step 8.2 Passion duplicate merge deleted FRT000020 (a gp-known
+        Year-round crop; survivor FRT000019, PR #25)."""
         df = _db_or_skip()
         gp_known = df["GrowthPeriodDays"].notna()
-        assert int(gp_known.sum()) == 84, \
-            f"expected 84 gp-non-null crops (Step 5 Phase 2), got {int(gp_known.sum())}"
+        assert int(gp_known.sum()) == 83, \
+            f"expected 83 gp-non-null crops (post-Passion-merge), got {int(gp_known.sum())}"
         # gp-known crops now split across all three PlantingSeason values
         # (Yala/Year-round/Maha), not exclusively 'Yala' as under Phase 1.
         season_counts = df.loc[gp_known, "PlantingSeason"].value_counts()
-        assert season_counts.to_dict() == {"Yala": 54, "Year-round": 27, "Maha": 3}, \
-            f"expected Yala=54/Year-round=27/Maha=3 split, got {season_counts.to_dict()}"
+        assert season_counts.to_dict() == {"Yala": 54, "Year-round": 26, "Maha": 3}, \
+            f"expected Yala=54/Year-round=26/Maha=3 split, got {season_counts.to_dict()}"
         assert df.loc[~gp_known, "PlantingSeason"].isna().all()
 
     def test_live_verified_set_equals_forecastable_set(self):
@@ -300,12 +305,15 @@ class TestLiveAgronomyProfilePin:
         BOTH is_verified AND gp not-null required), the forecastable
         (gp-known) set is a strict SUBSET of the verified set, not equal to
         it, exactly for those 10 perennial rows. Only 2 crops remain
-        unverified (Athugowa, Onion Leaves)."""
+        unverified (Athugowa, Onion Leaves).
+        REPINNED 2026-07-17: 94 -> 93 verified after the Step 8.2 Passion
+        duplicate merge deleted FRT000020 (a verified crop; PR #25). The 10
+        verified-but-gp-null perennials are unchanged."""
         df = _db_or_skip()
         verified = df["IsVerified"] == True   # noqa: E712
         gp_known = df["GrowthPeriodDays"].notna()
-        assert int(verified.sum()) == 94, \
-            f"expected 94 verified profiles (Step 5 Phase 2), got {int(verified.sum())}"
+        assert int(verified.sum()) == 93, \
+            f"expected 93 verified profiles (post-Passion-merge), got {int(verified.sum())}"
         # forecastable (gp-known) set must be a SUBSET of verified -- never
         # gp-known-but-unverified (that would defeat the IsVerified-strict gate).
         assert (gp_known <= verified).all(), \
@@ -323,13 +331,16 @@ class TestLiveAgronomyProfilePin:
         Year-round=0, Maha=2 -- see F._PLANTING_SEASON_ENC), not exclusively
         1 (Yala) as under Step 5 Phase 1's 13-crop, all-Yala state. The
         gp-null set (12 rows: 10 verified perennials + 2 unverified) still
-        encodes to -1 (PlantingSeason is None for all of them)."""
+        encodes to -1 (PlantingSeason is None for all of them).
+        REPINNED 2026-07-17: Year-round 27 -> 26 after the Step 8.2 Passion
+        duplicate merge deleted FRT000020 (Year-round; PR #25). The gp-null
+        set is unchanged at 12."""
         df = _db_or_skip()
         enc = df["PlantingSeason"].map(lambda s: F._PLANTING_SEASON_ENC.get(s, -1))
         gp_known = df["GrowthPeriodDays"].notna()
         enc_counts = enc[gp_known].value_counts().to_dict()
-        assert enc_counts == {1: 54, 0: 27, 2: 3}, \
-            f"expected Yala=1(54)/Year-round=0(27)/Maha=2(3), got {enc_counts}"
+        assert enc_counts == {1: 54, 0: 26, 2: 3}, \
+            f"expected Yala=1(54)/Year-round=0(26)/Maha=2(3), got {enc_counts}"
         assert (enc[~gp_known] == -1).all()
         assert set(enc.unique()) == {1, 0, 2, -1}, \
             f"expected encoded values {{1,0,2,-1}}, got {set(enc.unique())}"
