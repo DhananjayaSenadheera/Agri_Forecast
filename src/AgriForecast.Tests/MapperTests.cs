@@ -154,17 +154,36 @@ public class MapperTests
     // CropMapper — Crop -> Crop_GetDto
     // ──────────────────────────────────────────────────────────────────────────────
 
+    // Helpers for the API-3 enrichment inputs (Crop has no navigations; the handler supplies these).
+    private static CropCategory Category(string code, string name) =>
+        new() { Id = Guid.NewGuid(), Code = code, Name = name };
+
+    private static CropAgronomyProfile Profile(Guid cropId, bool isVerified, int? gp) =>
+        new()
+        {
+            Id = Guid.NewGuid(),
+            CropId = cropId,
+            IsVerified = isVerified,
+            GrowthPeriodDays = gp
+        };
+
     [Fact]
     public void Crop_ToGetDto_CopiesAllExposedFieldsIncludingId()
     {
         var crop = Crop.CreateForManualEntry("Carrot", "Dambulla", Guid.NewGuid());
-        crop.CropCode = "CR-001";
+        crop.CropCode = "VEG000012";
+        var category = Category("VEG-LOW", "Low-country Vegetable");
+        var profile = Profile(crop.Id, isVerified: true, gp: 95);
 
-        var dto = crop.ToGetDto();
+        var dto = crop.ToGetDto(category, profile);
 
         dto.Id.Should().Be(crop.Id);
+        dto.CropCode.Should().Be("VEG000012");
         dto.Name.Should().Be(crop.Name);
         dto.Source.Should().Be(crop.Source);
+        dto.Category!.Code.Should().Be("VEG-LOW");
+        dto.Category!.Name.Should().Be("Low-country Vegetable");
+        dto.GrowthDays.Should().Be(95);
         dto.CreatedAt.Should().Be(crop.CreatedAt);
         dto.UpdatedAt.Should().Be(crop.UpdatedAt);
     }
@@ -174,10 +193,12 @@ public class MapperTests
     {
         // Reflection-based round-trip completeness guard: every public settable
         // property on Crop_GetDto must differ from a fresh default(Crop_GetDto)
-        // when the source Crop has non-default values for the same-named field.
+        // when the source Crop + its category + a verified profile are fully populated.
         var crop = Crop.CreateForManualEntry("Carrot", "Dambulla", Guid.NewGuid());
-
-        var dto = crop.ToGetDto();
+        crop.CropCode = "VEG000012";
+        var dto = crop.ToGetDto(
+            Category("VEG-LOW", "Low-country Vegetable"),
+            Profile(crop.Id, isVerified: true, gp: 95));
         var blank = new Crop_GetDto();
 
         foreach (var prop in typeof(Crop_GetDto).GetProperties(BindingFlags.Public | BindingFlags.Instance))
@@ -187,6 +208,61 @@ public class MapperTests
             var blankValue = prop.GetValue(blank);
             Assert.NotEqual(blankValue, dtoValue);
         }
+    }
+
+    [Fact]
+    public void Crop_ToGetDto_CategoryNull_WhenNoCategorySupplied()
+    {
+        var crop = Crop.CreateForManualEntry("Carrot", "Dambulla", Guid.NewGuid());
+
+        var dto = crop.ToGetDto();
+
+        Assert.Null(dto.Category); // null CropCategoryId (or an unresolved category) surfaces as null
+    }
+
+    // ── growthDays serving-gate matrix ────────────────────────────────────────────
+    // Expose GrowthPeriodDays ONLY when IsVerified == true && GrowthPeriodDays > 0.
+
+    [Fact]
+    public void GrowthDays_Value_WhenVerifiedAndPositive()
+    {
+        var crop = Crop.CreateForManualEntry("Brinjal", "Dambulla", Guid.NewGuid());
+        var dto = crop.ToGetDto(profile: Profile(crop.Id, isVerified: true, gp: 95));
+        dto.GrowthDays.Should().Be(95);
+    }
+
+    [Fact]
+    public void GrowthDays_Null_WhenUnverified_EvenWithPositiveGp()
+    {
+        // The 2 held-unverified crops (Onion Leaves, Athugowa) must never surface a growth period.
+        var crop = Crop.CreateForManualEntry("Onion Leaves", "Dambulla", Guid.NewGuid());
+        var dto = crop.ToGetDto(profile: Profile(crop.Id, isVerified: false, gp: 90));
+        dto.GrowthDays.Should().BeNull();
+    }
+
+    [Fact]
+    public void GrowthDays_Null_WhenVerifiedButGpNull()
+    {
+        // Continuous/perennial crops (Coconut, Papaya, …) are verified with a NULL growth period.
+        var crop = Crop.CreateForManualEntry("Coconut", "Dambulla", Guid.NewGuid());
+        var dto = crop.ToGetDto(profile: Profile(crop.Id, isVerified: true, gp: null));
+        dto.GrowthDays.Should().BeNull();
+    }
+
+    [Fact]
+    public void GrowthDays_Null_WhenVerifiedButGpZero()
+    {
+        var crop = Crop.CreateForManualEntry("Weird", "Dambulla", Guid.NewGuid());
+        var dto = crop.ToGetDto(profile: Profile(crop.Id, isVerified: true, gp: 0));
+        dto.GrowthDays.Should().BeNull();
+    }
+
+    [Fact]
+    public void GrowthDays_Null_WhenNoProfileRow()
+    {
+        var crop = Crop.CreateForManualEntry("Orphan", "Dambulla", Guid.NewGuid());
+        var dto = crop.ToGetDto();
+        dto.GrowthDays.Should().BeNull();
     }
 
     [Fact]
@@ -204,6 +280,34 @@ public class MapperTests
         dtos.Should().HaveCount(3);
         dtos.Select(d => d.Name).Should().ContainInOrder("A", "B", "C");
         dtos.Select(d => d.Id).Should().ContainInOrder(crops.Select(c => c.Id));
+    }
+
+    [Fact]
+    public void Crop_ToGetDtoList_EnrichesFromLookupsByKey()
+    {
+        // Category keyed by CropCategories.Id; profile keyed by CropAgronomyProfiles.CropId.
+        var veg = Category("VEG", "Vegetable");
+        var frt = Category("FRT", "Fruit");
+        var carrot = Crop.CreateForManualEntry("Carrot", "Dambulla", veg.Id);
+        var mango = Crop.CreateForManualEntry("Mango", "Dambulla", frt.Id);
+        // Third crop: category id not present in the lookup + no profile => both null.
+        var orphan = Crop.CreateForManualEntry("Orphan", "Dambulla", Guid.NewGuid());
+
+        var categoriesById = new Dictionary<Guid, CropCategory> { [veg.Id] = veg, [frt.Id] = frt };
+        var profilesByCropId = new Dictionary<Guid, CropAgronomyProfile>
+        {
+            [carrot.Id] = Profile(carrot.Id, isVerified: true, gp: 75),
+            [mango.Id] = Profile(mango.Id, isVerified: true, gp: null) // perennial => gated null
+        };
+
+        var dtos = new[] { carrot, mango, orphan }.ToGetDtoList(categoriesById, profilesByCropId);
+
+        dtos[0].Category!.Code.Should().Be("VEG");
+        dtos[0].GrowthDays.Should().Be(75);
+        dtos[1].Category!.Code.Should().Be("FRT");
+        dtos[1].GrowthDays.Should().BeNull();
+        Assert.Null(dtos[2].Category);
+        dtos[2].GrowthDays.Should().BeNull();
     }
 
     // R2 D-DF3: the EconomicCenterMapper tests were removed with the EconomicCenters CRUD
