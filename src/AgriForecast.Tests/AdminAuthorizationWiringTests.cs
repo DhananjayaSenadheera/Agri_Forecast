@@ -57,6 +57,9 @@ public class AdminAuthorizationWiringTests
     [InlineData(typeof(PolicyFlagController), nameof(PolicyFlagController.Create))]
     [InlineData(typeof(PolicyFlagController), nameof(PolicyFlagController.Update))]
     [InlineData(typeof(PolicyFlagController), nameof(PolicyFlagController.Delete))]
+    [InlineData(typeof(FestivalCalendarController), nameof(FestivalCalendarController.Create))]
+    [InlineData(typeof(FestivalCalendarController), nameof(FestivalCalendarController.Update))]
+    [InlineData(typeof(FestivalCalendarController), nameof(FestivalCalendarController.Delete))]
     public void MutatingEndpoints_AreAdminOnly(Type controller, string method)
     {
         IsAdminLocked(controller, method).Should().BeTrue(
@@ -69,6 +72,7 @@ public class AdminAuthorizationWiringTests
     [InlineData(typeof(CropController), nameof(CropController.GetCropById))]
     [InlineData(typeof(MarketController), nameof(MarketController.GetAll))]
     [InlineData(typeof(PolicyFlagController), nameof(PolicyFlagController.GetAll))]
+    [InlineData(typeof(FestivalCalendarController), nameof(FestivalCalendarController.GetAll))]
     [InlineData(typeof(ForecastController), nameof(ForecastController.GetMarketOverview))]
     [InlineData(typeof(ForecastController), nameof(ForecastController.GetBestCrops))]
     // API-11: economic-indicator + macro-series reads are authenticated-only (not Admin-gated) —
