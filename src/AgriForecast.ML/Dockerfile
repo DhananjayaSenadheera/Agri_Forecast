@@ -38,6 +38,8 @@ COPY build_features.py .
 COPY train_model_a.py .
 COPY ingest_news.py .
 COPY score_news.py .
+# ingest_cbsl_macro.py is invoked by run-monthly.sh against this image.
+COPY ingest_cbsl_macro.py .
 
 EXPOSE 8077
 
