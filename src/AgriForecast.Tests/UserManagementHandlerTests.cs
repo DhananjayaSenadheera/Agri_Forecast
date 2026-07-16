@@ -1,6 +1,7 @@
 using AgriForecast.Application.Requests.Users.Commands.Delete;
 using AgriForecast.Application.Requests.Users.Commands.UpdateRole;
 using AgriForecast.Application.Requests.Users.Quaries.GetAll;
+using AgriForecast.Application.Services;
 using AgriForecast.Domain.Constants;
 using AgriForecast.Domain.Interfaces;
 using FluentAssertions;
@@ -119,21 +120,24 @@ public class UserManagementHandlerTests
 
     // ── UpdateUserRoleCommandHandler ───────────────────────────────────────────────
 
-    private static (UpdateUserRoleCommandHandler handler, Mock<IUserRepository> repo, Mock<IUnitofWorkRepository> uow)
+    private static (UpdateUserRoleCommandHandler handler, Mock<IUserRepository> repo, Mock<IUnitofWorkRepository> uow, Mock<IRefreshTokenService> refresh)
         BuildUpdate()
     {
         var repo = new Mock<IUserRepository>();
         var uow = new Mock<IUnitofWorkRepository>();
         uow.Setup(u => u.CommitAsync()).Returns(Task.CompletedTask);
+        var refresh = new Mock<IRefreshTokenService>();
+        refresh.Setup(r => r.RevokeAllForUserAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
         var handler = new UpdateUserRoleCommandHandler(
-            repo.Object, uow.Object, Mock.Of<ILogger<UpdateUserRoleCommandHandler>>());
-        return (handler, repo, uow);
+            repo.Object, uow.Object, refresh.Object, Mock.Of<ILogger<UpdateUserRoleCommandHandler>>());
+        return (handler, repo, uow, refresh);
     }
 
     [Fact]
     public async Task UpdateRole_PromoteFarmerToAdmin_Succeeds_Commits()
     {
-        var (handler, repo, uow) = BuildUpdate();
+        var (handler, repo, uow, refresh) = BuildUpdate();
         var target = Farmer();
         repo.Setup(r => r.GetByIdAsync(target.Id)).ReturnsAsync(target);
 
@@ -147,12 +151,14 @@ public class UserManagementHandlerTests
         target.Role.Should().Be(UserRoles.Admin);
         repo.Verify(r => r.UpdateAsync(target), Times.Once);
         uow.Verify(u => u.CommitAsync(), Times.Once);
+        // Role changed → the user's refresh families are revoked so they re-authenticate.
+        refresh.Verify(r => r.RevokeAllForUserAsync(target.Id, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
     public async Task UpdateRole_DemoteAdmin_WhenOtherAdminsExist_Succeeds()
     {
-        var (handler, repo, uow) = BuildUpdate();
+        var (handler, repo, uow, refresh) = BuildUpdate();
         var target = Admin();
         repo.Setup(r => r.GetByIdAsync(target.Id)).ReturnsAsync(target);
         repo.Setup(r => r.CountByRoleAsync(UserRoles.Admin)).ReturnsAsync(2);
@@ -170,7 +176,7 @@ public class UserManagementHandlerTests
     [Fact]
     public async Task UpdateRole_DemoteLastAdmin_Fails_NoCommit()
     {
-        var (handler, repo, uow) = BuildUpdate();
+        var (handler, repo, uow, refresh) = BuildUpdate();
         var target = Admin();
         repo.Setup(r => r.GetByIdAsync(target.Id)).ReturnsAsync(target);
         repo.Setup(r => r.CountByRoleAsync(UserRoles.Admin)).ReturnsAsync(1);
@@ -190,7 +196,7 @@ public class UserManagementHandlerTests
     [Fact]
     public async Task UpdateRole_TargetNotFound_Fails()
     {
-        var (handler, repo, uow) = BuildUpdate();
+        var (handler, repo, uow, refresh) = BuildUpdate();
         repo.Setup(r => r.GetByIdAsync(It.IsAny<Guid>())).ReturnsAsync((UserEntity?)null);
 
         var result = await handler.Handle(new UpdateUserRoleCommand
@@ -209,7 +215,7 @@ public class UserManagementHandlerTests
     [InlineData("")]
     public async Task UpdateRole_InvalidRole_Fails_NoLookup(string role)
     {
-        var (handler, repo, uow) = BuildUpdate();
+        var (handler, repo, uow, refresh) = BuildUpdate();
 
         var result = await handler.Handle(new UpdateUserRoleCommand
         {
@@ -224,7 +230,7 @@ public class UserManagementHandlerTests
     [Fact]
     public async Task UpdateRole_NoOp_SameRole_SucceedsWithoutCommit()
     {
-        var (handler, repo, uow) = BuildUpdate();
+        var (handler, repo, uow, refresh) = BuildUpdate();
         var target = Farmer();
         repo.Setup(r => r.GetByIdAsync(target.Id)).ReturnsAsync(target);
 
@@ -236,25 +242,30 @@ public class UserManagementHandlerTests
         result.IsSuccess.Should().BeTrue();
         repo.Verify(r => r.UpdateAsync(It.IsAny<UserEntity>()), Times.Never);
         uow.Verify(u => u.CommitAsync(), Times.Never);
+        // Idempotent no-op must NOT churn refresh sessions.
+        refresh.Verify(r => r.RevokeAllForUserAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     // ── DeleteUserCommandHandler ───────────────────────────────────────────────────
 
-    private static (DeleteUserCommandHandler handler, Mock<IUserRepository> repo, Mock<IUnitofWorkRepository> uow)
+    private static (DeleteUserCommandHandler handler, Mock<IUserRepository> repo, Mock<IUnitofWorkRepository> uow, Mock<IRefreshTokenService> refresh)
         BuildDelete()
     {
         var repo = new Mock<IUserRepository>();
         var uow = new Mock<IUnitofWorkRepository>();
         uow.Setup(u => u.CommitAsync()).Returns(Task.CompletedTask);
+        var refresh = new Mock<IRefreshTokenService>();
+        refresh.Setup(r => r.RevokeAllForUserAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
         var handler = new DeleteUserCommandHandler(
-            repo.Object, uow.Object, Mock.Of<ILogger<DeleteUserCommandHandler>>());
-        return (handler, repo, uow);
+            repo.Object, uow.Object, refresh.Object, Mock.Of<ILogger<DeleteUserCommandHandler>>());
+        return (handler, repo, uow, refresh);
     }
 
     [Fact]
     public async Task Delete_Self_Fails_NoDelete()
     {
-        var (handler, repo, uow) = BuildDelete();
+        var (handler, repo, uow, refresh) = BuildDelete();
         var me = Guid.NewGuid();
 
         var result = await handler.Handle(new DeleteUserCommand(me, me), default);
@@ -263,12 +274,14 @@ public class UserManagementHandlerTests
         result.Error.Should().Contain("your own account");
         repo.Verify(r => r.DeleteAsync(It.IsAny<UserEntity>()), Times.Never);
         uow.Verify(u => u.CommitAsync(), Times.Never);
+        // A rejected delete must not revoke anything.
+        refresh.Verify(r => r.RevokeAllForUserAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
     public async Task Delete_TargetNotFound_Fails()
     {
-        var (handler, repo, uow) = BuildDelete();
+        var (handler, repo, uow, refresh) = BuildDelete();
         repo.Setup(r => r.GetByIdAsync(It.IsAny<Guid>())).ReturnsAsync((UserEntity?)null);
 
         var result = await handler.Handle(new DeleteUserCommand(Guid.NewGuid(), Guid.NewGuid()), default);
@@ -281,7 +294,7 @@ public class UserManagementHandlerTests
     [Fact]
     public async Task Delete_LastAdmin_Fails_NoDelete()
     {
-        var (handler, repo, uow) = BuildDelete();
+        var (handler, repo, uow, refresh) = BuildDelete();
         var target = Admin();
         repo.Setup(r => r.GetByIdAsync(target.Id)).ReturnsAsync(target);
         repo.Setup(r => r.CountByRoleAsync(UserRoles.Admin)).ReturnsAsync(1);
@@ -297,7 +310,7 @@ public class UserManagementHandlerTests
     [Fact]
     public async Task Delete_Admin_WhenOthersExist_Succeeds()
     {
-        var (handler, repo, uow) = BuildDelete();
+        var (handler, repo, uow, refresh) = BuildDelete();
         var target = Admin();
         repo.Setup(r => r.GetByIdAsync(target.Id)).ReturnsAsync(target);
         repo.Setup(r => r.CountByRoleAsync(UserRoles.Admin)).ReturnsAsync(3);
@@ -307,12 +320,14 @@ public class UserManagementHandlerTests
         result.IsSuccess.Should().BeTrue();
         repo.Verify(r => r.DeleteAsync(target), Times.Once);
         uow.Verify(u => u.CommitAsync(), Times.Once);
+        // Delete revokes all of the target's refresh families before removing the user.
+        refresh.Verify(r => r.RevokeAllForUserAsync(target.Id, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
     public async Task Delete_Farmer_Succeeds_NoAdminCountCheck()
     {
-        var (handler, repo, uow) = BuildDelete();
+        var (handler, repo, uow, refresh) = BuildDelete();
         var target = Farmer();
         repo.Setup(r => r.GetByIdAsync(target.Id)).ReturnsAsync(target);
 

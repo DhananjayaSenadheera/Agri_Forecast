@@ -21,16 +21,17 @@ namespace AgriForecast.API.Controllers;
 [EnableRateLimiting("auth")]
 public class AuthController(
     IMediator mediator,
-    IJwtTokenGenerator jwtTokenGenerator,
+    IRefreshTokenService refreshTokenService,
     IOptions<JwtSettings> jwtSettings,
     IWebHostEnvironment environment) : ControllerBase
 {
-    // Stateless refresh token: a signed JWT carried in this HttpOnly cookie. There is NO
-    // server-side store, so a leaked/stolen refresh token cannot be individually revoked before
-    // it expires (7 days). POST-HOLD UPGRADE PATH: add a persisted token/family id (jti) table or
-    // a per-user token version claim and check/rotate it on refresh to enable revocation and
-    // reuse-detection. Until then, mitigations are: short-ish lifetime, HttpOnly + SameSite=Strict
-    // + Secure (outside dev), path-scoped to /api/auth, and rotation on every refresh.
+    // Refresh token: a signed JWT carried in this HttpOnly cookie, now backed by a PERSISTED
+    // revocation store (RefreshTokenRecord, keyed by jti and chained by family). A refresh is
+    // honoured only when the token is crypto-valid AND its jti row exists, is unexpired, not
+    // revoked, and not already used; rotation marks the old row used and issues a chained child.
+    // Reuse of a used token revokes the whole family; logout and admin delete/demote revoke too.
+    // Fail-closed: a store error rejects the refresh (see IRefreshTokenService). Cookie semantics
+    // (HttpOnly + SameSite=Strict + Secure outside dev + path=/api/auth + rotation) are unchanged.
     private const string RefreshCookieName = "agriforecast_refresh";
     private const string RefreshCookiePath = "/api/auth";
 
@@ -48,7 +49,7 @@ public class AuthController(
         var result = await mediator.Send(command);
         if (result.IsSuccess)
         {
-            IssueRefreshCookie(result.Data);
+            await IssueRefreshCookie(result.Data);
             return Ok(result.Data);
         }
 
@@ -61,7 +62,7 @@ public class AuthController(
         var result = await mediator.Send(command);
         if (result.IsSuccess)
         {
-            IssueRefreshCookie(result.Data);
+            await IssueRefreshCookie(result.Data);
             return Ok(result.Data);
         }
 
@@ -76,35 +77,59 @@ public class AuthController(
     public async Task<IActionResult> Refresh()
     {
         var refreshToken = Request.Cookies[RefreshCookieName];
-        var result = await mediator.Send(new RefreshCommand { RefreshToken = refreshToken });
-        if (result.IsSuccess)
+
+        // Rotate against the persisted store first: crypto-valid AND jti row current (unexpired, not
+        // revoked, not used). Reuse-detection revokes the family; a store error fails closed. This
+        // returns the brand-new child refresh token to set as the rotated cookie.
+        var rotation = await refreshTokenService.RotateAsync(refreshToken);
+        if (!rotation.IsSuccess)
         {
-            // Rotate: every successful refresh issues a brand-new 7-day refresh cookie.
-            IssueRefreshCookie(result.Data);
-            return Ok(result.Data);
+            ClearRefreshCookie();
+            return Unauthorized(ToErrorResponse("Invalid or expired refresh token."));
         }
 
-        // A stale/invalid cookie is worthless — clear it so the browser stops resending it.
-        ClearRefreshCookie();
-        return Unauthorized(ToErrorResponse(result.Error));
+        // Re-mint the access token (re-resolves username/email/role from the store) via the handler.
+        var result = await mediator.Send(new RefreshCommand { RefreshToken = refreshToken });
+        if (!result.IsSuccess)
+        {
+            ClearRefreshCookie();
+            return Unauthorized(ToErrorResponse(result.Error));
+        }
+
+        // Rotate the cookie to the freshly-issued child refresh token.
+        SetRefreshCookie(rotation.Token!);
+        return Ok(result.Data);
     }
 
-    /// <summary>Clears the refresh cookie. Stateless — nothing to revoke server-side.</summary>
+    /// <summary>
+    /// Revokes the presented refresh token's whole family server-side, then clears the cookie so a
+    /// stolen copy of the token is dead even though the browser had already discarded it.
+    /// </summary>
     [HttpPost("logout")]
-    public IActionResult Logout()
+    public async Task<IActionResult> Logout()
     {
+        var refreshToken = Request.Cookies[RefreshCookieName];
+        await refreshTokenService.RevokeFamilyForTokenAsync(refreshToken);
         ClearRefreshCookie();
         return NoContent();
     }
 
-    private void IssueRefreshCookie(AuthResponseDto dto)
+    private async Task IssueRefreshCookie(AuthResponseDto dto)
     {
         // Bind the refresh token to the IMMUTABLE user id, not the mutable username, so a stale
-        // 7-day refresh token can never resolve to a different account after a rename/re-register.
+        // refresh token can never resolve to a different account after a rename/re-register.
         // AuthResponseDto (the locked body) carries no id, but the access token just minted for it
-        // does — its subject is user.Id — so read it back as the single source of truth.
+        // does — its subject is user.Id — so read it back as the single source of truth. The service
+        // mints the token in a new family and persists its record; a null token means persistence
+        // failed, in which case we omit the cookie (fail-safe — no unrevocable token in the wild).
         var userId = Guid.Parse(new JwtSecurityTokenHandler().ReadJwtToken(dto.AccessToken).Subject);
-        var (refreshToken, _) = jwtTokenGenerator.GenerateRefreshToken(userId);
+        var (refreshToken, _) = await refreshTokenService.IssueNewFamilyAsync(userId);
+        if (refreshToken is not null)
+            SetRefreshCookie(refreshToken);
+    }
+
+    private void SetRefreshCookie(string refreshToken)
+    {
         Response.Cookies.Append(RefreshCookieName, refreshToken, BuildCookieOptions(
             TimeSpan.FromDays(jwtSettings.Value.RefreshTokenDays)));
     }

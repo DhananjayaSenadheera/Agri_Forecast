@@ -105,6 +105,51 @@ public class RefreshTokenGeneratorTests
         gen.ValidateRefreshToken(token).Should().Be(TestUserId.ToString());
     }
 
+    // ── jti round-trip (revocation-store support) ────────────────────────────────────
+
+    [Fact]
+    public void GenerateRefreshToken_WithSuppliedJti_EmbedsThatJti()
+    {
+        var gen = BuildGenerator();
+        var jti = Guid.NewGuid();
+        var (token, _) = gen.GenerateRefreshToken(TestUserId, jti);
+
+        // The JWT id claim must be exactly the supplied jti so the persisted record and the token agree.
+        Parse(token).Id.Should().Be(jti.ToString());
+    }
+
+    [Fact]
+    public void ReadValidatedRefreshToken_ValidToken_ReturnsUserIdAndJti()
+    {
+        var gen = BuildGenerator();
+        var jti = Guid.NewGuid();
+        var (token, _) = gen.GenerateRefreshToken(TestUserId, jti);
+
+        var principal = gen.ReadValidatedRefreshToken(token);
+
+        Assert.NotNull(principal);
+        principal!.UserId.Should().Be(TestUserId);
+        principal.Jti.Should().Be(jti);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not-a-jwt")]
+    public void ReadValidatedRefreshToken_MissingOrGarbage_ReturnsNull(string? token)
+    {
+        Assert.Null(BuildGenerator().ReadValidatedRefreshToken(token));
+    }
+
+    [Fact]
+    public void ReadValidatedRefreshToken_AccessToken_ReturnsNull()
+    {
+        var gen = BuildGenerator();
+        var (accessToken, _) = gen.Generate(TestUser());
+
+        Assert.Null(gen.ReadValidatedRefreshToken(accessToken));
+    }
+
     // ── validation 401 matrix ───────────────────────────────────────────────────────
 
     [Theory]

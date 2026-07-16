@@ -6,6 +6,7 @@ using AgriForecast.Application.Requests.Auth.Commands.Login;
 using AgriForecast.Application.Requests.Auth.Commands.Refresh;
 using AgriForecast.Application.Requests.Auth.Commands.Register;
 using AgriForecast.Application.Requests.Auth.DTOs;
+using AgriForecast.Application.Services;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Infrastructure.Security;
 using FluentAssertions;
@@ -21,8 +22,10 @@ using Moq;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Unit tests for AuthController's refresh-cookie I/O (API-8). A DefaultHttpContext captures the
-/// Set-Cookie header; the mediator is mocked while a REAL JwtTokenGenerator issues cookie tokens.
+/// Unit tests for AuthController's refresh-cookie I/O. A DefaultHttpContext captures the Set-Cookie
+/// header; the mediator and IRefreshTokenService are mocked, with the service producing REAL refresh
+/// JWTs (via a real JwtTokenGenerator) so cookie-token assertions stay meaningful. The revocation
+/// state machine itself is unit-tested in RefreshTokenServiceTests.
 /// </summary>
 public class AuthControllerRefreshTests
 {
@@ -70,7 +73,8 @@ public class AuthControllerRefreshTests
         Result<AuthResponseDto> mediatorResult,
         out DefaultHttpContext httpContext,
         string environment = "Development",
-        string? requestCookieValue = null)
+        string? requestCookieValue = null,
+        bool rotationSucceeds = true)
     {
         var mediator = new Mock<IMediator>();
         mediator.Setup(m => m.Send(
@@ -79,11 +83,28 @@ public class AuthControllerRefreshTests
 
         var gen = new JwtTokenGenerator(Options.Create(Settings()));
 
+        // Mock the revocation service. IssueNewFamilyAsync + a successful RotateAsync return REAL
+        // refresh JWTs (bound to the requested user id) so cookie assertions remain faithful.
+        var refresh = new Mock<IRefreshTokenService>();
+        refresh.Setup(s => s.IssueNewFamilyAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((Guid uid, CancellationToken _) =>
+            {
+                var (tok, exp) = gen.GenerateRefreshToken(uid);
+                return ((string?)tok, exp);
+            });
+        refresh.Setup(s => s.RotateAsync(It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(rotationSucceeds
+                ? RefreshRotationResult.Success(
+                    TestUserId, gen.GenerateRefreshToken(TestUserId).token, DateTime.UtcNow.AddDays(7))
+                : RefreshRotationResult.Fail());
+        refresh.Setup(s => s.RevokeFamilyForTokenAsync(It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
         var env = new Mock<IWebHostEnvironment>();
         env.SetupGet(e => e.EnvironmentName).Returns(environment);
 
         var controller = new AuthController(
-            mediator.Object, gen, Options.Create(Settings()), env.Object);
+            mediator.Object, refresh.Object, Options.Create(Settings()), env.Object);
 
         httpContext = new DefaultHttpContext();
         if (requestCookieValue is not null)
@@ -187,8 +208,10 @@ public class AuthControllerRefreshTests
     [Fact]
     public async Task Refresh_Failure_Returns401AndClearsCookie()
     {
+        // Rotation (store check) fails => 401 + cookie cleared, and the access-mint is never reached.
         var controller = BuildController(
-            Result<AuthResponseDto>.Failure("Invalid or expired refresh token."), out var ctx);
+            Result<AuthResponseDto>.Success(Dto()), out var ctx,
+            requestCookieValue: "used-or-revoked-token", rotationSucceeds: false);
 
         var action = await controller.Refresh();
 
@@ -201,11 +224,12 @@ public class AuthControllerRefreshTests
     }
 
     [Fact]
-    public void Logout_ClearsCookie_Returns204()
+    public async Task Logout_ClearsCookie_Returns204()
     {
-        var controller = BuildController(Result<AuthResponseDto>.Success(Dto()), out var ctx);
+        var controller = BuildController(Result<AuthResponseDto>.Success(Dto()), out var ctx,
+            requestCookieValue: "some-refresh-token");
 
-        var action = controller.Logout();
+        var action = await controller.Logout();
 
         Assert.IsType<NoContentResult>(action);
         var setCookie = SetCookieHeader(ctx).ToLowerInvariant();

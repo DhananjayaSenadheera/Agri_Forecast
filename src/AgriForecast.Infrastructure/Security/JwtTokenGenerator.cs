@@ -52,19 +52,24 @@ public class JwtTokenGenerator : IJwtTokenGenerator
     private const string TokenUseClaim = "token_use";
     private const string RefreshTokenUse = "refresh";
 
+    // Internal-jti overload: unchanged public behaviour for the stateless call sites/tests.
     public (string token, DateTime expiresAtUtc) GenerateRefreshToken(Guid userId)
+        => GenerateRefreshToken(userId, Guid.NewGuid());
+
+    public (string token, DateTime expiresAtUtc) GenerateRefreshToken(Guid userId, Guid jti)
     {
         // Refresh tokens are long-lived and identify the user by their IMMUTABLE id only — never the
         // mutable username — so a rename or delete-then-re-register can't let an outstanding refresh
         // token resolve to a different account. Username/email/role are re-resolved from the store on
         // each refresh, so they are deliberately NOT embedded. Id is lowercased (Guid.ToString()
-        // default) to match the .NET<->Python wire convention.
+        // default) to match the .NET<->Python wire convention. The jti is supplied by the caller so
+        // the persisted revocation record and this token agree on the same identifier.
         var expiresAtUtc = DateTime.UtcNow.AddDays(_settings.RefreshTokenDays);
 
         var claims = new[]
         {
             new Claim(JwtRegisteredClaimNames.Sub, userId.ToString()),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            new Claim(JwtRegisteredClaimNames.Jti, jti.ToString()),
             // Token-type separation: marks this as a refresh token so it can never be replayed
             // as an access token even if the audience check were ever loosened.
             new Claim(TokenUseClaim, RefreshTokenUse)
@@ -89,6 +94,41 @@ public class JwtTokenGenerator : IJwtTokenGenerator
 
     public string? ValidateRefreshToken(string? token)
     {
+        var validated = ValidateRefreshCore(token);
+        if (validated is null)
+            return null;
+
+        // Subject is the immutable user id. Default inbound mapping turns "sub" into
+        // ClaimTypes.NameIdentifier, so check both to be robust to mapping settings.
+        var userId = validated.Value.principal.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                     ?? validated.Value.principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
+
+        return string.IsNullOrWhiteSpace(userId) ? null : userId;
+    }
+
+    public RefreshTokenPrincipal? ReadValidatedRefreshToken(string? token)
+    {
+        var validated = ValidateRefreshCore(token);
+        if (validated is null)
+            return null;
+
+        var (principal, jwt) = validated.Value;
+        var userIdStr = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                        ?? principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
+
+        // jwt.Id is the raw jti claim, read straight off the validated token — immune to inbound
+        // claim-type remapping. Both ids must be well-formed GUIDs or the token is treated as invalid.
+        if (!Guid.TryParse(userIdStr, out var userId) || !Guid.TryParse(jwt.Id, out var jti))
+            return null;
+
+        return new RefreshTokenPrincipal(userId, jti);
+    }
+
+    // Shared crypto validation for both refresh-token readers. Returns the validated principal and
+    // the parsed token, or null on ANY failure (bad signature / wrong audience / expired / malformed
+    // / not a refresh token) — the reason is never surfaced, so callers cannot build an oracle.
+    private (ClaimsPrincipal principal, JwtSecurityToken jwt)? ValidateRefreshCore(string? token)
+    {
         if (string.IsNullOrWhiteSpace(token))
             return null;
 
@@ -110,19 +150,17 @@ public class JwtTokenGenerator : IJwtTokenGenerator
         try
         {
             var principal = new JwtSecurityTokenHandler()
-                .ValidateToken(token, validationParameters, out _);
+                .ValidateToken(token, validationParameters, out var validated);
+
+            if (validated is not JwtSecurityToken jwt)
+                return null;
 
             // Defence in depth on top of the audience check.
             var tokenUse = principal.FindFirst(TokenUseClaim)?.Value;
             if (!string.Equals(tokenUse, RefreshTokenUse, StringComparison.Ordinal))
                 return null;
 
-            // Subject is the immutable user id. Default inbound mapping turns "sub" into
-            // ClaimTypes.NameIdentifier, so check both to be robust to mapping settings.
-            var userId = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                         ?? principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
-
-            return string.IsNullOrWhiteSpace(userId) ? null : userId;
+            return (principal, jwt);
         }
         catch
         {

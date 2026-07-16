@@ -1,4 +1,5 @@
 using AgriForecast.Application.common;
+using AgriForecast.Application.Services;
 using AgriForecast.Domain.Constants;
 using AgriForecast.Domain.Interfaces;
 using MediatR;
@@ -12,25 +13,28 @@ namespace AgriForecast.Application.Requests.Users.Commands.Delete;
 ///  - the target must exist;
 ///  - the LAST remaining admin cannot be deleted (Admin count checked in the same request scope as
 ///    the write).
-/// NOTE on token lifetime: refresh tokens are stateless (no server-side store), so this delete
-/// removes the row but cannot revoke an ALREADY-ISSUED access token — it stays valid until it
-/// expires (&lt;= AccessTokenMinutes). The deleted user's next /api/auth/refresh fails closed
-/// (GetByIdAsync miss -> 401). True immediate revocation is the separate refresh-revocation backlog
-/// item; do not build it here.
+/// REFRESH REVOCATION: before deleting, all of the target's refresh-token families are revoked so no
+/// outstanding refresh token can survive the delete (the FK is also CASCADE, so the rows are then
+/// physically removed with the user — belt and braces). An ALREADY-ISSUED access token still stays
+/// valid until it expires (&lt;= AccessTokenMinutes) — that short window is the documented residual
+/// limit; the deleted user's next /api/auth/refresh already failed closed on the GetByIdAsync miss.
 /// </summary>
 public class DeleteUserCommandHandler : IRequestHandler<DeleteUserCommand, Result<bool>>
 {
     private readonly IUserRepository _userRepository;
     private readonly IUnitofWorkRepository _unitofWorkRepository;
+    private readonly IRefreshTokenService _refreshTokenService;
     private readonly ILogger<DeleteUserCommandHandler> _logger;
 
     public DeleteUserCommandHandler(
         IUserRepository userRepository,
         IUnitofWorkRepository unitofWorkRepository,
+        IRefreshTokenService refreshTokenService,
         ILogger<DeleteUserCommandHandler> logger)
     {
         _userRepository = userRepository;
         _unitofWorkRepository = unitofWorkRepository;
+        _refreshTokenService = refreshTokenService;
         _logger = logger;
     }
 
@@ -51,6 +55,10 @@ public class DeleteUserCommandHandler : IRequestHandler<DeleteUserCommand, Resul
             if (adminCount <= 1)
                 return Result<bool>.Failure("Cannot delete the last remaining admin.");
         }
+
+        // Revoke every refresh-token family for the target BEFORE the delete so no outstanding
+        // refresh token survives (set-based, committed immediately by the store).
+        await _refreshTokenService.RevokeAllForUserAsync(target.Id, cancellationToken);
 
         await _userRepository.DeleteAsync(target);
         await _unitofWorkRepository.CommitAsync();
