@@ -45,6 +45,7 @@ public static class InfsDependencyInjection
         services.AddScoped<IEconomicIndicatorRepository, EconomicIndicatorRepository>();
         services.AddScoped<IMacroSeriesPointRepository, MacroSeriesPointRepository>();
         services.AddScoped<IPolicyFlagRepository, PolicyFlagRepository>();
+        services.AddScoped<IFestivalCalendarRepository, FestivalCalendarRepository>();
         services.AddScoped<IForecastingService, ForecastingService>();
         services.AddScoped<IRecommendationService, RecommendationService>();
         // Read-only market-overview snapshot store (GET /api/forecast/market-overview).
