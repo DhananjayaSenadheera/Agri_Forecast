@@ -60,6 +60,10 @@ public class AdminAuthorizationWiringTests
     [InlineData(typeof(FestivalCalendarController), nameof(FestivalCalendarController.Create))]
     [InlineData(typeof(FestivalCalendarController), nameof(FestivalCalendarController.Update))]
     [InlineData(typeof(FestivalCalendarController), nameof(FestivalCalendarController.Delete))]
+    // API-12: news-event mutations are Admin-only (curated data).
+    [InlineData(typeof(NewsEventController), nameof(NewsEventController.Create))]
+    [InlineData(typeof(NewsEventController), nameof(NewsEventController.Update))]
+    [InlineData(typeof(NewsEventController), nameof(NewsEventController.Delete))]
     public void MutatingEndpoints_AreAdminOnly(Type controller, string method)
     {
         IsAdminLocked(controller, method).Should().BeTrue(
@@ -80,6 +84,8 @@ public class AdminAuthorizationWiringTests
     [InlineData(typeof(IndicatorsController), nameof(IndicatorsController.GetIndicators))]
     [InlineData(typeof(IndicatorsController), nameof(IndicatorsController.GetMacroSeries))]
     [InlineData(typeof(IndicatorsController), nameof(IndicatorsController.GetCatalog))]
+    // API-12: news-event list is authenticated-only (not Admin-gated) — non-personal reference data.
+    [InlineData(typeof(NewsEventController), nameof(NewsEventController.GetAll))]
     public void ReadEndpoints_RequireAuth_ButNotAdmin(Type controller, string method)
     {
         RequiresAuthOnly(controller, method).Should().BeTrue(
