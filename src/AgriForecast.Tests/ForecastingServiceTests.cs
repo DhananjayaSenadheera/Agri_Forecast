@@ -32,7 +32,7 @@ public class ForecastingServiceTests
     // Crop.Id has a private setter; use the factory which calls Guid.NewGuid() internally.
     // We capture the Id from the created Crop so we can key mocks on it.
     private static Crop MakeCrop(string name = "Tomato")
-        => Crop.CreateFromExternalSource(name, externalProductId: 1, source: "test", cropCode: name[..3].ToUpper());
+        => Crop.CreateFromExternalSource(name, source: "test", cropCode: name[..3].ToUpper());
 
     private static MarketPrice MakePrice(Guid cropId, int year, int month, int day, decimal min, decimal max) =>
         new()

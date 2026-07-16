@@ -24,7 +24,7 @@ public class MapperTests
     [Fact]
     public void Crop_ToEntity_AssignsNonEmptyUniqueId()
     {
-        var dto = new Crop_CreateDto { Name = "Carrot", ExternalProductId = 12, Source = "Dambulla" };
+        var dto = new Crop_CreateDto { Name = "Carrot", Source = "Dambulla" };
 
         var a = dto.ToEntity();
         var b = dto.ToEntity();
@@ -38,7 +38,7 @@ public class MapperTests
     public void Crop_ToEntity_SetsCreatedAndUpdatedAt_ToUtcNow()
     {
         var before = DateTime.UtcNow;
-        var crop = new Crop_CreateDto { Name = "Carrot", ExternalProductId = 12, Source = "Dambulla" }.ToEntity();
+        var crop = new Crop_CreateDto { Name = "Carrot", Source = "Dambulla" }.ToEntity();
         var after = DateTime.UtcNow;
 
         crop.CreatedAt.Should().BeOnOrAfter(before).And.BeOnOrBefore(after);
@@ -46,14 +46,13 @@ public class MapperTests
     }
 
     [Fact]
-    public void Crop_ToEntity_CopiesNameExternalProductIdAndSource()
+    public void Crop_ToEntity_CopiesNameAndSource()
     {
-        var dto = new Crop_CreateDto { Name = "Carrot", ExternalProductId = 12, Source = "Dambulla" };
+        var dto = new Crop_CreateDto { Name = "Carrot", Source = "Dambulla" };
 
         var crop = dto.ToEntity();
 
         crop.Name.Should().Be("Carrot");
-        crop.ExternalProductId.Should().Be(12);
         crop.Source.Should().Be("Dambulla");
     }
 
@@ -61,7 +60,7 @@ public class MapperTests
     // CropMapper — update (conditional-copy guards, mutate-in-place, immutability)
     // ──────────────────────────────────────────────────────────────────────────────
 
-    private static Crop ExistingCrop() => Crop.CreateForManualEntry("Original", 1, "OriginalSource", Guid.NewGuid());
+    private static Crop ExistingCrop() => Crop.CreateForManualEntry("Original", "OriginalSource", Guid.NewGuid());
 
     [Fact]
     public void Crop_ApplyTo_OverwritesNameEvenWhenSourceNameIsNull()
@@ -69,7 +68,7 @@ public class MapperTests
         // Legacy AutoMapper ForMember(Name, MapFrom(src.Name)) had no PreCondition —
         // it copied unconditionally, including null. This must be preserved exactly.
         var existing = ExistingCrop();
-        var dto = new Crop_UpdateDto { Id = existing.Id, Name = null, ExternalProductId = null, Source = null };
+        var dto = new Crop_UpdateDto { Id = existing.Id, Name = null, Source = null };
 
         var result = dto.ApplyTo(existing);
 
@@ -80,7 +79,7 @@ public class MapperTests
     public void Crop_ApplyTo_OverwritesNameWhenProvided()
     {
         var existing = ExistingCrop();
-        var dto = new Crop_UpdateDto { Id = existing.Id, Name = "Renamed", ExternalProductId = null, Source = null };
+        var dto = new Crop_UpdateDto { Id = existing.Id, Name = "Renamed", Source = null };
 
         dto.ApplyTo(existing);
 
@@ -88,34 +87,11 @@ public class MapperTests
     }
 
     [Fact]
-    public void Crop_ApplyTo_ExternalProductId_CopiedOnlyWhenHasValue()
-    {
-        var existing = ExistingCrop();
-        existing.ExternalProductId.Should().Be(1);
-        var dto = new Crop_UpdateDto { Id = existing.Id, Name = "x", ExternalProductId = null, Source = null };
-
-        dto.ApplyTo(existing);
-
-        existing.ExternalProductId.Should().Be(1, "PreCondition(HasValue) must skip the copy when the update omits it");
-    }
-
-    [Fact]
-    public void Crop_ApplyTo_ExternalProductId_OverwrittenWhenProvided()
-    {
-        var existing = ExistingCrop();
-        var dto = new Crop_UpdateDto { Id = existing.Id, Name = "x", ExternalProductId = 99, Source = null };
-
-        dto.ApplyTo(existing);
-
-        existing.ExternalProductId.Should().Be(99);
-    }
-
-    [Fact]
     public void Crop_ApplyTo_Source_CopiedOnlyWhenNotNull()
     {
         var existing = ExistingCrop();
         existing.Source.Should().Be("OriginalSource");
-        var dto = new Crop_UpdateDto { Id = existing.Id, Name = "x", ExternalProductId = null, Source = null };
+        var dto = new Crop_UpdateDto { Id = existing.Id, Name = "x", Source = null };
 
         dto.ApplyTo(existing);
 
@@ -126,7 +102,7 @@ public class MapperTests
     public void Crop_ApplyTo_Source_OverwrittenWhenProvided()
     {
         var existing = ExistingCrop();
-        var dto = new Crop_UpdateDto { Id = existing.Id, Name = "x", ExternalProductId = null, Source = "NewSource" };
+        var dto = new Crop_UpdateDto { Id = existing.Id, Name = "x", Source = "NewSource" };
 
         dto.ApplyTo(existing);
 
@@ -153,7 +129,7 @@ public class MapperTests
         var existing = ExistingCrop();
         var originalId = existing.Id;
         var originalCreatedAt = existing.CreatedAt;
-        var dto = new Crop_UpdateDto { Id = existing.Id, Name = "x", ExternalProductId = 5, Source = "s" };
+        var dto = new Crop_UpdateDto { Id = existing.Id, Name = "x", Source = "s" };
 
         dto.ApplyTo(existing);
 
@@ -181,14 +157,13 @@ public class MapperTests
     [Fact]
     public void Crop_ToGetDto_CopiesAllExposedFieldsIncludingId()
     {
-        var crop = Crop.CreateForManualEntry("Carrot", 7, "Dambulla", Guid.NewGuid());
+        var crop = Crop.CreateForManualEntry("Carrot", "Dambulla", Guid.NewGuid());
         crop.CropCode = "CR-001";
 
         var dto = crop.ToGetDto();
 
         dto.Id.Should().Be(crop.Id);
         dto.Name.Should().Be(crop.Name);
-        dto.ExternalProductId.Should().Be(crop.ExternalProductId);
         dto.Source.Should().Be(crop.Source);
         dto.CreatedAt.Should().Be(crop.CreatedAt);
         dto.UpdatedAt.Should().Be(crop.UpdatedAt);
@@ -200,7 +175,7 @@ public class MapperTests
         // Reflection-based round-trip completeness guard: every public settable
         // property on Crop_GetDto must differ from a fresh default(Crop_GetDto)
         // when the source Crop has non-default values for the same-named field.
-        var crop = Crop.CreateForManualEntry("Carrot", 7, "Dambulla", Guid.NewGuid());
+        var crop = Crop.CreateForManualEntry("Carrot", "Dambulla", Guid.NewGuid());
 
         var dto = crop.ToGetDto();
         var blank = new Crop_GetDto();
@@ -219,9 +194,9 @@ public class MapperTests
     {
         var crops = new[]
         {
-            Crop.CreateForManualEntry("A", 1, "s1", Guid.NewGuid()),
-            Crop.CreateForManualEntry("B", 2, "s2", Guid.NewGuid()),
-            Crop.CreateForManualEntry("C", 3, "s3", Guid.NewGuid())
+            Crop.CreateForManualEntry("A", "s1", Guid.NewGuid()),
+            Crop.CreateForManualEntry("B", "s2", Guid.NewGuid()),
+            Crop.CreateForManualEntry("C", "s3", Guid.NewGuid())
         };
 
         var dtos = crops.ToGetDtoList();

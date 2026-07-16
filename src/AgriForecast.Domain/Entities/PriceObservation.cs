@@ -25,7 +25,7 @@ public class PriceObservation
     public Guid MarketId { get; private set; }
 
     // FK -> Crops. Nullable: self-healed later by the canonical commodity mapping,
-    // exactly as MarketPrice.CropId is resolved from Crop.ExternalProductId during ingestion.
+    // exactly as MarketPrice.CropId is resolved via CommodityAliases during ingestion.
     public Guid? CropId { get; private set; }
 
     // Source-native commodity identity. ExternalCommodityId is nullable because some
