@@ -1,4 +1,6 @@
 using AgriForecast.Application.Requests.PolicyFlag.Commands.Create;
+using AgriForecast.Application.Requests.PolicyFlag.Commands.Delete;
+using AgriForecast.Application.Requests.PolicyFlag.Commands.Update;
 using AgriForecast.Application.Requests.PolicyFlag.Quaries.GetAll;
 using AgriForecast.Domain.Constants;
 using MediatR;
@@ -27,6 +29,32 @@ public class PolicyFlagController(IMediator mediator) : ControllerBase
     public async Task<IActionResult> Create([FromBody] PolicyFlagCreateCommand command)
     {
         var result = await mediator.Send(command);
+        if (result.IsSuccess)
+            return Ok(result.Data);
+
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
+    // PUT /api/policy-flag/update -> full-object update keyed by id; Admin-only (as-of-joined ML data).
+    // 200 with { id, trainingDataWarning } on success (warning non-null when the flag's window — old
+    // or new — is in the past); validation/guard failures -> 400 house error; not-found -> 400 failure.
+    [HttpPut("update")]
+    [Authorize(Roles = UserRoles.Admin)]
+    public async Task<IActionResult> Update([FromBody] PolicyFlagUpdateCommand command)
+    {
+        var result = await mediator.Send(command);
+        if (result.IsSuccess)
+            return Ok(result.Data);
+
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
+    // DELETE /api/policy-flag/delete/{id} -> Admin-only. Same training-data warning semantics as update.
+    [HttpDelete("delete/{id}")]
+    [Authorize(Roles = UserRoles.Admin)]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        var result = await mediator.Send(new PolicyFlagDeleteCommand(id));
         if (result.IsSuccess)
             return Ok(result.Data);
 

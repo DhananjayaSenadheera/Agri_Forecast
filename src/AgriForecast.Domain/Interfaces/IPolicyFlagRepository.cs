@@ -5,6 +5,8 @@ namespace AgriForecast.Domain.Interfaces;
 public interface IPolicyFlagRepository
 {
     Task<PolicyFlag> AddAsync(PolicyFlag policyFlag);
+    Task<PolicyFlag> UpdateAsync(PolicyFlag policyFlag);
+    Task DeleteAsync(PolicyFlag policyFlag);
     Task<PolicyFlag?> GetByIdAsync(Guid id);
 
     // All flags, ordered by EffectiveFrom (chronological).

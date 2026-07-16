@@ -20,6 +20,18 @@ public class PolicyFlagRepository : IPolicyFlagRepository
         return policyFlag;
     }
 
+    public Task<PolicyFlag> UpdateAsync(PolicyFlag policyFlag)
+    {
+        _db.PolicyFlags.Update(policyFlag);
+        return Task.FromResult(policyFlag);
+    }
+
+    public Task DeleteAsync(PolicyFlag policyFlag)
+    {
+        _db.PolicyFlags.Remove(policyFlag);
+        return Task.CompletedTask;
+    }
+
     public async Task<PolicyFlag?> GetByIdAsync(Guid id)
     {
         return await _db.PolicyFlags.FindAsync(id);

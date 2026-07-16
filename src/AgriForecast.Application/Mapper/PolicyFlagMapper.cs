@@ -26,6 +26,22 @@ public static class PolicyFlagMapper
         };
     }
 
+    // PolicyFlag_UpdateDto -> existing PolicyFlag (in-place, full-object replace).
+    // Id and CreatedAtUtc are preserved (identity + audit stay put); EffectiveFrom/EffectiveTo are
+    // normalised to date-only (same leakage guard as create).
+    public static PolicyFlag ApplyTo(this PolicyFlag_UpdateDto src, PolicyFlag target)
+    {
+        target.PolicyType = src.PolicyType;
+        target.Title = src.Title;
+        target.Description = src.Description;
+        target.EffectiveFrom = src.EffectiveFrom.Date;
+        target.EffectiveTo = src.EffectiveTo.HasValue ? src.EffectiveTo.Value.Date : (DateTime?)null;
+        target.Direction = src.Direction;
+        target.Source = src.Source;
+        target.ReferenceUrl = src.ReferenceUrl;
+        return target;
+    }
+
     // PolicyFlag -> PolicyFlag_GetDto
     // Mirrors CreateMap<PolicyFlag, PolicyFlag_GetDto>() (convention-only, all same-name members).
     public static PolicyFlag_GetDto ToGetDto(this PolicyFlag src)

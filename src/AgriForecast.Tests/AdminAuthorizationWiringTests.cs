@@ -55,6 +55,8 @@ public class AdminAuthorizationWiringTests
     [InlineData(typeof(CropController), nameof(CropController.DeleteCrop))]
     [InlineData(typeof(MarketController), nameof(MarketController.Create))]
     [InlineData(typeof(PolicyFlagController), nameof(PolicyFlagController.Create))]
+    [InlineData(typeof(PolicyFlagController), nameof(PolicyFlagController.Update))]
+    [InlineData(typeof(PolicyFlagController), nameof(PolicyFlagController.Delete))]
     public void MutatingEndpoints_AreAdminOnly(Type controller, string method)
     {
         IsAdminLocked(controller, method).Should().BeTrue(
