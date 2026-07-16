@@ -163,6 +163,46 @@ def _reason_for(model_served: bool, tier: str, row_missing: bool = False,
     return "Adequate crop history."
 
 
+# --- API-5: machine-stable reason CODES (additive; prose fields unchanged) ---
+# Every distinct confidenceReason prose branch in `_reason_for` gets ONE stable
+# snake_case code + a params dict, so the trilingual FE renders Sinhala/Tamil
+# without parsing English. Branch order MUST mirror `_reason_for` exactly (one
+# code per distinct prose branch — no invented branches). The FE renders the
+# `explanation` prose from the already-stable `activePredictor` + `fallbackTier`
+# fields, so only the confidenceReason branch needs a code here.
+def _reason_code_for(model_served: bool, tier: str, row_missing: bool = False,
+                     ml_failed: bool = False, not_model_served: bool = False,
+                     history_obs: int | None = None) -> tuple[str, dict]:
+    # First-match wins: correctness relies on CALLERS keeping the three flags
+    # mutually exclusive (they do — see predict_harvest/timeline call sites).
+    # A caller that ever sets two flags together would silently take the first
+    # branch, matching _reason_for's identical ordering.
+    if not_model_served:
+        params: dict = {"neededHistoryObs": _min_history_obs()}
+        if history_obs is not None:
+            params["historyObs"] = int(history_obs)
+        return "not_model_served", params
+    if ml_failed:
+        return "ml_failed_fallback", {}
+    if row_missing:
+        return "no_recent_feature_row", {}
+    if tier == "global":
+        return "cold_start_global", {}
+    if tier == "category":
+        return "cold_start_category", {}
+    if model_served and tier == "crop":
+        return "model_served", {}
+    return "adequate_history_fallback", {}
+
+
+def _crop_history_obs(crop_id: str) -> int | None:
+    """The crop's own labelled-row count from the persisted fallback map (used as
+    a reason param). None when the payload has no per-crop n_obs (old payloads)."""
+    per = ((_PAYLOAD or {}).get("fallback") or {}).get("per_crop", {}).get(crop_id) or {}
+    n = per.get("n_obs")
+    return int(n) if n is not None else None
+
+
 def _fallback_explanation(tier: str) -> str:
     base = ("The ML model is not yet more accurate than this baseline at current "
             "data volume.")
@@ -336,7 +376,9 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
     # present/understood here (guards the residual/blend latent trap).
     model_active = bool(_PAYLOAD.get("beats_baseline")) and _ml_servable()
 
-    top_factors: list[dict] = []
+    # top_factors is emitted ONLY on the model-served path; the fallback path
+    # OMITS the field entirely (the FE shows an honest "no breakdown" note).
+    top_factors: list[dict] | None = None
     # Resolve the fallback rung once (used for confidence even when ML serves, so
     # a thin-history ML-covered crop is not over-trusted).
     fb_q, tier = _resolve_fallback(crop_id, crop_name)
@@ -353,8 +395,11 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
         active = _served_ml_kind()
         confidence = _confidence_for(model_served=True, tier=tier)
         confidence_reason = _reason_for(model_served=True, tier=tier)
+        reason_code, reason_params = _reason_code_for(model_served=True, tier=tier)
         explanation = "ML model forecast from current price, season and recent weather."
-        top_factors = explain.top_factors(row, _PAYLOAD, top_n=5)
+        # Farmer-meaningful factor codes from the ACTUAL promoted model (SHAP on
+        # the served p50 model), aggregated per code. Deterministic per input.
+        top_factors = explain.top_factor_codes(row, _PAYLOAD, top_n=4)
     else:
         p10, p50, p90 = fb_q["p10"], fb_q["p50"], fb_q["p90"]
         active = "crop_mean_fallback"
@@ -377,10 +422,14 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
         confidence_reason = _reason_for(model_served=False, tier=tier,
                                         row_missing=row_missing, ml_failed=ml_failed,
                                         not_model_served=not_model_served)
+        reason_code, reason_params = _reason_code_for(
+            model_served=False, tier=tier, row_missing=row_missing,
+            ml_failed=ml_failed, not_model_served=not_model_served,
+            history_obs=_crop_history_obs(crop_id))
         explanation = _fallback_explanation(tier)
 
     p10, p50, p90 = sorted([round(p10, 2), round(p50, 2), round(p90, 2)])
-    return {
+    result = {
         "cropId": crop_id,
         "cropName": crop_name,
         "plantDate": plant_date.isoformat(),
@@ -391,12 +440,17 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
         "upperBound": p90,
         "confidence": confidence,
         "confidenceReason": confidence_reason,
+        "reasonCode": reason_code,
+        "reasonParams": reason_params,
         "fallbackTier": tier,
         "activePredictor": active,
         "modelVersion": (_META or {}).get("version"),
         "explanation": explanation,
-        "topFactors": top_factors,
     }
+    # topFactors is present ONLY on the model-served path (fallback omits it).
+    if top_factors is not None:
+        result["topFactors"] = top_factors
+    return result
 
 
 def _monthly_history(crop_id: str, as_of: date, max_months: int = 12) -> list[dict]:
@@ -475,6 +529,7 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
         active = _served_ml_kind()
         confidence = _confidence_for(model_served=True, tier=tier)
         confidence_reason = _reason_for(model_served=True, tier=tier)
+        reason_code, reason_params = _reason_code_for(model_served=True, tier=tier)
         explanation = ("ML model forecast from current price, season and recent "
                        "weather; the band widens with horizon to reflect growing "
                        "uncertainty further out.")
@@ -496,6 +551,10 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
         confidence_reason = _reason_for(model_served=False, tier=tier,
                                         row_missing=row_missing, ml_failed=ml_failed,
                                         not_model_served=not_model_served)
+        reason_code, reason_params = _reason_code_for(
+            model_served=False, tier=tier, row_missing=row_missing,
+            ml_failed=ml_failed, not_model_served=not_model_served,
+            history_obs=_crop_history_obs(crop_id))
         explanation = (_fallback_explanation(tier) +
                        " The central forecast is flat; the band widens with "
                        "horizon to reflect growing uncertainty.")
@@ -528,6 +587,8 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
         "activePredictor": active,
         "confidence": confidence,
         "confidenceReason": confidence_reason,
+        "reasonCode": reason_code,
+        "reasonParams": reason_params,
         "fallbackTier": tier,
         "modelVersion": (_META or {}).get("version"),
         "explanation": explanation,

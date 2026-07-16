@@ -138,6 +138,8 @@ def timeline_endpoint(req: TimelineRequest):
             "asOf": as_of.isoformat(),
             "activePredictor": "unavailable",
             "confidence": "Low",
+            "reasonCode": "unavailable",
+            "reasonParams": {},
             "modelVersion": predict.model_info().get("version"),
             "explanation": "No forecast available for this crop yet "
                            "(insufficient historical data).",

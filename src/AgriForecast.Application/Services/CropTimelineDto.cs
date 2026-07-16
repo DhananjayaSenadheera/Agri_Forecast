@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace AgriForecast.Application.Services;
 
 // Mirrors the Python FastAPI POST /timeline response contract verbatim.
@@ -11,6 +13,12 @@ public sealed class CropTimelineDto
     public string Confidence { get; set; } = string.Empty;       // "Low" | "Medium" | "High"
     public string? ModelVersion { get; set; }
     public string Explanation { get; set; } = string.Empty;
+
+    // --- Additive (API-5), OPTIONAL for old-ML-service compatibility. ---
+    // /timeline emits reasonCode/reasonParams but NEVER topFactors (by design).
+    public string? ReasonCode { get; set; }
+    public Dictionary<string, JsonElement>? ReasonParams { get; set; }
+
     public List<TimelineHistoryPointDto> History { get; set; } = new();
     public List<TimelineForecastPointDto> Forecast { get; set; } = new();
 }

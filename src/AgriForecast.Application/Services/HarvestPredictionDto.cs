@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace AgriForecast.Application.Services;
 
 // Mirrors the Python FastAPI POST /predict response contract verbatim.
@@ -17,4 +19,30 @@ public sealed class HarvestPredictionDto
     public string ActivePredictor { get; set; } = string.Empty;  // "model" | "crop_mean_fallback"
     public string? ModelVersion { get; set; }
     public string Explanation { get; set; } = string.Empty;
+
+    // --- Additive (API-5), all OPTIONAL so an older ML service without these keys
+    // still deserializes cleanly (nulls flow, nothing throws). ---
+
+    // Machine-readable reason for the served path. ALWAYS present on a current ML
+    // service; snake_case (e.g. "model_served", "not_model_served"). Pass through.
+    public string? ReasonCode { get; set; }
+
+    // Loose bag of camelCase params keyed by reasonCode (usually {}). Kept as a raw
+    // JsonElement dictionary so new codes can add params without a .NET change and
+    // values (which may be ints) survive round-trip byte-for-byte. Do NOT model rigidly.
+    public Dictionary<string, JsonElement>? ReasonParams { get; set; }
+
+    // SHAP-derived drivers. Present ONLY on the model-served path; the ML OMITS the
+    // key entirely on any fallback path (and never emits it on /timeline). Stays
+    // null when omitted so the FE can tell "no breakdown" (null) from "empty list".
+    public List<TopFactorDto>? TopFactors { get; set; }
+}
+
+// One driver of the forecast. `direction` stays a plain string (no enum/converter) -
+// values are "up" | "down" | "neutral". `weight` is a 0..1 share.
+public sealed class TopFactorDto
+{
+    public string Code { get; set; } = string.Empty;
+    public string Direction { get; set; } = string.Empty;
+    public decimal Weight { get; set; }
 }
