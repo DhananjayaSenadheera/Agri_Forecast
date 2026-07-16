@@ -9,32 +9,26 @@ public static class CropMapper
 {
     // Crop_CreateDto -> Crop
     // Mirrors CreateMap<Crop_CreateDto, Crop>: new Guid Id, UtcNow timestamps,
-    // straight copy of Name / ExternalProductId / Source / CropCategoryId. CropCode is
-    // set by the handler. CropCategoryId is validated (NotEmpty + must exist) upstream.
+    // straight copy of Name / Source / CropCategoryId. CropCode is set by the handler.
+    // CropCategoryId is validated (NotEmpty + must exist) upstream. (R2 Step 8.2 dropped
+    // ExternalProductId — source-product mapping now lives in CommodityAliases.)
     public static Crop ToEntity(this Crop_CreateDto src)
     {
         return Crop.CreateForManualEntry(
             name: src.Name,
-            externalProductId: src.ExternalProductId,
             source: src.Source,
             cropCategoryId: src.CropCategoryId);
     }
 
     // Crop_UpdateDto -> Crop (mutate-in-place onto the tracked entity)
-    // Mirrors CreateMap<Crop_UpdateDto, Crop>: Name always overwritten; ExternalProductId
-    // and Source only overwritten when the update actually supplies them (PreConditions);
-    // UpdatedAt refreshed to UtcNow. Id is not reassigned (it identifies the tracked row).
+    // Mirrors CreateMap<Crop_UpdateDto, Crop>: Name always overwritten; Source only
+    // overwritten when the update actually supplies it (PreCondition); UpdatedAt refreshed
+    // to UtcNow. Id is not reassigned (it identifies the tracked row).
     public static Crop ApplyTo(this Crop_UpdateDto src, Crop destination)
     {
         // The old ForMember(Name, MapFrom(src.Name)) copied the value unconditionally,
         // including null. Preserved exactly (src.Name is string?, destination.Name is string).
         destination.Name = src.Name!;
-
-        // PreCondition(src => src.ExternalProductId.HasValue)
-        if (src.ExternalProductId.HasValue)
-        {
-            destination.ExternalProductId = src.ExternalProductId;
-        }
 
         // PreCondition(src => src.Source != null)
         if (src.Source != null)
@@ -54,7 +48,6 @@ public static class CropMapper
         {
             Id = src.Id,
             Name = src.Name,
-            ExternalProductId = src.ExternalProductId,
             Source = src.Source,
             CreatedAt = src.CreatedAt,
             UpdatedAt = src.UpdatedAt

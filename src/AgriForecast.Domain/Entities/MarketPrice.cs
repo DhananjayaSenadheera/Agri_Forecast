@@ -4,7 +4,7 @@ public class MarketPrice
 {
     public Guid Id { get; set; }
 
-    public Guid? CropId { get; set; } // resolved from Crop.ExternalProductId during ingestion
+    public Guid? CropId { get; set; } // resolved via CommodityAliases (ProductId -> CropId) during ingestion
     public Guid? EconomicCenterId { get; set; }
 
     public int ExternalProductId { get; set; }

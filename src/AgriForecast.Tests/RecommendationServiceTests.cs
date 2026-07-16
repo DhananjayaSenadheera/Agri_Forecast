@@ -30,7 +30,7 @@ public class RecommendationServiceTests
 
     // Crop.Id has a private setter — use the factory method.
     private static Crop MakeCrop(string name = "Tomato")
-        => Crop.CreateFromExternalSource(name, externalProductId: 1, source: "test", cropCode: name.Length >= 3 ? name[..3].ToUpper() : name.ToUpper());
+        => Crop.CreateFromExternalSource(name, source: "test", cropCode: name.Length >= 3 ? name[..3].ToUpper() : name.ToUpper());
 
     private static MonthlyForecast_GetDto MakeForecast(Guid cropId, PriceTrend trend, ForecastConfidence confidence) =>
         new()

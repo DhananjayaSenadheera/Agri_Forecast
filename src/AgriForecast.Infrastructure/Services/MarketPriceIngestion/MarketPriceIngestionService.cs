@@ -58,23 +58,6 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         _codeSettings = codeSettings;
     }
 
-    // R2 Step 8.1 parallel-run result. Populated every IngestAsync run so tests (and, later,
-    // operators reading the summary log) can assert the alias route matches the legacy route
-    // before Step 8.2 flips serving over and drops Crops.ExternalProductId. LEGACY is still the
-    // governing serving route in this subtask — this record is comparison/shadow only.
-    public ShadowDiffResult? LastShadowDiff { get; private set; }
-
-    // Counts-only summary of the alias-route ⟷ legacy-route comparison. No feed payload bodies.
-    //   Agreements   — products where both routes resolved to the SAME CropId.
-    //   Divergences   — products where the routes resolved to DIFFERENT non-null CropIds.
-    //   LegacyOnly    — product resolved by legacy but the alias route had no active alias.
-    //   AliasOnly     — product resolved by the alias route but not present in the legacy dict.
-    // ShadowDiffCount = Divergences + LegacyOnly + AliasOnly (must be 0 to promote serving).
-    public sealed record ShadowDiffResult(int Compared, int Agreements, int Divergences, int LegacyOnly, int AliasOnly)
-    {
-        public int ShadowDiffCount => Divergences + LegacyOnly + AliasOnly;
-    }
-
     public async Task IngestAsync(CancellationToken ct)
     {
         var maxProductId = int.Parse(_config["MarketPriceSources:DambullaDec:MaxProductId"] ?? "101");
@@ -85,21 +68,16 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
             ?? throw new InvalidOperationException(
                 $"Market '{DambullaMarketCode}' (Dambulla DEC) not found; aborting ingestion rather than inserting unlinked price rows.");
 
-        // 1. Build ExternalProductId -> CropId lookup from crops already mapped to this source.
-        //    This is the LEGACY route and (in this subtask) STILL the governing serving route.
-        var crops = await _cropRepository.GetAllAsync();
-        var cropByProduct = crops
-            .Where(c => c.ExternalProductId.HasValue
-                        && (string.IsNullOrEmpty(c.Source) || c.Source == SourceName))
-            .GroupBy(c => c.ExternalProductId!.Value)
-            .ToDictionary(g => g.Key, g => g.First().Id);
+        // 1. R2 Step 8.2: the CommodityAliases route is the SINGLE GOVERNING resolver. Build the
+        //    feed ProductId -> CropId lookup from ACTIVE DEC-scoped (or null-Source) aliases whose
+        //    Alias parses as an integer ProductId (Alias='11', Source='DAMBULLA_DEC'). The legacy
+        //    Crops.ExternalProductId route (and its column) was retired in this subtask; there is no
+        //    longer a shadow comparison — this route IS the route.
+        var cropByProduct = BuildAliasRoute(await _commodityAliasRepository.GetAllAsync());
 
-        // 1b. R2 Step 8.1: build the ALIAS route (shadow, comparison-only). DEC aliases are keyed
-        //     on the stable feed ProductId stringified (Alias='11'), Source='DAMBULLA_DEC',
-        //     IsActive=1 — see the SeedDambullaCommodityAliases migration for the keying rationale.
-        //     Only integer-parseable, active DEC aliases are considered; a non-numeric or inactive
-        //     alias is skipped (fail-closed: it just doesn't participate, never misresolves).
-        var aliasCropByProduct = BuildAliasRoute(await _commodityAliasRepository.GetAllAsync());
+        // Load all crops solely to self-heal agronomy profiles below (a crop must never exist
+        // without one). This is NOT a resolution route — resolution is alias-only.
+        var crops = await _cropRepository.GetAllAsync();
 
         // Track which crops already have an agronomy profile so we can (a) self-heal any crop
         // that somehow exists without one and (b) avoid double-staging a profile for a crop we
@@ -120,7 +98,6 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
 
             var newCropId = await CreateCropForProductAsync(product.ExternalProductId, product.Name, cropsWithProfile, ct);
             cropByProduct[product.ExternalProductId] = newCropId;
-            aliasCropByProduct[product.ExternalProductId] = newCropId;
             cropsAutoCreated++;
         }
 
@@ -194,7 +171,6 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
                     {
                         cropId = await CreateCropForProductAsync(p.ProductId, p.Product?.Name ?? "", cropsWithProfile, ct);
                         cropByProduct[p.ProductId] = cropId;
-                        aliasCropByProduct[p.ProductId] = cropId;
                         newCropsFromFeed++;
                     }
 
@@ -227,75 +203,35 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
             }
         }
 
-        // 5. R2 Step 8.1 PARALLEL-RUN: resolve every distinct DEC product through BOTH routes and
-        //    count agreements/divergences. Re-read aliases so any alias rows just written in this
-        //    pass (write-both auto-provision) are reflected. Counts only, never feed payloads.
-        //    Fail-closed: legacy still governs; a divergence is logged + surfaced, never silently
-        //    resolved in favour of one route.
-        var aliasRouteAfter = BuildAliasRoute(await _commodityAliasRepository.GetAllAsync());
-        LastShadowDiff = ComputeShadowDiff(cropByProduct, aliasRouteAfter);
-
         _logger.LogInformation(
             "Dambulla ingestion completed. Inserted={Inserted}, SkippedExisting={Skipped}, ZeroSkipped={ZeroSkipped}, CropsAutoCreated={CropsAutoCreated}, NewCropsFromFeed={NewCropsFromFeed}, Backfilled={Backfilled}, FailedProducts={FailedProducts}",
             inserted, skipped, zeroSkipped, cropsAutoCreated, newCropsFromFeed, backfilled, failedProducts);
-
-        var diff = LastShadowDiff;
-        if (diff.ShadowDiffCount == 0)
-        {
-            _logger.LogInformation(
-                "Alias-route shadow diff: Compared={Compared}, Agreements={Agreements}, ShadowDiff=0 (Divergences=0, LegacyOnly=0, AliasOnly=0) — alias route matches legacy.",
-                diff.Compared, diff.Agreements);
-        }
-        else
-        {
-            // Non-zero shadow diff means the alias route disagrees with the still-governing legacy
-            // route. Warn (not error) — serving is unaffected — but surface it loudly so Step 8.2
-            // is not flipped over until this is 0.
-            _logger.LogWarning(
-                "Alias-route shadow diff NON-ZERO: Compared={Compared}, Agreements={Agreements}, Divergences={Divergences}, LegacyOnly={LegacyOnly}, AliasOnly={AliasOnly}, ShadowDiff={ShadowDiff}. Legacy route still governs; DO NOT promote the alias route until this is 0.",
-                diff.Compared, diff.Agreements, diff.Divergences, diff.LegacyOnly, diff.AliasOnly, diff.ShadowDiffCount);
-        }
     }
 
-    // Builds the alias-route lookup: ProductId -> CropId, from ACTIVE DEC-scoped aliases whose
-    // Alias parses as an integer ProductId. Non-numeric / inactive / other-source aliases are
-    // skipped (they simply don't participate — never a misresolution). Last-write-wins on the
-    // rare duplicate (the filtered unique index makes duplicates impossible in the DB, but the
-    // dict build stays defensive for in-memory fakes).
+    // Builds the governing resolution lookup: feed ProductId -> CropId, from ACTIVE DEC-scoped
+    // (or null-Source / global — the CommodityAlias contract says NULL applies to all sources)
+    // aliases whose Alias parses as an integer ProductId. Non-numeric / inactive / other-source
+    // aliases are skipped (they simply don't participate — never a misresolution). Precedence is
+    // DETERMINISTIC: a DEC-scoped alias always beats a global one for the same ProductId
+    // (specific over general), regardless of enumeration order.
     private static Dictionary<int, Guid> BuildAliasRoute(IEnumerable<CommodityAlias> aliases)
     {
         var route = new Dictionary<int, Guid>();
+        var globals = new Dictionary<int, Guid>();
         foreach (var a in aliases)
         {
-            if (!a.IsActive || a.Source != SourceName)
+            if (!a.IsActive || (a.Source != null && a.Source != SourceName))
                 continue;
-            if (int.TryParse(a.Alias, out var productId))
+            if (!int.TryParse(a.Alias, out var productId))
+                continue;
+            if (a.Source == null)
+                globals[productId] = a.CropId;
+            else
                 route[productId] = a.CropId;
         }
+        foreach (var (productId, cropId) in globals)
+            route.TryAdd(productId, cropId);
         return route;
-    }
-
-    // Compares legacy-route (ProductId->CropId from Crops.ExternalProductId) against alias-route
-    // over the UNION of their ProductIds. Pure/counts-only; the governing route is unchanged.
-    private static ShadowDiffResult ComputeShadowDiff(
-        IReadOnlyDictionary<int, Guid> legacy, IReadOnlyDictionary<int, Guid> alias)
-    {
-        int agreements = 0, divergences = 0, legacyOnly = 0, aliasOnly = 0;
-        var productIds = new HashSet<int>(legacy.Keys);
-        productIds.UnionWith(alias.Keys);
-        foreach (var productId in productIds)
-        {
-            var hasLegacy = legacy.TryGetValue(productId, out var legacyCropId);
-            var hasAlias = alias.TryGetValue(productId, out var aliasCropId);
-            if (hasLegacy && hasAlias)
-            {
-                if (legacyCropId == aliasCropId) agreements++;
-                else divergences++;
-            }
-            else if (hasLegacy) legacyOnly++;
-            else aliasOnly++;
-        }
-        return new ShadowDiffResult(productIds.Count, agreements, divergences, legacyOnly, aliasOnly);
     }
 
     // Creates and stages (not committed) a crop for an external market product, plus its PENDING
@@ -322,7 +258,7 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         var prefix = CropCategory.PrefixForCategory(categoryId);
         var cropCode = await _codeSettings.GetCropCode(prefix)
                        ?? $"{prefix}{externalProductId.ToString().PadLeft(6, '0')}"; // fail-safe fallback
-        var crop = Crop.CreateFromExternalSource(cropName, externalProductId, SourceName, cropCode);
+        var crop = Crop.CreateFromExternalSource(cropName, SourceName, cropCode);
         crop.CropCategoryId = categoryId;
 
         await _cropRepository.Addasync(crop);
@@ -332,12 +268,11 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         await _agronomyProfileRepository.AddAsync(CropAgronomyProfile.CreatePending(crop.Id));
         cropsWithProfile.Add(crop.Id);
 
-        // R2 Step 8.1 WRITE-BOTH: during the parallel-run window, a brand-new feed product must
-        // populate BOTH matching routes so neither drifts incomplete. Crop.CreateFromExternalSource
-        // already set Crops.ExternalProductId (legacy route); here we also stage the DEC alias row
-        // (Alias = the stable ProductId stringified, Source='DAMBULLA_DEC'), committed in the
-        // caller's CommitAsync scope. When Step 8.2 flips serving to the alias route and drops
-        // Crops.ExternalProductId, only this alias write remains.
+        // R2 Step 8.2: a brand-new feed product is mapped SOLELY by an ACTIVE DEC CommodityAlias
+        // (Alias = the stable ProductId stringified, Source='DAMBULLA_DEC'), staged in the same
+        // unit of work as the crop + pending profile. This alias is the only crop<->product mapping
+        // (Crops.ExternalProductId is gone); without it the product would be unmapped and would
+        // auto-provision a fresh duplicate crop on the next run.
         await _commodityAliasRepository.AddAsync(
             CommodityAlias.CreateNew(externalProductId.ToString(), crop.Id, SourceName));
 

@@ -144,7 +144,7 @@ public class MarketPriceIngestionProfileTests
     public async Task SelfHeals_CropWithoutProfile_ByStagingPendingProfile()
     {
         var (svc, crops, profiles, _, _, _) = Build();
-        var orphan = Crop.CreateFromExternalSource("Legacy Carrot", 42, "DAMBULLA_DEC", "DMB000042");
+        var orphan = Crop.CreateFromExternalSource("Legacy Carrot", "DAMBULLA_DEC", "DMB000042");
         crops.Crops.Add(orphan);
 
         await svc.IngestAsync(CancellationToken.None);
@@ -163,7 +163,7 @@ public class MarketPriceIngestionProfileTests
     public async Task DoesNotDuplicate_ProfileForCropThatAlreadyHasOne()
     {
         var (svc, crops, profiles, _, _, _) = Build();
-        var crop = Crop.CreateFromExternalSource("Tomato", 7, "DAMBULLA_DEC", "DMB000007");
+        var crop = Crop.CreateFromExternalSource("Tomato", "DAMBULLA_DEC", "DMB000007");
         crops.Crops.Add(crop);
         profiles.Items.Add(CropAgronomyProfile.CreatePending(crop.Id));   // pre-existing profile
 
@@ -183,8 +183,7 @@ public class MarketPriceIngestionProfileTests
 
         await svc.IngestAsync(CancellationToken.None);
 
-        crops.Crops.Should().ContainSingle(c => c.ExternalProductId == 99);
-        var newCrop = crops.Crops.Single(c => c.ExternalProductId == 99);
+        var newCrop = crops.Crops.Should().ContainSingle(c => c.Name == "New Brinjal").Which;
         var profile = profiles.Items.Should().ContainSingle().Which;
         profile.CropId.Should().Be(newCrop.Id);
         profile.IsVerified.Should().BeFalse();
@@ -198,7 +197,7 @@ public class MarketPriceIngestionProfileTests
     {
         var markets = MarketsWithDambulla();
         var (svc, crops, _, prices, _, _) = Build(new SingleItemDambullaClient(), markets, maxProductId: "1");
-        var crop = Crop.CreateFromExternalSource("Tomato", 1, "DAMBULLA_DEC", "VEG000007");
+        var crop = Crop.CreateFromExternalSource("Tomato", "DAMBULLA_DEC", "VEG000007");
         crops.Crops.Add(crop);
 
         await svc.IngestAsync(CancellationToken.None);
@@ -221,110 +220,131 @@ public class MarketPriceIngestionProfileTests
         prices.Inserted.Should().BeEmpty("unlinked rows must never be inserted");
     }
 
-    // ── R2 Step 8.1: alias-route (CommodityAliases) parallel-run vs legacy ExternalProductId ──
+    // ── R2 Step 8.2: CommodityAliases is the SINGLE GOVERNING resolution route ────────────────
+    // The legacy Crops.ExternalProductId route (and its shadow parallel-run) was retired; the
+    // active DEC-scoped CommodityAlias keyed on the stringified feed ProductId is now the ONLY
+    // crop<->product mapping. These tests pin the post-cut-over invariants.
 
-    // Alias-route resolution: a DEC alias keyed on the stringified ProductId that AGREES with the
-    // legacy Crops.ExternalProductId route yields shadow diff = 0.
+    // GOVERNING ROUTE: an inserted feed row gets its CropId from the ACTIVE DEC alias for that
+    // product id — no Crops.ExternalProductId lookup remains.
     [Fact]
-    public async Task AliasRoute_MatchingLegacy_YieldsZeroShadowDiff()
+    public async Task InsertedRows_AreAssignedByAliasRoute()
     {
-        var crop = Crop.CreateFromExternalSource("Tomato", 11, "DAMBULLA_DEC", "VEG000065");
+        var mappedCrop = Crop.CreateFromExternalSource("Tomato", "DAMBULLA_DEC", "VEG000065");
         var aliases = new FakeGenericRepository<CommodityAlias>();
-        aliases.Items.Add(CommodityAlias.CreateNew("11", crop.Id, "DAMBULLA_DEC"));
-        var (svc, crops, _, _, _, _) = Build(aliases: aliases);
-        crops.Crops.Add(crop);
+        // SingleItemDambullaClient emits product id 1 -> resolve via alias '1'.
+        aliases.Items.Add(CommodityAlias.CreateNew("1", mappedCrop.Id, "DAMBULLA_DEC"));
+        var (svc, crops, _, prices, _, _) = Build(new SingleItemDambullaClient(), maxProductId: "1",
+                                                  aliases: aliases);
+        crops.Crops.Add(mappedCrop);
 
         await svc.IngestAsync(CancellationToken.None);
 
-        Assert.NotNull(svc.LastShadowDiff);
-        svc.LastShadowDiff!.Compared.Should().Be(1);
-        svc.LastShadowDiff.Agreements.Should().Be(1);
-        svc.LastShadowDiff.ShadowDiffCount.Should().Be(0);
+        var row = prices.Inserted.Should().ContainSingle().Which;
+        row.CropId.Should().Be(mappedCrop.Id,
+            "the CommodityAlias route now governs CropId assignment on inserted rows");
     }
 
-    // Shadow-diff detection must actually FIRE: a DEC alias pointing at a DIFFERENT crop than the
-    // legacy route is counted as a divergence (and legacy still governs — nothing is misassigned).
+    // PRECEDENCE: when a DEC-scoped alias and a null-Source (global) alias both map the same
+    // product id, the DEC-scoped one must win DETERMINISTICALLY — specific over general — even
+    // when the global alias enumerates last (which would win under naive last-write-wins).
     [Fact]
-    public async Task AliasRoute_PointingAtDifferentCrop_IsCountedAsDivergence()
+    public async Task DecScopedAlias_BeatsGlobalAlias_ForSameProductId()
     {
-        var legacyCrop = Crop.CreateFromExternalSource("Tomato", 11, "DAMBULLA_DEC", "VEG000065");
-        var otherCrop = Crop.CreateFromExternalSource("Cabbage", 1, "DAMBULLA_DEC", "VEG000014");
+        var decCrop = Crop.CreateFromExternalSource("Tomato", "DAMBULLA_DEC", "VEG000065");
+        var globalCrop = Crop.CreateFromExternalSource("Tomato (global)", "DAMBULLA_DEC", "VEG000066");
         var aliases = new FakeGenericRepository<CommodityAlias>();
-        // Alias for product 11 wrongly points at the Cabbage crop, not the Tomato crop.
-        aliases.Items.Add(CommodityAlias.CreateNew("11", otherCrop.Id, "DAMBULLA_DEC"));
-        var (svc, crops, _, _, _, _) = Build(aliases: aliases);
-        crops.Crops.Add(legacyCrop);
-        crops.Crops.Add(otherCrop);
+        aliases.Items.Add(CommodityAlias.CreateNew("1", decCrop.Id, "DAMBULLA_DEC"));
+        aliases.Items.Add(CommodityAlias.CreateNew("1", globalCrop.Id, source: null));
+        var (svc, crops, _, prices, _, _) = Build(new SingleItemDambullaClient(), maxProductId: "1",
+                                                  aliases: aliases);
+        crops.Crops.Add(decCrop);
+        crops.Crops.Add(globalCrop);
 
         await svc.IngestAsync(CancellationToken.None);
 
-        // product 11: legacy=Tomato, alias=Cabbage -> divergence.
-        // product 1 (Cabbage): legacy present, no alias -> legacyOnly.
-        svc.LastShadowDiff!.Divergences.Should().Be(1);
-        svc.LastShadowDiff.LegacyOnly.Should().Be(1);
-        svc.LastShadowDiff.ShadowDiffCount.Should().BeGreaterThan(0, "a real divergence must surface");
+        var row = prices.Inserted.Should().ContainSingle().Which;
+        row.CropId.Should().Be(decCrop.Id,
+            "a DEC-scoped alias must beat a global alias for the same product id regardless of enumeration order");
     }
 
-    // An active alias with no legacy counterpart is counted AliasOnly (still a non-zero shadow diff).
+    // AUTO-PROVISION END-STATE: an unmapped feed product must never drop data — it auto-provisions
+    // a crop AND stages an ACTIVE DEC alias (Alias = stringified product id) in the same unit of
+    // work, so the next run resolves it instead of creating another duplicate crop. NOTE: this pins
+    // the end-state (both artifacts present), not commit atomicity — no mid-commit failure is
+    // injected here; atomicity rests on the single CommitAsync in the production path.
     [Fact]
-    public async Task AliasRoute_WithoutLegacyCounterpart_IsCountedAliasOnly()
+    public async Task UnmappedProduct_AutoProvisionsCropAndActiveAlias()
     {
-        var crop = Crop.CreateFromExternalSource("Tomato", 11, "DAMBULLA_DEC", "VEG000065");
-        var aliases = new FakeGenericRepository<CommodityAlias>();
-        aliases.Items.Add(CommodityAlias.CreateNew("11", crop.Id, "DAMBULLA_DEC"));
-        var (svc, crops, _, _, _, _) = Build(aliases: aliases);
-        // Crop has NO ExternalProductId -> legacy route empty; alias route has product 11.
-        crops.Crops.Add(Crop.CreateForManualEntry("Manual Tomato", null, null, CropCategory.VegetableId));
-
-        await svc.IngestAsync(CancellationToken.None);
-
-        svc.LastShadowDiff!.AliasOnly.Should().Be(1);
-        svc.LastShadowDiff.LegacyOnly.Should().Be(0);
-        svc.LastShadowDiff.Divergences.Should().Be(0);
-    }
-
-    // WRITE-BOTH: a brand-new feed product must populate BOTH routes — Crops.ExternalProductId AND
-    // a DEC CommodityAlias row keyed on the stringified ProductId — and stay shadow-diff = 0.
-    [Fact]
-    public async Task AutoProvisionedCrop_WritesBothLegacyAndAliasRoutes()
-    {
-        // Product with price history but no crop yet -> service creates crop + alias (self-heal
-        // path via FakeMarketPriceRepository.DistinctProducts).
+        // No alias for product 99 -> the self-heal path (via DistinctProducts) must create both.
         var (svc, crops, _, prices, aliasRepo, _) = Build(aliases: new FakeGenericRepository<CommodityAlias>());
         prices.DistinctProducts.Add(new ExternalProduct(99, "New Brinjal"));
 
         await svc.IngestAsync(CancellationToken.None);
 
-        var newCrop = crops.Crops.Should().ContainSingle(c => c.ExternalProductId == 99).Which;
-        newCrop.ExternalProductId.Should().Be(99, "legacy route (Crops.ExternalProductId) still written during the parallel-run window");
+        var newCrop = crops.Crops.Should().ContainSingle(c => c.Name == "New Brinjal").Which;
         aliasRepo.Items.Should().ContainSingle(a =>
             a.Alias == "99" && a.Source == "DAMBULLA_DEC" && a.CropId == newCrop.Id && a.IsActive,
-            "auto-provision must also stage the DEC alias row (write-both)");
-        svc.LastShadowDiff!.ShadowDiffCount.Should().Be(0, "write-both keeps the two routes in lockstep");
+            "auto-provision must stage an ACTIVE DEC alias so the product is resolvable next run");
     }
 
-    // ASSIGNMENT ROUTE PIN (Step 8.1 invariant): even when the alias route diverges, the LEGACY
-    // route must be the one that assigns CropId on inserted rows. The alias route is shadow-only
-    // until the 8.2 cut-over; a silent flip here is the regression this test exists to catch.
+    // NEW FEED PRODUCT (feed loop, not self-heal): a brand-new product arriving from the price feed
+    // auto-provisions crop + active alias and the inserted row is keyed to that crop — data is never
+    // dropped for want of a pre-existing mapping.
     [Fact]
-    public async Task InsertedRows_AreAssignedByLegacyRoute_EvenWhenAliasDiverges()
+    public async Task NewFeedProduct_AutoProvisionsAndInsertsRow()
     {
-        var legacyCrop = Crop.CreateFromExternalSource("Tomato", 1, "DAMBULLA_DEC", "VEG000065");
-        var otherCrop = Crop.CreateFromExternalSource("Cabbage", 55, "DAMBULLA_DEC", "VEG000014");
+        // SingleItemDambullaClient emits product 1, no alias present -> feed loop must provision.
+        var (svc, crops, _, prices, aliasRepo, _) = Build(new SingleItemDambullaClient(), maxProductId: "1",
+                                                          aliases: new FakeGenericRepository<CommodityAlias>());
+
+        await svc.IngestAsync(CancellationToken.None);
+
+        var newCrop = crops.Crops.Should().ContainSingle().Which;
+        aliasRepo.Items.Should().ContainSingle(a =>
+            a.Alias == "1" && a.Source == "DAMBULLA_DEC" && a.CropId == newCrop.Id && a.IsActive);
+        var row = prices.Inserted.Should().ContainSingle().Which;
+        row.CropId.Should().Be(newCrop.Id, "the inserted row must key to the just-provisioned crop");
+    }
+
+    // IDEMPOTENT RESOLUTION (duplicate-alias protection): when the product's alias already exists,
+    // re-ingesting resolves through it and must NOT mint a second crop or a second alias.
+    [Fact]
+    public async Task ExistingAlias_ResolvesWithoutCreatingDuplicateCropOrAlias()
+    {
+        var mappedCrop = Crop.CreateFromExternalSource("Tomato", "DAMBULLA_DEC", "VEG000065");
         var aliases = new FakeGenericRepository<CommodityAlias>();
-        // Alias for product 1 wrongly points at the Cabbage crop.
-        aliases.Items.Add(CommodityAlias.CreateNew("1", otherCrop.Id, "DAMBULLA_DEC"));
-        var (svc, crops, _, prices, _, _) = Build(new SingleItemDambullaClient(), maxProductId: "1",
-                                                  aliases: aliases);
-        crops.Crops.Add(legacyCrop);
-        crops.Crops.Add(otherCrop);
+        aliases.Items.Add(CommodityAlias.CreateNew("1", mappedCrop.Id, "DAMBULLA_DEC"));
+        var (svc, crops, _, prices, aliasRepo, _) = Build(new SingleItemDambullaClient(), maxProductId: "1",
+                                                          aliases: aliases);
+        crops.Crops.Add(mappedCrop);
+
+        await svc.IngestAsync(CancellationToken.None);
+
+        crops.Crops.Should().ContainSingle("an already-mapped product must not spawn a duplicate crop");
+        aliasRepo.Items.Should().ContainSingle("no second alias may be staged for an already-mapped product");
+        prices.Inserted.Should().ContainSingle().Which.CropId.Should().Be(mappedCrop.Id);
+    }
+
+    // NON-PARTICIPATING ALIASES: a numeric alias scoped to ANOTHER source (e.g. HARTI) must NOT
+    // resolve a DEC feed product — the feed then auto-provisions rather than mis-resolving across
+    // sources. (DEC-scoped and null-Source/global aliases participate; other-source ones don't.)
+    [Fact]
+    public async Task OtherSourceAlias_DoesNotResolve_ProductIsAutoProvisioned()
+    {
+        var hartiCrop = Crop.CreateFromExternalSource("HARTI Tomato", "HARTI", "VEG000065");
+        var aliases = new FakeGenericRepository<CommodityAlias>();
+        // Numeric alias '1' but scoped to HARTI, not DAMBULLA_DEC -> must be ignored by the DEC route.
+        aliases.Items.Add(CommodityAlias.CreateNew("1", hartiCrop.Id, "HARTI"));
+        var (svc, crops, _, prices, aliasRepo, _) = Build(new SingleItemDambullaClient(), maxProductId: "1",
+                                                          aliases: aliases);
+        crops.Crops.Add(hartiCrop);
 
         await svc.IngestAsync(CancellationToken.None);
 
         var row = prices.Inserted.Should().ContainSingle().Which;
-        row.CropId.Should().Be(legacyCrop.Id,
-            "the legacy ExternalProductId route governs assignment until the 8.2 cut-over — "
-            + "the divergent alias must never win");
-        svc.LastShadowDiff!.Divergences.Should().BeGreaterThan(0, "the divergence must still be surfaced");
+        row.CropId.Should().NotBe(hartiCrop.Id, "an alias scoped to another source must never resolve a DEC product");
+        aliasRepo.Items.Should().Contain(a => a.Alias == "1" && a.Source == "DAMBULLA_DEC" && a.IsActive,
+            "the auto-provisioned DEC product must get its own ACTIVE DEC alias");
     }
 }

@@ -6,8 +6,10 @@ public class Crop
     public string CropCode { get; set; }
     public string Name { get; set; } = string.Empty;
 
-    // Maps this crop to an external market-price source (e.g. Dambulla product id).
-    public int? ExternalProductId { get; set; }
+    // R2 Step 8.2: the crop->source product mapping is now OWNED by CommodityAliases
+    // (DEC aliases keyed on the stringified feed ProductId, Source='DAMBULLA_DEC'). The old
+    // Crops.ExternalProductId column was dropped in migration Step82RetireExternalProductIdAndMergePassion.
+    // Never re-add an external product id to Crops — resolution goes through CommodityAliases.
     public string? Source { get; set; }
 
     // --- Agronomic metadata ---
@@ -27,13 +29,12 @@ public class Crop
     // Encapsulates the private-set Id and the created/updated timestamps that the
     // old CreateMap<Crop_CreateDto, Crop> profile populated. CropCode is assigned
     // by the create handler after construction (matches prior behaviour).
-    public static Crop CreateForManualEntry(string name, int? externalProductId, string? source, Guid cropCategoryId)
+    public static Crop CreateForManualEntry(string name, string? source, Guid cropCategoryId)
     {
         return new Crop
         {
             Id = Guid.NewGuid(),
             Name = name,
-            ExternalProductId = externalProductId,
             Source = source,
             CropCategoryId = cropCategoryId,
             CreatedAt = DateTime.UtcNow,
@@ -43,15 +44,15 @@ public class Crop
 
     // Factory for crops auto-provisioned from an external market-price source
     // (e.g. the Dambulla ingestion). Keeps Id encapsulated while letting the
-    // ingestion layer create a fully-formed, source-mapped crop.
-    public static Crop CreateFromExternalSource(string name, int externalProductId, string source, string cropCode)
+    // ingestion layer create a fully-formed, source-tagged crop. The source-product
+    // mapping is written as a CommodityAlias by the ingestion layer, not stored here.
+    public static Crop CreateFromExternalSource(string name, string source, string cropCode)
     {
         return new Crop
         {
             Id = Guid.NewGuid(),
             CropCode = cropCode,
             Name = name,
-            ExternalProductId = externalProductId,
             Source = source,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
