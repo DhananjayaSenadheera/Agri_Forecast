@@ -18,6 +18,9 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<MacroSeriesPoint> MacroSeriesPoints { get; set; }
     public DbSet<PolicyFlag> PolicyFlags { get; set; }
     public DbSet<FestivalCalendarEntry> FestivalCalendarEntries { get; set; }
+    public DbSet<NewsEvent> NewsEvents { get; set; }
+    public DbSet<NewsEventCrop> NewsEventCrops { get; set; }
+    public DbSet<NewsEventMarket> NewsEventMarkets { get; set; }
     public DbSet<User> Users { get; set; }
     public DbSet<Market> Markets { get; set; }
     public DbSet<PriceObservation> PriceObservations { get; set; }
@@ -194,6 +197,62 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
         });
 
         SeedFestivalCalendar(modelBuilder);
+
+        // News events (ADM-7): capture + storage only. NOT yet an ML feature, so — unlike PolicyFlag
+        // / FestivalCalendarEntry — no seed data and no training-data-warning idiom hang off it.
+        modelBuilder.Entity<NewsEvent>(e =>
+        {
+            e.Property(x => x.EventType).HasConversion<int>().IsRequired();
+            e.Property(x => x.Direction).HasConversion<int>().IsRequired();
+            e.Property(x => x.Title).HasMaxLength(300).IsRequired();
+            e.Property(x => x.Description).HasMaxLength(4000);
+            e.Property(x => x.SourceUrl).HasMaxLength(1000);
+
+            // PublishedAt = the knowledge/as-of/vintage date. Stored date-only (no hidden time) so a
+            // future feature layer can as-of-join on it cleanly; immutable after create (enforced by
+            // the UpdateDto omitting the field). Mirrors MacroSeriesPoint.PublishedAt discipline.
+            e.Property(x => x.PublishedAt).HasColumnType("date").IsRequired();
+
+            // Primary read pattern is reverse-chronological by knowledge date.
+            e.HasIndex(x => x.PublishedAt);
+        });
+
+        modelBuilder.Entity<NewsEventCrop>(e =>
+        {
+            e.HasKey(x => new { x.NewsEventId, x.CropId });
+
+            // Link is owned by the event → cascade-deleted with it.
+            e.HasOne<NewsEvent>()
+                .WithMany(n => n.AffectedCrops)
+                .HasForeignKey(x => x.NewsEventId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Crop side Restrict: a referenced Crop cannot be deleted until the link is removed
+            // (uniform with the CommodityAlias / CropAgronomyProfile / CropPrice dimension FKs).
+            e.HasOne<Crop>()
+                .WithMany()
+                .HasForeignKey(x => x.CropId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasIndex(x => x.CropId);
+        });
+
+        modelBuilder.Entity<NewsEventMarket>(e =>
+        {
+            e.HasKey(x => new { x.NewsEventId, x.MarketId });
+
+            e.HasOne<NewsEvent>()
+                .WithMany(n => n.AffectedMarkets)
+                .HasForeignKey(x => x.NewsEventId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            e.HasOne<Market>()
+                .WithMany()
+                .HasForeignKey(x => x.MarketId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasIndex(x => x.MarketId);
+        });
 
         modelBuilder.Entity<CropPrice>(e =>
         {
