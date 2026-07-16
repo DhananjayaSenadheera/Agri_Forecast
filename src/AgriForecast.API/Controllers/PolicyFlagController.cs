@@ -1,5 +1,6 @@
 using AgriForecast.Application.Requests.PolicyFlag.Commands.Create;
 using AgriForecast.Application.Requests.PolicyFlag.Quaries.GetAll;
+using AgriForecast.Domain.Constants;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -19,7 +20,10 @@ public class PolicyFlagController(IMediator mediator) : ControllerBase
         }
     };
 
+    // Policy flags feed the forecasting model (as-of joins) — creating one is Admin-only (API-9).
+    // The GET below stays [Authorize] (any authenticated user may read active flags).
     [HttpPost("create")]
+    [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Create([FromBody] PolicyFlagCreateCommand command)
     {
         var result = await mediator.Send(command);

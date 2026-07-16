@@ -45,6 +45,10 @@ builder.Services.AddControllers();
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddApplicationLayer();
 
+// API-9 admin bootstrap: one-time, config-driven promotion of an EXISTING user to Admin when
+// Auth:BootstrapAdminUsername is set and no admin yet exists. No seeded credentials, no migration.
+builder.Services.AddHostedService<AgriForecast.API.Startup.AdminBootstrapHostedService>();
+
 // JWT bearer authentication. The signing key comes from the "Jwt" config section
 // (dev placeholder in appsettings; MUST be an env/secret-store value in production).
 var jwtSettings = builder.Configuration.GetSection(JwtSettings.SectionName).Get<JwtSettings>()
