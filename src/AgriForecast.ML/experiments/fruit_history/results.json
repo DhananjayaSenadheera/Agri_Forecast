@@ -1,0 +1,368 @@
+{
+  "seed": 42,
+  "splice_date": "2025-05-05",
+  "min_history_obs": 365,
+  "labelled_rows": {
+    "A": 58806,
+    "B": 63914,
+    "C": 63914
+  },
+  "harti_prepended": {
+    "Kolikuttu": 1049,
+    "Papaya": 2173,
+    "Seeni": 2173,
+    "Ambul": 2173
+  },
+  "fold_meta": {
+    "A": [
+      {
+        "fold": 1,
+        "skipped": false,
+        "t_start": "2023-01-04",
+        "t_end": "2024-04-02",
+        "train": 23263,
+        "test": 6907,
+        "n_gated_crops": 15,
+        "fruit_gated": []
+      },
+      {
+        "fold": 2,
+        "skipped": false,
+        "t_start": "2024-04-03",
+        "t_end": "2025-05-08",
+        "train": 29646,
+        "test": 7003,
+        "n_gated_crops": 17,
+        "fruit_gated": []
+      },
+      {
+        "fold": 3,
+        "skipped": false,
+        "t_start": "2025-05-09",
+        "t_end": "2026-06-12",
+        "train": 36536,
+        "test": 20631,
+        "n_gated_crops": 18,
+        "fruit_gated": []
+      }
+    ],
+    "B": [
+      {
+        "fold": 1,
+        "skipped": false,
+        "t_start": "2023-01-04",
+        "t_end": "2024-04-02",
+        "train": 26483,
+        "test": 7798,
+        "n_gated_crops": 18,
+        "fruit_gated": [
+          "Ambul",
+          "Kolikuttu",
+          "Seeni"
+        ]
+      },
+      {
+        "fold": 2,
+        "skipped": false,
+        "t_start": "2024-04-03",
+        "t_end": "2025-05-08",
+        "train": 33772,
+        "test": 7750,
+        "n_gated_crops": 20,
+        "fruit_gated": [
+          "Ambul",
+          "Kolikuttu",
+          "Seeni"
+        ]
+      },
+      {
+        "fold": 3,
+        "skipped": false,
+        "t_start": "2025-05-09",
+        "t_end": "2026-06-12",
+        "train": 41444,
+        "test": 20631,
+        "n_gated_crops": 21,
+        "fruit_gated": [
+          "Ambul",
+          "Kolikuttu",
+          "Seeni"
+        ]
+      }
+    ],
+    "C": [
+      {
+        "fold": 1,
+        "skipped": false,
+        "t_start": "2023-01-04",
+        "t_end": "2024-04-02",
+        "train": 26483,
+        "test": 7798,
+        "n_gated_crops": 18,
+        "fruit_gated": [
+          "Ambul",
+          "Kolikuttu",
+          "Seeni"
+        ]
+      },
+      {
+        "fold": 2,
+        "skipped": false,
+        "t_start": "2024-04-03",
+        "t_end": "2025-05-08",
+        "train": 33772,
+        "test": 7750,
+        "n_gated_crops": 20,
+        "fruit_gated": [
+          "Ambul",
+          "Kolikuttu",
+          "Seeni"
+        ]
+      },
+      {
+        "fold": 3,
+        "skipped": false,
+        "t_start": "2025-05-09",
+        "t_end": "2026-06-12",
+        "train": 41444,
+        "test": 20631,
+        "n_gated_crops": 21,
+        "fruit_gated": [
+          "Ambul",
+          "Kolikuttu",
+          "Seeni"
+        ]
+      }
+    ]
+  },
+  "pooled": {
+    "A": {
+      "pooled_MAE": 115.89,
+      "n": 34541,
+      "nonfruit_MAE": 116.0,
+      "nonfruit_n": 33671,
+      "fruit_MAE": 111.53,
+      "fruit_n": 870
+    },
+    "B": {
+      "pooled_MAE": 112.57,
+      "n": 36179,
+      "nonfruit_MAE": 116.74,
+      "nonfruit_n": 33671,
+      "fruit_MAE": 56.57,
+      "fruit_n": 2508
+    },
+    "C": {
+      "pooled_MAE": 112.83,
+      "n": 36179,
+      "nonfruit_MAE": 117.18,
+      "nonfruit_n": 33671,
+      "fruit_MAE": 54.37,
+      "fruit_n": 2508
+    }
+  },
+  "per_fruit_crop": {
+    "Kolikuttu": {
+      "gp": 120,
+      "A": {
+        "n": 283,
+        "hybrid_MAE": 35.67,
+        "served_by": "recency-mean",
+        "recmean_MAE": 35.67,
+        "carry_MAE": 50.01,
+        "seasnaive_MAE": 51.45,
+        "seasnaive_coverage": "62/283",
+        "straddle_rows": 0,
+        "per_fold_MAE": {
+          "2": 8.54,
+          "3": 35.96
+        }
+      },
+      "B": {
+        "n": 829,
+        "hybrid_MAE": 115.3,
+        "served_by": "model",
+        "recmean_MAE": 96.94,
+        "carry_MAE": 91.09,
+        "seasnaive_MAE": 100.36,
+        "seasnaive_coverage": "829/829",
+        "straddle_rows": 72,
+        "per_fold_MAE": {
+          "1": 203.63,
+          "2": 86.7,
+          "3": 47.35
+        }
+      },
+      "C": {
+        "n": 829,
+        "hybrid_MAE": 110.41,
+        "served_by": "model",
+        "recmean_MAE": 96.94,
+        "carry_MAE": 91.09,
+        "seasnaive_MAE": 100.36,
+        "seasnaive_coverage": "829/829",
+        "straddle_rows": 72,
+        "per_fold_MAE": {
+          "1": 195.34,
+          "2": 85.82,
+          "3": 42.45
+        }
+      }
+    },
+    "Seeni": {
+      "gp": 135,
+      "A": {
+        "n": 272,
+        "hybrid_MAE": 152.16,
+        "served_by": "recency-mean",
+        "recmean_MAE": 152.16,
+        "carry_MAE": 22.37,
+        "seasnaive_MAE": 23.49,
+        "seasnaive_coverage": "63/272",
+        "straddle_rows": 0,
+        "per_fold_MAE": {
+          "2": 147.29,
+          "3": 152.21
+        }
+      },
+      "B": {
+        "n": 818,
+        "hybrid_MAE": 20.9,
+        "served_by": "model",
+        "recmean_MAE": 28.81,
+        "carry_MAE": 24.61,
+        "seasnaive_MAE": 26.55,
+        "seasnaive_coverage": "818/818",
+        "straddle_rows": 80,
+        "per_fold_MAE": {
+          "1": 19.66,
+          "2": 24.62,
+          "3": 18.79
+        }
+      },
+      "C": {
+        "n": 818,
+        "hybrid_MAE": 20.56,
+        "served_by": "model",
+        "recmean_MAE": 28.81,
+        "carry_MAE": 24.61,
+        "seasnaive_MAE": 26.55,
+        "seasnaive_coverage": "818/818",
+        "straddle_rows": 80,
+        "per_fold_MAE": {
+          "1": 21.43,
+          "2": 24.0,
+          "3": 16.39
+        }
+      }
+    },
+    "Ambul": {
+      "gp": 90,
+      "A": {
+        "n": 315,
+        "hybrid_MAE": 144.6,
+        "served_by": "recency-mean",
+        "recmean_MAE": 144.6,
+        "carry_MAE": 30.04,
+        "seasnaive_MAE": 31.02,
+        "seasnaive_coverage": "64/315",
+        "straddle_rows": 0,
+        "per_fold_MAE": {
+          "2": 161.46,
+          "3": 144.44
+        }
+      },
+      "B": {
+        "n": 861,
+        "hybrid_MAE": 33.9,
+        "served_by": "model",
+        "recmean_MAE": 33.02,
+        "carry_MAE": 41.06,
+        "seasnaive_MAE": 39.63,
+        "seasnaive_coverage": "861/861",
+        "straddle_rows": 53,
+        "per_fold_MAE": {
+          "1": 36.19,
+          "2": 41.33,
+          "3": 25.72
+        }
+      },
+      "C": {
+        "n": 861,
+        "hybrid_MAE": 32.54,
+        "served_by": "model",
+        "recmean_MAE": 33.02,
+        "carry_MAE": 41.06,
+        "seasnaive_MAE": 39.63,
+        "seasnaive_coverage": "861/861",
+        "straddle_rows": 53,
+        "per_fold_MAE": {
+          "1": 34.75,
+          "2": 40.83,
+          "3": 23.73
+        }
+      }
+    }
+  },
+  "caveat": {
+    "A": {
+      "fruit_test_rows": 870,
+      "fruit_test_origins": 315,
+      "origins_straddling_splice": 0,
+      "test_rows_straddling_splice": 0
+    },
+    "B": {
+      "fruit_test_rows": 2508,
+      "fruit_test_origins": 861,
+      "origins_straddling_splice": 80,
+      "test_rows_straddling_splice": 205
+    },
+    "B_fruit_presplice_train_rows": 5108
+  },
+  "cold_start_FRT": {
+    "A": {
+      "p10": 75.0,
+      "p50": 200.0,
+      "p90": 405.0,
+      "n_rows": 4734,
+      "n_crops": 18,
+      "top_contributors": {
+        "661e5c40-0bf9-4195-b113-3e5d1d18084a": 340,
+        "939d91c0-d423-420e-9194-ffa625533276": 324,
+        "bc018387-a122-47b7-87be-1621bea29b51": 315,
+        "6f48b51f-83d8-4b6a-94dc-7df8b9480f2c": 307,
+        "365032c6-6375-4a47-9a97-8d659f0ef26c": 299,
+        "9eab9555-899f-4d54-bc25-2c3d02109914": 295,
+        "02dc3010-7139-4212-8d6d-32685db85657": 283,
+        "83f194dd-4ce9-456a-9aac-bfd98e287a7f": 272
+      }
+    },
+    "B": {
+      "p10": 55.0,
+      "p50": 125.0,
+      "p90": 364.5,
+      "n_rows": 9842,
+      "n_crops": 18,
+      "top_contributors": {
+        "bc018387-a122-47b7-87be-1621bea29b51": 2358,
+        "83f194dd-4ce9-456a-9aac-bfd98e287a7f": 2319,
+        "02dc3010-7139-4212-8d6d-32685db85657": 1301,
+        "661e5c40-0bf9-4195-b113-3e5d1d18084a": 340,
+        "939d91c0-d423-420e-9194-ffa625533276": 324,
+        "6f48b51f-83d8-4b6a-94dc-7df8b9480f2c": 307,
+        "365032c6-6375-4a47-9a97-8d659f0ef26c": 299,
+        "9eab9555-899f-4d54-bc25-2c3d02109914": 295
+      }
+    }
+  },
+  "directional_acc": {
+    "A": {
+      "fruit_hybrid": 0.654,
+      "pooled_hybrid": 0.6772
+    },
+    "B": {
+      "fruit_hybrid": 0.6495,
+      "pooled_hybrid": 0.6752
+    }
+  }
+}

@@ -1,0 +1,378 @@
+{
+  "seed": 42,
+  "splice": "2025-05-05",
+  "adopted": {
+    "FRT000003": "Ambul",
+    "FRT000006": "Seeni"
+  },
+  "labelled_rows": {
+    "A": 58806,
+    "B": 62896
+  },
+  "harti_prepended": {
+    "Ambul": 2173,
+    "Seeni": 2173
+  },
+  "fold_meta": {
+    "A": [
+      {
+        "fold": 1,
+        "skipped": false,
+        "t_start": "2023-01-04",
+        "t_end": "2024-04-02",
+        "train": 23263,
+        "test": 6907,
+        "n_gated_crops": 15,
+        "fruit_gated": []
+      },
+      {
+        "fold": 2,
+        "skipped": false,
+        "t_start": "2024-04-03",
+        "t_end": "2025-05-08",
+        "train": 29646,
+        "test": 7003,
+        "n_gated_crops": 17,
+        "fruit_gated": []
+      },
+      {
+        "fold": 3,
+        "skipped": false,
+        "t_start": "2025-05-09",
+        "t_end": "2026-06-12",
+        "train": 36536,
+        "test": 20631,
+        "n_gated_crops": 18,
+        "fruit_gated": []
+      }
+    ],
+    "B": [
+      {
+        "fold": 1,
+        "skipped": false,
+        "t_start": "2023-01-04",
+        "t_end": "2024-04-02",
+        "train": 26098,
+        "test": 7501,
+        "n_gated_crops": 17,
+        "fruit_gated": [
+          "Ambul",
+          "Seeni"
+        ]
+      },
+      {
+        "fold": 2,
+        "skipped": false,
+        "t_start": "2024-04-03",
+        "t_end": "2025-05-08",
+        "train": 33085,
+        "test": 7501,
+        "n_gated_crops": 19,
+        "fruit_gated": [
+          "Ambul",
+          "Seeni"
+        ]
+      },
+      {
+        "fold": 3,
+        "skipped": false,
+        "t_start": "2025-05-09",
+        "t_end": "2026-06-12",
+        "train": 40496,
+        "test": 20631,
+        "n_gated_crops": 20,
+        "fruit_gated": [
+          "Ambul",
+          "Seeni"
+        ]
+      }
+    ]
+  },
+  "gate1_pooled": {
+    "A_all": {
+      "MAE": 115.89,
+      "n": 34541
+    },
+    "B_all": {
+      "MAE": 111.34,
+      "n": 35633
+    },
+    "matched_A": {
+      "MAE": 115.89,
+      "n": 34541
+    },
+    "matched_B": {
+      "MAE": 113.72,
+      "n": 34541
+    }
+  },
+  "gate2_per_crop": {
+    "Seeni": {
+      "gp": 135,
+      "matched_rows": 272,
+      "obs_min": "2025-05-05",
+      "obs_max": "2026-02-25",
+      "A_hybrid_MAE": 152.16,
+      "B_hybrid_MAE": 18.93,
+      "B_bias": -6.66,
+      "B_served_by": "model",
+      "A_served_by": "recency-mean",
+      "baseline_recmean_incumbent_MAE": 152.16,
+      "baseline_carry_MAE": 22.37,
+      "baseline_seasnaive_MAE": 23.49,
+      "seasnaive_coverage": "63/272",
+      "same_data_recmean_MAE": 32.51,
+      "best_baseline_MAE": 22.37,
+      "B_beats_A": true,
+      "B_beats_best_baseline": true,
+      "model_beats_same_data_recmean": true
+    },
+    "Ambul": {
+      "gp": 90,
+      "matched_rows": 315,
+      "obs_min": "2025-05-05",
+      "obs_max": "2026-04-11",
+      "A_hybrid_MAE": 144.6,
+      "B_hybrid_MAE": 26.19,
+      "B_bias": -12.68,
+      "B_served_by": "model",
+      "A_served_by": "recency-mean",
+      "baseline_recmean_incumbent_MAE": 144.6,
+      "baseline_carry_MAE": 30.04,
+      "baseline_seasnaive_MAE": 31.02,
+      "seasnaive_coverage": "64/315",
+      "same_data_recmean_MAE": 24.38,
+      "best_baseline_MAE": 30.04,
+      "B_beats_A": true,
+      "B_beats_best_baseline": true,
+      "model_beats_same_data_recmean": false
+    }
+  },
+  "gate3_cost": {
+    "nonadopt_MAE_A": 115.33,
+    "nonadopt_MAE_B": 115.29,
+    "nonadopt_n": 33954,
+    "nonadopt_degradation_pct": -0.033,
+    "net_abs_error_change": -74815.8,
+    "net_weighted_MAE_change_per_row": -2.166,
+    "matched_total_rows": 34541,
+    "gate3a_pass_degradation_le_1pct": true,
+    "gate3b_pass_net_change_negative": true
+  },
+  "gate4_top20_guard": {
+    "crops": [
+      {
+        "CropId": "74870612-2ce3-41e2-a74e-73f4f1f3aec2",
+        "labelled_rows": 2713,
+        "matched_rows": 1093,
+        "MAE_A": 50.9,
+        "MAE_B": 50.08,
+        "degradation_pct": -1.62,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "1416934a-effa-4934-ab53-b337297f31c6",
+        "labelled_rows": 2710,
+        "matched_rows": 1092,
+        "MAE_A": 27.74,
+        "MAE_B": 28.78,
+        "degradation_pct": 3.75,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "839e1fc7-77fb-4afd-87d5-dc06dfed4ece",
+        "labelled_rows": 2709,
+        "matched_rows": 1089,
+        "MAE_A": 26.14,
+        "MAE_B": 24.67,
+        "degradation_pct": -5.61,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "f715c66f-2228-449c-b26e-d719f9fb6aea",
+        "labelled_rows": 2697,
+        "matched_rows": 1086,
+        "MAE_A": 49.64,
+        "MAE_B": 48.54,
+        "degradation_pct": -2.21,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "f45e0744-ed27-453e-a47a-1dd847cd6f50",
+        "labelled_rows": 2687,
+        "matched_rows": 1082,
+        "MAE_A": 120.78,
+        "MAE_B": 119.7,
+        "degradation_pct": -0.89,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "e384f58a-addf-40a4-aff0-10bebe8bc08f",
+        "labelled_rows": 2685,
+        "matched_rows": 1079,
+        "MAE_A": 77.54,
+        "MAE_B": 78.06,
+        "degradation_pct": 0.67,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "61bf3543-0739-4981-850e-affbe57a5dae",
+        "labelled_rows": 2684,
+        "matched_rows": 1078,
+        "MAE_A": 119.47,
+        "MAE_B": 119.85,
+        "degradation_pct": 0.32,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "d2e3d153-90fb-461e-9025-0e8b8a9fba4b",
+        "labelled_rows": 2681,
+        "matched_rows": 1075,
+        "MAE_A": 54.91,
+        "MAE_B": 55.19,
+        "degradation_pct": 0.52,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "e1ba5835-6554-43dd-b55d-d189cdae74d6",
+        "labelled_rows": 2668,
+        "matched_rows": 1069,
+        "MAE_A": 221.86,
+        "MAE_B": 216.93,
+        "degradation_pct": -2.22,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "c0dd18f8-e4b9-483f-8b93-d07363c8803f",
+        "labelled_rows": 2668,
+        "matched_rows": 1069,
+        "MAE_A": 172.1,
+        "MAE_B": 176.98,
+        "degradation_pct": 2.84,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "c14b4d34-590b-45dd-94c0-acfd190ebe24",
+        "labelled_rows": 2647,
+        "matched_rows": 1059,
+        "MAE_A": 70.39,
+        "MAE_B": 69.59,
+        "degradation_pct": -1.13,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "482d04a5-8148-409e-bc01-7b8af4e83a9a",
+        "labelled_rows": 2634,
+        "matched_rows": 1078,
+        "MAE_A": 95.69,
+        "MAE_B": 95.35,
+        "degradation_pct": -0.36,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "ff9dfd8d-f410-4ec8-bdb3-bef999e0d893",
+        "labelled_rows": 2591,
+        "matched_rows": 1009,
+        "MAE_A": 74.9,
+        "MAE_B": 76.26,
+        "degradation_pct": 1.82,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "76815cf9-cbfc-4632-9b4b-fc75558f9cb2",
+        "labelled_rows": 2363,
+        "matched_rows": 1034,
+        "MAE_A": 32.01,
+        "MAE_B": 32.29,
+        "degradation_pct": 0.86,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "6bf600fc-dc0f-4923-a5b1-934ee3d5058e",
+        "labelled_rows": 2202,
+        "matched_rows": 860,
+        "MAE_A": 19.4,
+        "MAE_B": 18.17,
+        "degradation_pct": -6.36,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "e69ddbe0-278d-4f4e-ae22-ce619adc0651",
+        "labelled_rows": 1412,
+        "matched_rows": 1052,
+        "MAE_A": 62.3,
+        "MAE_B": 61.69,
+        "degradation_pct": -0.97,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "b44bacdb-042f-4286-ac23-02bc4cac4486",
+        "labelled_rows": 1215,
+        "matched_rows": 1050,
+        "MAE_A": 118.15,
+        "MAE_B": 119.19,
+        "degradation_pct": 0.88,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "a9311ac2-3077-4dee-823e-03234d4782ef",
+        "labelled_rows": 1125,
+        "matched_rows": 1043,
+        "MAE_A": 20.81,
+        "MAE_B": 21.58,
+        "degradation_pct": 3.68,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "3790bcec-1e04-49c5-b8e6-5adbee8a13b8",
+        "labelled_rows": 549,
+        "matched_rows": 496,
+        "MAE_A": 51.0,
+        "MAE_B": 51.0,
+        "degradation_pct": 0.0,
+        "breaches_5pct": false
+      },
+      {
+        "CropId": "baf52b87-9c9c-43fe-9fa1-fc37ea4205e2",
+        "labelled_rows": 364,
+        "matched_rows": 364,
+        "MAE_A": 211.87,
+        "MAE_B": 204.55,
+        "degradation_pct": -3.46,
+        "breaches_5pct": false
+      }
+    ],
+    "n_breaching_5pct": 0,
+    "breaching": [],
+    "gate4_pass": true
+  },
+  "gate5_kolikuttu_parity": {
+    "n_rows_A": 283,
+    "n_rows_B": 283,
+    "series_byte_identical": true,
+    "predictions_byte_identical": false,
+    "predictions_byte_identical_note": "FALSE by design -- recency-mean global prior shifts with the pooled frame; unavoidable for any pooled adoption. Substantive test is MAE.",
+    "max_prediction_drift": 7.332,
+    "never_model_served": true,
+    "MAE_A": 35.667,
+    "MAE_B": 33.623,
+    "MAE_degradation_pct": -5.73,
+    "not_harmed": true,
+    "gate5_pass_substantive": true
+  },
+  "directional_acc": {
+    "A_pooled": 0.6772,
+    "B_pooled": 0.6766
+  },
+  "verdict": {
+    "gate2_adopted_beat_incumbent_and_naive_baselines": true,
+    "gate3_cost": true,
+    "gate4_guard": true,
+    "gate5_kolikuttu_substantive": true,
+    "PROMOTE_READY": true,
+    "flags": {
+      "ambul_model_edged_by_same_data_recency_mean": true,
+      "kolikuttu_predictions_not_byte_identical_but_unharmed": true
+    }
+  }
+}
