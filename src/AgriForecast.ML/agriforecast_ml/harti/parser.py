@@ -46,6 +46,16 @@ R2 Step 6.1 widen (ClickUp D-DF6, 2026-07-07):
   entirely from the existing cached corpus (--no-download, zero new
   scraping). See the _TARGET_CROPS and _MARKET_HEADER_ALIASES docstrings
   for full era/spelling evidence.
+
+R2 fruits step 1 (2026-07-16/17):
+  Adds 4 per-kg fruit crops (Ambul, Kolikuttu, Seeni, Papaya — see
+  _TARGET_FRUITS_PER_KG / _TARGET_FRUITS_PER_FRUIT_SKIP docstrings) from the
+  fruit subsection immediately below the vegetables on the same table.
+  Fruits flow ONLY through the multi-market PriceObservations path
+  (loader.upsert_harti_price_observations, name-keyed CommodityAliases
+  resolution) — they are deliberately absent from loader._HARTI_TO_DB_NAME
+  / _HARTI_PRODUCT_IDS, so upsert_harti_prices() (the legacy Dambulla-only
+  MarketPrices path) can never insert a fruit row.
 """
 from __future__ import annotations
 
@@ -164,6 +174,98 @@ _TARGET_CROPS: dict[str, str] = {
     # stay unmapped (see Step 6.1 report "unmappable labels").
     "B'Onion Imported": "Big Onion Imported",
     "Big-onion Local":  "Big Onion Local",
+}
+
+# --------------------------------------------------------------------------
+# Fruits (R2 fruits step 1, ClickUp 86caj... 2026-07-16 pre-build analysis):
+# per-kg only; per-fruit-unit rows deliberately skipped.
+# --------------------------------------------------------------------------
+# The same page-2 "Wholesale Prices in Selected Markets" table carries a
+# fruit subsection immediately below the vegetables (Banana group: Ambul,
+# Kolikuttu, Seeni, Anamalu; then Papaya, Passion Fruits, "Other Fruits
+# (Rs/Fruit)": Pineapple/Mango/Woodapple/Avocado/Orange). Unlike the
+# vegetable rows above (verified corpus-wide Rs/kg — see loader.py's UNIT
+# CONTRACT docstring), fruit rows do NOT share one uniform unit: each row's
+# own label carries the unit, either the page-level "(Rs./kg)" default (no
+# suffix on the label) or an explicit "(Rs/Fruit)"/"(Rs/Fruits)" override
+# baked into the row text itself. A per-fruit price must NEVER be stored as
+# a per-kg observation.
+#
+# Scope (owner-approved, step 1 of a wider plan): only the 4 fruits that
+# resolve to an existing per-kg DB crop are targeted (Ambul, Kolikuttu,
+# Seeni, Papaya -> Banana - Abul/Kolikuttu/Sini, Papaya via HARTI-source
+# CommodityAliases). Every other row in the fruit subsection (Anamalu,
+# Passion Fruits, Pineapple, Mango, Woodapple, Avocado, Orange) is a
+# per-FRUIT unit corpus-wide with no per-kg DB crop to map to — deliberately
+# absent from BOTH dicts below, so those rows fall through the ordinary
+# "not a target row" branch exactly like any other non-target vegetable row
+# (no dedicated skip-count for them; they were never candidates).
+#
+# Era evidence (FULL corpus scan, all 2,989 cached PDFs, 2015-06-22 ..
+# 2026-07-15 — --no-download only, zero new scraping, harti_cache/; an
+# initial 131-sample one-PDF-per-month sweep was cross-checked against this
+# exhaustive pass, which is why exact reversion dates below are precise
+# rather than month-bucketed):
+#   Ambul:      bare "Ambul" 2015-06-22 .. 2021-11-01 (n=1410, implicit
+#               Rs/kg default); explicit "Ambul(Rs/Kg)" (NO space before the
+#               paren) 2021-11-02 .. 2026-07-15 (n=1403) — a clean one-way
+#               flip, no reversions observed. Price levels are continuous
+#               across the boundary (e.g. Rs 40-50 in 2015 -> Rs 150-200 by
+#               2023, tracking the same inflation trend as the other
+#               vegetable rows) — this is a label clarification, not a unit
+#               change. Both variants are per-kg and accepted.
+#   Kolikuttu:  NOT a clean one-way flip -- two brief REVERSIONS observed
+#               (real HARTI publishing inconsistency, not a parser
+#               artifact): "Kolikuttu (Rs/Fruits)" (space before paren) is
+#               the label 2015-06-22 .. 2020-06-15, briefly flips to bare
+#               "Kolikuttu" 2020-06-24 (single sampled occurrence), reverts
+#               to "(Rs/Fruits)" 2020-07-01 .. 2020-08-07, then permanently
+#               flips to bare "Kolikuttu" 2020-08-10 .. 2021-10-22 -- except
+#               a second brief reversion to "(Rs/Fruits)" 2021-10-22 ..
+#               2021-10-24, before permanently settling on bare "Kolikuttu"
+#               2021-10-25 .. 2026-07-15. Full-corpus totals: "Kolikuttu
+#               (Rs/Fruits)" n=1136 (first 2015-06-22, last 2021-10-22);
+#               bare "Kolikuttu" n=1677 (first 2020-06-24, last 2026-07-15).
+#               "(Rs/Fruits)" is a genuine per-FRUIT unit (price magnitudes
+#               consistent with a single banana, e.g. Rs 10-13 in 2015) --
+#               intentionally SKIPPED, never stored, on EVERY date it
+#               appears (label-driven, not date-driven -- this is exactly
+#               why the split-dict design handles the reversions correctly
+#               with zero extra logic: each PDF's own row label decides
+#               independently, no era/date heuristic is ever consulted).
+#               The unit flip is corroborated by the price-level jump (Rs
+#               130-150 in 2019 under the per-fruit label -> Rs 340-420 by
+#               2023 under the bare/per-kg label, consistent with a genuine
+#               per-kg bundle price, not the same quantity merely
+#               relabelled). Only the bare "Kolikuttu" label is accepted.
+#   Seeni:      always bare "Seeni" corpus-wide (2015-06-22 -> 2026-07-15,
+#               n=2813, no suffix ever observed) — implicit Rs/kg default
+#               the entire history, always accepted.
+#   Papaya:     bare "Papaya" 2015-06-22 .. 2021-11-02 (n=1411, implicit
+#               Rs/kg default); explicit "Papaya (Rs/Kg)" (WITH a space
+#               before the paren, unlike Ambul's no-space form) 2021-11-03
+#               .. 2026-07-15 (n=1402) — a clean one-way flip, no reversions
+#               observed. Both variants are per-kg and accepted.
+#
+# Alias strings below (canonical values) are byte-for-byte what the R2
+# fruits-step-1 EF migration seeds into CommodityAliases (Source='HARTI').
+_TARGET_FRUITS_PER_KG: dict[str, str] = {
+    "Ambul":          "Ambul",
+    "Ambul(Rs/Kg)":   "Ambul",
+    "Kolikuttu":      "Kolikuttu",
+    "Seeni":          "Seeni",
+    "Papaya":         "Papaya",
+    "Papaya (Rs/Kg)": "Papaya",
+}
+
+# Per-FRUIT-unit label variants for the SAME 4 target fruits — positively
+# matched (not just "unrecognised") so a skip can be logged with the
+# canonical fruit name attached, distinguishing "known per-fruit row,
+# deliberately skipped" from "not a target row at all". NEVER added to
+# _TARGET_FRUITS_PER_KG — that would be exactly the unit-mismatch bug this
+# split is designed to prevent.
+_TARGET_FRUITS_PER_FRUIT_SKIP: dict[str, str] = {
+    "Kolikuttu (Rs/Fruits)": "Kolikuttu",
 }
 
 # Cells that mean "no data / market closed"
@@ -568,6 +670,15 @@ def _parse_pdf_impl(pdf_path: Path, date_str: str) -> list[ParsedPrice]:
             raw_crop = _clean(row[0])
             canonical = _TARGET_CROPS.get(raw_crop)
             if canonical is None:
+                canonical = _TARGET_FRUITS_PER_KG.get(raw_crop)
+            if canonical is None:
+                skip_fruit = _TARGET_FRUITS_PER_FRUIT_SKIP.get(raw_crop)
+                if skip_fruit is not None:
+                    logger.debug(
+                        "[%s] %s: per-FRUIT unit row (label %r) — skipped, "
+                        "never stored as a per-kg observation (unit mismatch)",
+                        date_str, skip_fruit, raw_crop,
+                    )
                 continue
 
             arrivals_kg = None

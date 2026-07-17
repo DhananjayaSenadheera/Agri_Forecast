@@ -537,23 +537,36 @@ class TestParserOnCachedPDF:
 
         parse_pdf() now emits rows for every locatable target market with
         actual price data: Dambulla, Pettah, Thambuttegama, Meegoda,
-        Norochchole, and Nuwara Eliya (77 rows total; per-market counts
-        vary because not every one of the 20 target crops trades at every
-        market that day). Narahenpita/Bandarawela/Veyangoda headers are not
-        present in this 9-column-format PDF and are WARN-skipped (fixture
-        predates their introduction into the bulletin -- Bandarawela from
-        2021-12-02, Veyangoda from 2022-02-22, both after 2019-01-01).
-        Kandy and Keppetipola headers ARE present and located (9-column
-        format includes both), but every crop's cell in both columns is
-        '-' (market closed / no data that day) so both legitimately emit
-        zero rows -- a located column with no data is a different,
-        expected case from a not-located column (see
-        test_keppetipola_column_located_but_empty_this_pdf below)."""
+        Norochchole, and Nuwara Eliya (77 vegetable rows total; per-market
+        counts vary because not every one of the 20 target crops trades at
+        every market that day). Narahenpita/Bandarawela/Veyangoda headers
+        are not present in this 9-column-format PDF and are WARN-skipped
+        (fixture predates their introduction into the bulletin --
+        Bandarawela from 2021-12-02, Veyangoda from 2022-02-22, both after
+        2019-01-01). Kandy and Keppetipola headers ARE present and located
+        (9-column format includes both), but every crop's cell in both
+        columns is '-' (market closed / no data that day) so both
+        legitimately emit zero rows -- a located column with no data is a
+        different, expected case from a not-located column (see
+        test_keppetipola_column_located_but_empty_this_pdf below).
+
+        R2 fruits step 1 (2026-07-16/17) adds 3 more rows on top of the 77
+        vegetable rows: this PDF's date (2019-01-01) falls in the pre-flip
+        era for all 3 always-in-scope-that-day fruits -- Ambul, Seeni,
+        Papaya (all implicit-Rs/kg, bare label) resolve at Pettah; Kolikuttu
+        is still per-fruit-unit ('Kolikuttu (Rs/Fruits)') on this date and
+        is correctly SKIPPED, not counted here. Total: 77 + 3 = 80."""
         rows = self._parse()
         labels = [r.harti_label for r in rows]
-        assert len(rows) == 77, (
-            "Expected 77 rows (6 markets-with-data x their respective "
-            "per-crop coverage) from 2019-01-01 PDF, got %d: %s" % (len(rows), labels)
+        assert len(rows) == 80, (
+            "Expected 80 rows (77 vegetable rows + 3 pre-flip fruit rows "
+            "[Ambul, Seeni, Papaya] -- Kolikuttu is still per-fruit-unit on "
+            "this date and correctly skipped) from 2019-01-01 PDF, got %d: %s"
+            % (len(rows), labels)
+        )
+        fruit_rows = [r for r in rows if r.harti_label in ("Ambul", "Kolikuttu", "Seeni", "Papaya")]
+        assert {r.harti_label for r in fruit_rows} == {"Ambul", "Seeni", "Papaya"}, (
+            "Kolikuttu must be absent (per-fruit-unit label on 2019-01-01)"
         )
         markets = {r.market_name for r in rows}
         assert markets == {
