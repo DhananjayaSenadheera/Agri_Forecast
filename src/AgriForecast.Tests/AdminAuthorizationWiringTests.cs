@@ -107,6 +107,20 @@ public class AdminAuthorizationWiringTests
         IsAnonymous(typeof(AdminIngestionController), method).Should().BeFalse();
     }
 
+    // ── AdminLogsController: BOTH reads are Admin-only ────────────────────────────
+    // Logs hub PR A: like AdminIngestionController, the Logs reads surface operational internals
+    // (model-promotion decisions, security events) and are Admin-locked at the controller level.
+    // Prove the [Authorize(Roles = Admin)] is actually wired on each action.
+    [Theory]
+    [InlineData(nameof(AdminLogsController.GetTraining))]
+    [InlineData(nameof(AdminLogsController.GetUserActivity))]
+    public void AdminLogsReads_AreAdminOnly(string method)
+    {
+        IsAdminLocked(typeof(AdminLogsController), method).Should().BeTrue(
+            $"AdminLogsController.{method} exposes Logs-hub internals and must be Admin-locked");
+        IsAnonymous(typeof(AdminLogsController), method).Should().BeFalse();
+    }
+
     // ── Auth endpoints stay anonymous by design ────────────────────────────────────
     [Theory]
     [InlineData(nameof(AuthController.Register))]

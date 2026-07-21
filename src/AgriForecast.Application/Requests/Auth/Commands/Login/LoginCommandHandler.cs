@@ -12,17 +12,20 @@ public class LoginCommandHandler : IRequestHandler<LoginCommand, Result<AuthResp
     private readonly IUserRepository _userRepository;
     private readonly IPasswordHasher _passwordHasher;
     private readonly IJwtTokenGenerator _jwtTokenGenerator;
+    private readonly IUserActivityAudit _activityAudit;
     private readonly ILogger<LoginCommandHandler> _logger;
 
     public LoginCommandHandler(
         IUserRepository userRepository,
         IPasswordHasher passwordHasher,
         IJwtTokenGenerator jwtTokenGenerator,
+        IUserActivityAudit activityAudit,
         ILogger<LoginCommandHandler> logger)
     {
         _userRepository = userRepository;
         _passwordHasher = passwordHasher;
         _jwtTokenGenerator = jwtTokenGenerator;
+        _activityAudit = activityAudit;
         _logger = logger;
     }
 
@@ -38,11 +41,13 @@ public class LoginCommandHandler : IRequestHandler<LoginCommand, Result<AuthResp
         if (user is null || !_passwordHasher.Verify(user.PasswordHash, dto.Password))
         {
             _logger.LogInformation("Failed login attempt for username: {Username}", dto.Username);
+            await _activityAudit.RecordLoginFailedAsync(dto.Username, cancellationToken);
             return Result<AuthResponseDto>.Failure("Invalid username or password.");
         }
 
         var (token, expiresAt) = _jwtTokenGenerator.Generate(user);
         _logger.LogInformation("User logged in. Username: {Username}", user.Username);
+        await _activityAudit.RecordLoginSucceededAsync(user.Id, cancellationToken);
 
         var response = new AuthResponseDto
         {

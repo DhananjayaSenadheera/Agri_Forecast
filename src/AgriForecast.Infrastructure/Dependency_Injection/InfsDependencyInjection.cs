@@ -62,6 +62,9 @@ public static class InfsDependencyInjection
         // admin ingestion page. Reads only — uses the normal request-scoped DbContext (unlike the
         // write-side IngestionRunRepository, which isolates every write in its own scope).
         services.AddScoped<IIngestionReadStore, AgriForecast.Infrastructure.Services.IngestionRead.IngestionReadStore>();
+        // Logs hub PR A: read-only Logs-hub store (GET /api/admin/logs/training + /user-activity) for
+        // the admin Logs page. Reads only — normal request-scoped DbContext (mirrors IngestionReadStore).
+        services.AddScoped<ILogsReadStore, AgriForecast.Infrastructure.Services.LogsRead.LogsReadStore>();
         // PR 3: resolves the status handler's config values (Ingestion:ServiceAddress /
         // RunningStalenessMinutes) at the Infrastructure boundary, keeping config out of Application.
         services.AddScoped<IIngestionStatusSettings, AgriForecast.Infrastructure.Services.IngestionRead.IngestionStatusSettings>();
@@ -85,6 +88,10 @@ public static class InfsDependencyInjection
         // request-scoped DbContext with the user repo so an admin delete + revoke commit together.
         services.AddScoped<IRefreshTokenRepository, RefreshTokenRepository>();
         services.AddScoped<IRefreshTokenService, RefreshTokenService>();
+        // Logs hub PR A: fire-safe user-activity audit. Isolates every write in its own scope and
+        // swallows-and-logs (never adds a failure mode to login/registration/admin ops) — same B1
+        // discipline as IngestionRunRepository, so it depends only on IServiceScopeFactory.
+        services.AddScoped<IUserActivityAudit, UserActivityAudit>();
         services.Configure<JwtSettings>(configuration.GetSection(JwtSettings.SectionName));
         services.AddHttpClient<IDambullaApiClient, DambullaApiClient>(http =>
         {

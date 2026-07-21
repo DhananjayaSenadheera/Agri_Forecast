@@ -29,6 +29,8 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<IngestionWatermark> IngestionWatermarks { get; set; }
     public DbSet<IngestionRun> IngestionRuns { get; set; }
     public DbSet<IngestionVerification> IngestionVerifications { get; set; }
+    public DbSet<ModelTrainingRun> ModelTrainingRuns { get; set; }
+    public DbSet<UserActivityEvent> UserActivityLog { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -503,6 +505,53 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
 
             // Link a verification to its pass.
             e.HasIndex(x => x.BatchId);
+        });
+
+        // Model TRAINING run rows (Logs hub PR A) — one per training run. WRITTEN BY PYTHON later;
+        // .NET owns the SCHEMA only here. Net-new, additive (no seed, no backfill). Version is the
+        // business key (unique). MAE columns get explicit precision (house decimal discipline);
+        // CreatedUtc is DB-defaulted so a Python INSERT that omits it still stamps a creation instant.
+        modelBuilder.Entity<ModelTrainingRun>(e =>
+        {
+            e.Property(x => x.Version).HasMaxLength(20).IsRequired();
+            e.Property(x => x.PromotionDecision).HasMaxLength(2000);
+            e.Property(x => x.BestMlKind).HasMaxLength(50);
+            e.Property(x => x.BestBaselineKind).HasMaxLength(50);
+            e.Property(x => x.FeatureContractHash).HasMaxLength(100);
+
+            e.Property(x => x.BestMlMae).HasPrecision(10, 2);
+            e.Property(x => x.BestBaselineMae).HasPrecision(10, 2);
+
+            e.Property(x => x.CreatedUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+
+            // One row per version.
+            e.HasIndex(x => x.Version)
+                .IsUnique()
+                .HasDatabaseName("IX_ModelTrainingRuns_Version");
+
+            // Primary read path: most-recent training runs first.
+            e.HasIndex(x => x.TrainedAtUtc)
+                .IsDescending()
+                .HasDatabaseName("IX_ModelTrainingRuns_TrainedAtUtc");
+        });
+
+        // User ACTIVITY rows (Logs hub PR A) — one per security-relevant account event. WRITTEN by
+        // the .NET side (IUserActivityAudit) at the five auth/user-management call sites; net-new,
+        // additive (no seed, no backfill). EventType is enum-as-int (pinned). Only UsernameAttempted
+        // (failed logins) + Details (short code-authored note) are free text, both length-capped; no
+        // password/token/body is ever stored.
+        modelBuilder.Entity<UserActivityEvent>(e =>
+        {
+            e.ToTable("UserActivityLog");
+
+            e.Property(x => x.EventType).HasConversion<int>().IsRequired();
+            e.Property(x => x.UsernameAttempted).HasMaxLength(100);
+            e.Property(x => x.Details).HasMaxLength(500);
+
+            // Primary read path: most-recent events first.
+            e.HasIndex(x => x.OccurredUtc)
+                .IsDescending()
+                .HasDatabaseName("IX_UserActivityLog_OccurredUtc");
         });
 
         SeedMarkets(modelBuilder);
