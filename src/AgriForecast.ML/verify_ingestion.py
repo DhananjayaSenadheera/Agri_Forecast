@@ -104,6 +104,11 @@ def main() -> int:
     # module's own report (_print_report) is the primary human-facing output
     # regardless of log level.
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
+    # gap_report() emits its per-gap lines at WARNING/ERROR level, so the
+    # basicConfig threshold above does not stop them (1.8MB observed on a
+    # full-corpus run). Check 14 consumes gap_report's structured return
+    # value; the log stream is redundant here, so silence that logger.
+    logging.getLogger("agriforecast_ml.data_quality").setLevel(logging.CRITICAL)
 
     try:
         pipeline_date = date.fromisoformat(args.pipeline_date) if args.pipeline_date else None
