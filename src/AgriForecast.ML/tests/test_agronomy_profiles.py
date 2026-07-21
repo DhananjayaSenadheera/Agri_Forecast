@@ -260,9 +260,13 @@ class TestLiveAgronomyProfilePin:
 
     def test_load_crops_shape_and_dtypes(self):
         """REPINNED 2026-07-17: 96 -> 95 crops after the R2 Step 8.2 Passion
-        duplicate merge (FRT000020 deleted, survivor FRT000019, PR #25)."""
+        duplicate merge (FRT000020 deleted, survivor FRT000019, PR #25).
+        REPINNED 2026-07-21: 95 -> 96 after migration FixGarlicAliasMapping
+        added Garlic VEG000071 (DEC ext-47 was mislabelled Big Onion; new
+        crop is IsVerified=0 / gp NULL so gp-known and season pins below
+        are unaffected, PR #39)."""
         df = _db_or_skip()
-        assert len(df) == 95, f"expected 95 crops post-Passion-merge, got {len(df)}"
+        assert len(df) == 96, f"expected 96 crops post-Garlic-fix, got {len(df)}"
         for col in ("CropId", "CropCode", "CropName", "GrowthPeriodDays",
                     "HarvestWindowDays", "YalaPlantingStartMonth",
                     "YalaPlantingEndMonth", "MahaPlantingStartMonth",
