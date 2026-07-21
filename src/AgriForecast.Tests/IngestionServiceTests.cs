@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using AgriForecast.Application.common;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
@@ -134,6 +135,82 @@ public class IngestionServiceTests
             "sinceDate must be the watermark minus the default 7-day late-arrival look-back");
         handler.LastRequestBody.Should().NotContain("2026-06-29",
             "the raw watermark must not be sent as sinceDate — the look-back must be applied");
+    }
+
+    // ── HARTI: IngestAsync returns run-tracking stats mapped from the Python response ─────────
+    // (ingestion run-tracking foundation). The Worker attaches these to the source's IngestionRun
+    // row: inserted -> RowsInserted, skippedNoMarket -> RowsSkipped, and the coverage window is the
+    // requested resume lower bound (watermark - lookback) .. the newest landed ObservedDate.
+    [Fact]
+    public async Task Harti_Success_ReturnsStats_MappedFromResponse()
+    {
+        var wms = new FakeWatermarkRepository();
+        var seeded = IngestionWatermark.Create(HartiBulletinIngestionService.SourceKey);
+        seeded.RecordSuccess(new DateTime(2026, 6, 30, 6, 0, 0, DateTimeKind.Utc), new DateOnly(2026, 6, 29));
+        wms.Seed(seeded);
+
+        var handler = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK, """
+            {"status":"ok",
+             "priceObservations":{"inserted":12,"updated":3,"skippedNoMarket":1,"maxObservedDate":"2026-07-01"}}
+            """));
+
+        var svc = new HartiBulletinIngestionService(
+            ClientFrom(handler),
+            Config(("MlService:AdminApiKey", "secret-key")),
+            wms,
+            NullLogger<HartiBulletinIngestionService>.Instance);
+
+        var stats = await svc.IngestAsync(CancellationToken.None);
+
+        stats.RowsInserted.Should().Be(12);
+        stats.RowsSkipped.Should().Be(1, "skippedNoMarket maps to RowsSkipped");
+        stats.CoveredToDate.Should().Be(new DateOnly(2026, 7, 1), "maxObservedDate is the coverage upper bound");
+        // Coverage from-date = the requested resume lower bound = watermark(2026-06-29) - default 7d.
+        stats.CoveredFromDate.Should().Be(new DateOnly(2026, 6, 22));
+    }
+
+    // ── HARTI: a disabled early-return reports Outcome=Skipped (S1 — never a green success) ────
+    [Fact]
+    public async Task Harti_Disabled_ReportsSkippedOutcome()
+    {
+        var wms = new FakeWatermarkRepository();
+        var disabled = IngestionWatermark.Create(HartiBulletinIngestionService.SourceKey);
+        disabled.Disable("manually paused");
+        wms.Seed(disabled);
+
+        var handler = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK, "{}"));
+        var svc = new HartiBulletinIngestionService(
+            ClientFrom(handler),
+            Config(("MlService:AdminApiKey", "secret-key")),
+            wms,
+            NullLogger<HartiBulletinIngestionService>.Instance);
+
+        var stats = await svc.IngestAsync(CancellationToken.None);
+
+        stats.Outcome.Should().Be(IngestionRunOutcome.Skipped, "a disabled source is a skip, not a success");
+        stats.RowsInserted.Should().BeNull();
+    }
+
+    // ── HARTI: a non-200 fail-safe early-return reports Outcome=Failed + reason (S1) ──────────
+    [Fact]
+    public async Task Harti_HttpError_ReportsFailedOutcome_WithReason_WithoutThrowing()
+    {
+        var wms = new FakeWatermarkRepository();
+        var seeded = IngestionWatermark.Create(HartiBulletinIngestionService.SourceKey);
+        seeded.RecordSuccess(new DateTime(2026, 6, 30, 6, 0, 0, DateTimeKind.Utc), new DateOnly(2026, 6, 29));
+        wms.Seed(seeded);
+
+        var handler = new StubHttpMessageHandler(_ => Json(HttpStatusCode.BadGateway, "boom"));
+        var svc = new HartiBulletinIngestionService(
+            ClientFrom(handler),
+            Config(("MlService:AdminApiKey", "secret-key")),
+            wms,
+            NullLogger<HartiBulletinIngestionService>.Instance);
+
+        var stats = await svc.IngestAsync(CancellationToken.None);
+
+        stats.Outcome.Should().Be(IngestionRunOutcome.Failed, "a real transport failure must not render as a green Succeeded run row");
+        stats.FailureReason.Should().Contain("502", "the run-row reason mirrors the watermark reason");
     }
 
     // ── HARTI: look-back window is configurable ──────────────────────────────────────────────

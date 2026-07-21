@@ -1,3 +1,6 @@
+using AgriForecast.Application.common;
+using AgriForecast.Domain.Interfaces;
+using AgriForecast.Infrastructure.Services;
 using AgriForecast.Infrastructure.Services.MarketPriceIngestion;
 using AgriForecast.Infrastructure.Services.WeatherIngestion;
 using AgriForecast.Infrastructure.Services.EconomicIngestion;
@@ -53,98 +56,89 @@ public class Worker : BackgroundService
     private async Task RunPassAsync(CancellationToken stoppingToken)
     {
         using var scope = _serviceProvider.CreateScope();
+        var runs = scope.ServiceProvider.GetRequiredService<IIngestionRunRepository>();
 
-        try
+        // One BatchId for the whole pass (config Ingestion:BatchId / env Ingestion__BatchId, else
+        // generated). Every source's IngestionRun row shares it so the pass can be reconstructed.
+        var batchId = IngestionRunAudit.ResolveBatchId(_configuration);
+        _logger.LogInformation("Ingestion pass starting. BatchId={BatchId}", batchId);
+
+        // Each source is wrapped by IngestionRunAudit: a Running row is committed before the source
+        // runs, then transitioned to Succeeded (+ counts) / Failed (+ sanitized error). The audit
+        // wrapper ALSO catches the source's exception (this is the per-source fail-isolation belt the
+        // old per-block try/catch was) and can never let an audit write break the pass.
+
+        // DAMBULLA_DEC market prices (reports counts).
+        await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, "DAMBULLA_DEC", async ct =>
         {
             var ingestion = scope.ServiceProvider.GetRequiredService<IMarketPriceIngestionService>();
             _logger.LogInformation("Market price ingestion started");
-            await ingestion.IngestAsync(stoppingToken);
+            var stats = await ingestion.IngestAsync(ct);
             _logger.LogInformation("Market price ingestion finished");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred during market price ingestion");
-        }
+            return stats;
+        }, stoppingToken);
 
-        try
+        // WEATHER (status-only — signature unchanged, so the run row carries null counts).
+        await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, "WEATHER", async ct =>
         {
             var weather = scope.ServiceProvider.GetRequiredService<IWeatherIngestionService>();
             _logger.LogInformation("Weather ingestion started");
-            await weather.IngestAsync(stoppingToken);
+            await weather.IngestAsync(ct);
             _logger.LogInformation("Weather ingestion finished");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred during weather ingestion");
-        }
+            return (IngestionRunStats?)null;
+        }, stoppingToken);
 
-        try
+        // ECONOMIC (status-only).
+        await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, "ECONOMIC", async ct =>
         {
             var economic = scope.ServiceProvider.GetRequiredService<IEconomicIngestionService>();
             _logger.LogInformation("Economic ingestion started");
-            await economic.IngestAsync(stoppingToken);
+            await economic.IngestAsync(ct);
             _logger.LogInformation("Economic ingestion finished");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred during economic ingestion");
-        }
+            return (IngestionRunStats?)null;
+        }, stoppingToken);
 
-        try
+        // NEWS (status-only).
+        await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, "NEWS", async ct =>
         {
             var news = scope.ServiceProvider.GetRequiredService<INewsIngestionService>();
             _logger.LogInformation("News ingestion started");
-            await news.IngestAsync(stoppingToken);
+            await news.IngestAsync(ct);
             _logger.LogInformation("News ingestion finished");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred during news ingestion");
-        }
+            return (IngestionRunStats?)null;
+        }, stoppingToken);
 
-        // R1.1 P1 Step 6: HARTI multi-market bulletin ingestion. Fail-isolated exactly like the
-        // blocks above — a HARTI failure NEVER aborts the pass; it is logged ERROR and the pass
-        // continues. The service itself also self-heals its watermark on failure (inner belt).
-        try
+        // R1.1 P1 Step 6: HARTI multi-market bulletin ingestion (reports counts). The service also
+        // self-heals its watermark on internal failure (inner belt); the audit wrapper is the outer.
+        await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, HartiBulletinIngestionService.SourceKey, async ct =>
         {
             var harti = scope.ServiceProvider.GetRequiredService<IHartiBulletinIngestionService>();
             _logger.LogInformation("HARTI ingestion started");
-            await harti.IngestAsync(stoppingToken);
+            var stats = await harti.IngestAsync(ct);
             _logger.LogInformation("HARTI ingestion finished");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred during HARTI ingestion");
-        }
+            return (IngestionRunStats?)stats;
+        }, stoppingToken);
 
         // R1.1 P1 Step 6: CBSL daily price report ingestion. Feature-flagged OFF by default
-        // (Disabled watermark, a deliberate no-op that is NOT a source failure). Still wrapped in
-        // its own try/catch so that, once enabled, a CBSL failure is isolated like every other source.
-        try
+        // (Disabled watermark, a deliberate no-op that is NOT a source failure). Status-only row.
+        await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, CbslPriceReportIngestionService.SourceKey, async ct =>
         {
             var cbsl = scope.ServiceProvider.GetRequiredService<ICbslPriceReportIngestionService>();
             _logger.LogInformation("CBSL ingestion started");
-            await cbsl.IngestAsync(stoppingToken);
+            await cbsl.IngestAsync(ct);
             _logger.LogInformation("CBSL ingestion finished");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred during CBSL ingestion");
-        }
+            return (IngestionRunStats?)null;
+        }, stoppingToken);
 
         // R1 P3 (86cahefbh): CBSL macro (CCPI/MEI vintage) ingestion. Feature-flagged OFF by default
-        // (Disabled gating watermark, a deliberate no-op that is NOT a source failure). Wrapped in
-        // its own try/catch so that, once enabled, a macro failure is isolated like every other source.
-        try
+        // (Disabled gating watermark, a deliberate no-op that is NOT a source failure). Status-only row.
+        await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, CbslMacroIngestionService.SourceKey, async ct =>
         {
             var cbslMacro = scope.ServiceProvider.GetRequiredService<ICbslMacroIngestionService>();
             _logger.LogInformation("CBSL macro ingestion started");
-            await cbslMacro.IngestAsync(stoppingToken);
+            await cbslMacro.IngestAsync(ct);
             _logger.LogInformation("CBSL macro ingestion finished");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred during CBSL macro ingestion");
-        }
+            return (IngestionRunStats?)null;
+        }, stoppingToken);
     }
 }

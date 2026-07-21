@@ -27,6 +27,8 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<PriceObservation> PriceObservations { get; set; }
     public DbSet<CommodityAlias> CommodityAliases { get; set; }
     public DbSet<IngestionWatermark> IngestionWatermarks { get; set; }
+    public DbSet<IngestionRun> IngestionRuns { get; set; }
+    public DbSet<IngestionVerification> IngestionVerifications { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -453,6 +455,54 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
 
             // One watermark per source — this is the business key the services resume on.
             e.HasIndex(x => x.Source).IsUnique();
+        });
+
+        // Ingestion RUN rows — one per source per pass. Net-new, additive table (no seed, no
+        // backfill). Mirrors the IngestionWatermark config discipline: enum-as-int, date-only
+        // coverage columns, 1000-char message cap on the sanitized error.
+        modelBuilder.Entity<IngestionRun>(e =>
+        {
+            e.Property(x => x.Source).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Status).HasConversion<int>().IsRequired();
+            e.Property(x => x.ErrorSummary).HasMaxLength(1000);
+
+            // Coverage window is date-only (no hidden time) — mirrors the reference-entity discipline.
+            e.Property(x => x.CoveredFromDate).HasColumnType("date");
+            e.Property(x => x.CoveredToDate).HasColumnType("date");
+
+            // Primary read path: "latest runs for a source", newest first.
+            e.HasIndex(x => new { x.Source, x.StartedUtc })
+                .IsDescending(false, true)
+                .HasDatabaseName("IX_IngestionRuns_SourceStartedUtc");
+
+            // Reconstruct a whole pass by its BatchId.
+            e.HasIndex(x => x.BatchId);
+        });
+
+        // Ingestion VERIFICATION rows — one per verification run. WRITTEN BY PYTHON later; .NET owns
+        // the SCHEMA only here. Net-new, additive (no seed, no backfill).
+        modelBuilder.Entity<IngestionVerification>(e =>
+        {
+            // Raw per-check JSON is guarded by an ISJSON check constraint so a malformed blob can
+            // never persist. nvarchar(max) (default for an unbounded required string).
+            e.ToTable(t => t.HasCheckConstraint(
+                "CK_IngestionVerifications_ChecksJson_IsJson",
+                "ISJSON([ChecksJson]) = 1"));
+
+            e.Property(x => x.OverallStatus).HasConversion<int>().IsRequired();
+            e.Property(x => x.ChecksJson).IsRequired();
+            e.Property(x => x.Summary).HasMaxLength(1000);
+
+            // Pipeline/business date is date-only (no hidden time).
+            e.Property(x => x.PipelineDate).HasColumnType("date").IsRequired();
+
+            // Primary read path: most-recent verifications first.
+            e.HasIndex(x => x.RunUtc)
+                .IsDescending()
+                .HasDatabaseName("IX_IngestionVerifications_RunUtc");
+
+            // Link a verification to its pass.
+            e.HasIndex(x => x.BatchId);
         });
 
         SeedMarkets(modelBuilder);

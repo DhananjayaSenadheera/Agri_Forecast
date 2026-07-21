@@ -63,6 +63,8 @@ public static class InfsDependencyInjection
         // (The HARTI + CBSL typed HttpClients are registered further down alongside the other
         // typed clients.)
         services.AddScoped<IIngestionWatermarkRepository, IngestionWatermarkRepository>();
+        // Ingestion run-tracking store: one IngestionRun row per source per pass (audit foundation).
+        services.AddScoped<IIngestionRunRepository, IngestionRunRepository>();
         services.AddScoped<ICbslPriceReportIngestionService, CbslPriceReportIngestionService>();
         // R1 P3 (86cahefbh): CBSL macro (CCPI/MEI vintage) ingestion service — thin, feature-flagged
         // OFF skeleton over the Python /admin/ingest-cbsl-macro seam. Its typed HttpClient is
