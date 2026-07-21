@@ -93,6 +93,20 @@ public class AdminAuthorizationWiringTests
         IsAdminLocked(controller, method).Should().BeFalse();
     }
 
+    // ── AdminIngestionController: BOTH reads are Admin-only ────────────────────────
+    // PR 3: unlike the other read endpoints (authenticated-only), the admin ingestion reads surface
+    // operational internals (source states, error summaries, coverage windows) and are Admin-locked
+    // at the controller level. Prove the [Authorize(Roles = Admin)] is actually wired on each action.
+    [Theory]
+    [InlineData(nameof(AdminIngestionController.GetStatus))]
+    [InlineData(nameof(AdminIngestionController.GetRuns))]
+    public void AdminIngestionReads_AreAdminOnly(string method)
+    {
+        IsAdminLocked(typeof(AdminIngestionController), method).Should().BeTrue(
+            $"AdminIngestionController.{method} exposes ingestion internals and must be Admin-locked");
+        IsAnonymous(typeof(AdminIngestionController), method).Should().BeFalse();
+    }
+
     // ── Auth endpoints stay anonymous by design ────────────────────────────────────
     [Theory]
     [InlineData(nameof(AuthController.Register))]
