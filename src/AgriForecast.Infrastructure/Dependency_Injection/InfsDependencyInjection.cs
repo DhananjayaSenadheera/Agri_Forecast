@@ -58,6 +58,13 @@ public static class InfsDependencyInjection
         // API-11: read-only economic-indicator + macro-series store (GET /api/indicators,
         // /api/macro-series, /api/indicators/catalog) for the admin Indicators page (ADM-6).
         services.AddScoped<IIndicatorReadStore, AgriForecast.Infrastructure.Services.IndicatorRead.IndicatorReadStore>();
+        // PR 3: read-only ingestion-audit store (GET /api/admin/ingestion/status + /runs) for the
+        // admin ingestion page. Reads only — uses the normal request-scoped DbContext (unlike the
+        // write-side IngestionRunRepository, which isolates every write in its own scope).
+        services.AddScoped<IIngestionReadStore, AgriForecast.Infrastructure.Services.IngestionRead.IngestionReadStore>();
+        // PR 3: resolves the status handler's config values (Ingestion:ServiceAddress /
+        // RunningStalenessMinutes) at the Infrastructure boundary, keeping config out of Application.
+        services.AddScoped<IIngestionStatusSettings, AgriForecast.Infrastructure.Services.IngestionRead.IngestionStatusSettings>();
 
         // R1.1 P1 Step 6: per-source ingestion watermark store + the CBSL ingestion service.
         // (The HARTI + CBSL typed HttpClients are registered further down alongside the other
