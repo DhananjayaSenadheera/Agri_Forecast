@@ -175,6 +175,31 @@ land in Python (P3+) and could theoretically double-write the same
 (crop, date, market) triple, the guard is already live and already tested,
 not bolted on retroactively after a real double-count incident.
 
+R2 Step 2 (DEC -> PriceObservations mirror, ClickUp 86cajtx2k) update: DEC/
+HARTI now legitimately COEXIST at the SAME (CropId, ObservedDate, MarketId)
+triple at Dambulla -- HARTI already parses a Dambulla column from its own
+bulletins (Step 6 widened it to 10 markets including Dambulla), and the
+mirror additively writes Source='DAMBULLA_DEC' rows at the same market. This
+is BY DESIGN (the whole point of the refined-layout mirror -- PriceObservations
+becomes the single table holding every source), not a double-count bug, so
+the naive ``COUNT(DISTINCT Source) > 1`` check would now fire ~8,096 false
+positives (live-measured overlap at Dambulla alone) and stop meaning anything.
+_ALLOWED_COEXISTING_SOURCES = {"HARTI", "DAMBULLA_DEC"} is the one, narrow,
+named carve-out: a triple is flagged ONLY if its actual source SET is
+anything OTHER than exactly this pair (a genuine 3rd source appearing, or an
+unexpected two-source combination that isn't this specific, adjudicated
+overlap) -- so the check still catches every OTHER double-write scenario it
+was built to catch; it does not weaken the general N-source guard, it only
+recognises the one pairing this project has explicitly decided is correct.
+
+SF2 (reviewer should-fix): the carve-out is additionally scoped to the
+DAMBULLA MARKET ONLY (resolved by MarketCode, fail-closed via
+canonical.resolve_market_id_by_code -- see _DAMBULLA_MARKET_CODE below). DEC
+never legitimately writes to any market but Dambulla, so a HARTI+DAMBULLA_DEC
+pair appearing anywhere else is NOT the adjudicated overlap -- it is exactly
+a mis-resolved-market bug (e.g. a future mirror change that accidentally
+targets Pettah) and must still raise.
+
 ============================================================================
 6. Macro point-in-time guard (P3 stub, generic + reusable now)
 ============================================================================
@@ -668,20 +693,50 @@ def clear_outlier_hold(
 # 4. assert_no_source_duplicates()
 # ============================================================================
 
+# R2 Step 2 (DEC -> PriceObservations mirror): the ONE named pair of sources
+# that may legitimately coexist at the same (CropId, ObservedDate, MarketId)
+# triple -- both cover Dambulla by design (HARTI's own bulletin Dambulla
+# column, since Step 6; the DEC mirror, additive). A triple whose source set
+# is anything OTHER than exactly this pair (a 3rd source, or two sources that
+# are not this specific pair) is still a real violation -- see module
+# docstring Section 5 for the full rationale.
+_ALLOWED_COEXISTING_SOURCES = frozenset({"HARTI", "DAMBULLA_DEC"})
+
+# SF2 (reviewer should-fix, R2 Step 2 gate): the allowance above is scoped to
+# the DAMBULLA market row ONLY -- DEC never legitimately writes anywhere
+# else, so a HARTI+DAMBULLA_DEC pair appearing at any OTHER market is not the
+# adjudicated overlap, it is exactly the double-write bug this check exists
+# to catch (e.g. a hypothetical mis-resolved-market mirror bug writing DEC
+# rows at Pettah). Resolved BY CODE at call time (never a hardcoded GUID --
+# GUIDs are per-DB), fail-closed: a missing Dambulla Markets row raises
+# rather than silently widening (or silently narrowing to nothing) the
+# allowance -- see canonical.resolve_market_id_by_code.
+_DAMBULLA_MARKET_CODE = "MKT00000001"
+
+
 def assert_no_source_duplicates(engine: "sa.engine.Engine | None" = None) -> int:
     """Assert no (CropId, ObservedDate, MarketId) triple in PriceObservations
-    is present from TWO OR MORE distinct Source values.
+    is present from a Source combination OTHER than the one adjudicated,
+    by-design overlap ({"HARTI", "DAMBULLA_DEC"} AT THE DAMBULLA MARKET ONLY
+    -- see _ALLOWED_COEXISTING_SOURCES / _DAMBULLA_MARKET_CODE).
 
-    Real SQL check (GROUP BY ... HAVING COUNT(DISTINCT Source) > 1),
-    scoped to CropId IS NOT NULL (an unresolved crop has no stable identity
+    Two-step SQL: (1) find candidate triples with COUNT(DISTINCT Source) > 1
+    (cheap, set-based); (2) pull the actual Source values for exactly those
+    candidate triples and, in Python, flag only the ones whose (source SET,
+    MarketId) is not precisely (the allowed pair, Dambulla). This still
+    catches every double-write scenario the check was built for (a genuine
+    3rd source, an unexpected 2-source combination, OR the adjudicated pair
+    appearing at a market other than Dambulla) -- it only recognises the one
+    pairing AND location this project has explicitly decided is correct, per
+    R2 Step 2.
+
+    Scoped to CropId IS NOT NULL (an unresolved crop has no stable identity
     to dedup on -- see heal_price_observation_crops() for that separate
-    concern). Today only HARTI writes PriceObservations, so this always
-    passes trivially, but it is real, runnable SQL now so the guard is
-    already in place (and already tested) the day CBSL/DEC land in Python
-    and could double-write the same (crop, date, market) triple -- the
-    double-count risk this whole check exists to catch per the task brief.
+    concern).
 
     Raises:
+        RuntimeError if the Dambulla Markets row cannot be resolved (fail-
+        closed -- see canonical.resolve_market_id_by_code).
         AssertionError listing the offending (CropId, ObservedDate,
         MarketId) triples (capped at 20 shown) if any are found.
 
@@ -689,17 +744,24 @@ def assert_no_source_duplicates(engine: "sa.engine.Engine | None" = None) -> int
         Number of distinct (CropId, ObservedDate, MarketId) triples
         examined (i.e. checked clean).
     """
+    from .canonical import resolve_market_id_by_code
+
     eng = engine if engine is not None else get_engine()
+    dambulla_market_id = resolve_market_id_by_code(eng, market_code=_DAMBULLA_MARKET_CODE)
+
     with eng.connect() as conn:
-        dups = conn.execute(sa.text(
-            """SELECT CONVERT(varchar(36), CropId) AS CropId,
-                      CONVERT(varchar(10), ObservedDate) AS ObservedDate,
-                      CONVERT(varchar(36), MarketId) AS MarketId,
-                      COUNT(DISTINCT Source) AS n_sources
-               FROM PriceObservations
-               WHERE CropId IS NOT NULL
-               GROUP BY CropId, ObservedDate, MarketId
-               HAVING COUNT(DISTINCT Source) > 1"""
+        candidate_rows = conn.execute(sa.text(
+            """SELECT po.CropId, po.ObservedDate, po.MarketId, po.Source
+               FROM PriceObservations po
+               JOIN (
+                   SELECT CropId, ObservedDate, MarketId
+                   FROM PriceObservations
+                   WHERE CropId IS NOT NULL
+                   GROUP BY CropId, ObservedDate, MarketId
+                   HAVING COUNT(DISTINCT Source) > 1
+               ) dk ON dk.CropId = po.CropId
+                   AND dk.ObservedDate = po.ObservedDate
+                   AND dk.MarketId = po.MarketId"""
         )).fetchall()
 
         total = conn.execute(sa.text(
@@ -711,21 +773,44 @@ def assert_no_source_duplicates(engine: "sa.engine.Engine | None" = None) -> int
                WHERE CropId IS NOT NULL"""
         )).scalar() or 0
 
-    if dups:
+    from collections import defaultdict
+    by_triple: dict[tuple, set] = defaultdict(set)
+    for crop_id, observed_date, market_id, source in candidate_rows:
+        key = (str(crop_id), str(observed_date), str(market_id))
+        by_triple[key].add(source)
+
+    dambulla_key = str(dambulla_market_id).upper()
+
+    def _is_allowed(key: tuple, sources: set) -> bool:
+        _crop_id, _obs_date, market_id = key
+        return sources == _ALLOWED_COEXISTING_SOURCES and market_id.upper() == dambulla_key
+
+    violations = {
+        key: sources for key, sources in by_triple.items()
+        if not _is_allowed(key, sources)
+    }
+    n_allowed = len(by_triple) - len(violations)
+
+    if violations:
         dup_lines = "\n".join(
-            f"  CropId={r[0]} ObservedDate={r[1]} MarketId={r[2]} "
-            f"n_sources={r[3]}"
-            for r in dups[:20]
+            f"  CropId={crop_id} ObservedDate={obs_date} MarketId={market_id} "
+            f"sources={sorted(sources)}"
+            for (crop_id, obs_date, market_id), sources in list(violations.items())[:20]
         )
         raise AssertionError(
-            f"SOURCE DUPLICATION: {len(dups)} (CropId, ObservedDate, "
-            f"MarketId) triples exist from more than one Source:\n{dup_lines}"
-            + (f"\n  ... and {len(dups) - 20} more" if len(dups) > 20 else "")
+            f"SOURCE DUPLICATION: {len(violations)} (CropId, ObservedDate, "
+            f"MarketId) triples exist from a Source combination/location "
+            f"other than the adjudicated {sorted(_ALLOWED_COEXISTING_SOURCES)} "
+            f"overlap AT DAMBULLA ({dambulla_key}) ONLY:"
+            f"\n{dup_lines}"
+            + (f"\n  ... and {len(violations) - 20} more" if len(violations) > 20 else "")
         )
 
     logger.info(
         "assert_no_source_duplicates: PASSED -- %d (CropId, ObservedDate, "
-        "MarketId) triples examined, 0 cross-source duplicates", total,
+        "MarketId) triples examined, 0 unexpected cross-source duplicates "
+        "(%d legitimate %s overlaps allowed by design)",
+        total, n_allowed, sorted(_ALLOWED_COEXISTING_SOURCES),
     )
     return total
 

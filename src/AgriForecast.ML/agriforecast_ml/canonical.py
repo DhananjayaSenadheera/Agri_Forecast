@@ -131,6 +131,13 @@ logger = logging.getLogger(__name__)
 HARTI_UNIT_RAW = "Rs/kg"
 HARTI_UNIT_CONVERSION_FACTOR = 1.0
 
+# Dambulla DEC live API — confirmed Rs/kg (MarketPrices.MinPrice/MaxPrice are
+# already the LKR/kg figures the .NET MarketPriceIngestionService stores; see
+# dec_mirror.py, which is the only writer of this source into
+# PriceObservations).
+DEC_UNIT_RAW = "Rs/kg"
+DEC_UNIT_CONVERSION_FACTOR = 1.0
+
 
 def _parse_guid(raw) -> uuid.UUID:
     """Normalise a SQL Server Guid column value (str or bytes) to uuid.UUID.
@@ -378,3 +385,33 @@ def get_feature_safe_market_ids(
     result = {_parse_guid(r[0]) for r in rows}
     logger.info("get_feature_safe_market_ids: %d feature-safe markets", len(result))
     return result
+
+
+def resolve_market_id_by_code(
+    engine: "sa.engine.Engine | None" = None,
+    *,
+    market_code: str,
+) -> uuid.UUID:
+    """Resolve a Markets.Id at runtime BY CODE (never a hardcoded GUID — GUIDs
+    are per-DB). Generic counterpart to harti/loader.py's
+    ``_dambulla_market_id`` (same contract, same fail-closed behaviour),
+    promoted here so any future source writer (dec_mirror.py today; CBSL/DEC
+    Python writers later) resolves a market row through one shared function
+    instead of re-deriving the lookup per module.
+
+    Raises RuntimeError if no Markets row has this MarketCode — fails loudly
+    rather than writing NULL/a guessed GUID.
+    """
+    eng = engine if engine is not None else get_engine()
+    with eng.connect() as conn:
+        row = conn.execute(
+            sa.text("SELECT Id FROM Markets WHERE MarketCode = :code"),
+            {"code": market_code},
+        ).fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            f"Market row not found (MarketCode={market_code!r}) — refusing to "
+            "write with a NULL/guessed MarketId."
+        )
+    return _parse_guid(row[0])

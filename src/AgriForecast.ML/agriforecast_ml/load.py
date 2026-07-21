@@ -161,7 +161,22 @@ def _market_slug(name: str) -> str:
     return re.sub(r"[^0-9A-Za-z]", "", first)
 
 
-def load_price_observations() -> pd.DataFrame:
+# R2 Step 2 (DEC -> PriceObservations mirror, ClickUp 86cajtx2k): HARTI already
+# writes Dambulla rows into PriceObservations, and the mirror additively writes
+# Source='DAMBULLA_DEC' rows at the SAME Dambulla market -- a source-agnostic
+# per-(market,date) aggregation here would silently BLEND the two sources'
+# prices the moment the mirror backfill runs (live-measured 8,096 overlapping
+# (crop, date) pairs at Dambulla alone). This constant freezes today's exact
+# training-frame identity (only HARTI has ever fed CropFeatureDaily's spread
+# features) so the mirror is provably additive to PriceObservations without
+# moving v16's feature frame. Widening this to include DEC is a DELIBERATE,
+# SEPARATE future decision (more market-spread coverage), never an accidental
+# side effect of the mirror landing. See dec_mirror.py + the R2 Step 2 task
+# report's identity proof (tests/test_load_price_observations_source_guard.py).
+_MARKET_SPREAD_SOURCE = "HARTI"
+
+
+def load_price_observations(*, source: str = _MARKET_SPREAD_SOURCE) -> pd.DataFrame:
     """Per-(market, crop, date) confirmed prices from PriceObservations, restricted
     to the FEATURE-SAFE market set, for the cross-market spread features (P4).
 
@@ -180,6 +195,13 @@ def load_price_observations() -> pd.DataFrame:
         must never reach features.
       - MaxPrice > 0 AND CropId IS NOT NULL -- mirrors load_prices()'s validity
         gate; zero/NULL-price rows are absent signal, not a 0 observation.
+      - Source = source (default 'HARTI', i.e. _MARKET_SPREAD_SOURCE) -- R2 Step 2
+        identity guard: PriceObservations can legitimately hold MULTIPLE sources
+        at the same market (the DEC mirror is additive), but this loader freezes
+        the training frame to exactly what it has always read. A future,
+        deliberate decision to widen market-spread coverage to DEC would pass
+        source=None (not implemented here -- no caller does this today; adding it
+        requires a fresh gate/retrain, not a silent behaviour change).
 
     Per-market AvgPrice = (MinPrice + MaxPrice) / 2 -- the SAME midpoint
     convention load_prices() uses for MarketPrices (PriceObservations'
@@ -206,6 +228,8 @@ def load_price_observations() -> pd.DataFrame:
     id_list = [str(i) for i in safe_ids]
     placeholders = ", ".join(f":m{i}" for i in range(len(id_list)))
     params = {f"m{i}": v for i, v in enumerate(id_list)}
+    params["source"] = source
+    source_filter = "AND po.Source = :source" if source is not None else ""
     sql = f"""
         SELECT m.Name AS MarketName, po.CropId, po.ObservedDate,
                po.MinPrice, po.MaxPrice
@@ -215,6 +239,7 @@ def load_price_observations() -> pd.DataFrame:
           AND po.IsUnitConfirmed = 1
           AND po.MaxPrice > 0
           AND po.CropId IS NOT NULL
+          {source_filter}
     """
     try:
         import sqlalchemy as sa
