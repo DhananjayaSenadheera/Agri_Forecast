@@ -40,6 +40,18 @@ COPY ingest_news.py .
 COPY score_news.py .
 # ingest_cbsl_macro.py is invoked by run-monthly.sh against this image.
 COPY ingest_cbsl_macro.py .
+# ingest_harti_service.py is lazily imported by the /admin/ingest-harti
+# endpoint (serving/app.py:256). SF3 (R2 Step 2 reviewer should-fix): this was
+# a PRE-EXISTING latent gap -- the script was never COPY'd here, so that
+# endpoint 500s in a freshly built image (same class of bug as the
+# ingest_cbsl_macro.py incident). Fixed here since this Dockerfile is already
+# being touched in this change; unrelated to the DEC mirror itself.
+COPY ingest_harti_service.py .
+# mirror_dec_prices.py (R2 Step 2, DEC -> PriceObservations mirror) is invoked
+# by run-daily.sh, one step after market ingest / before build_features. A
+# missed COPY here is exactly the ingest_cbsl_macro.py class of bug (script
+# absent from a freshly-built image) -- see run-daily.sh's daily wiring.
+COPY mirror_dec_prices.py .
 
 EXPOSE 8077
 

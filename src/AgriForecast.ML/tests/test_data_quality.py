@@ -95,9 +95,15 @@ def _mock_engine_sequenced(payloads: list) -> MagicMock:
         if isinstance(payload, dict) and "scalar" in payload:
             res.scalar.return_value = payload["scalar"]
             res.fetchall.return_value = []
+            res.fetchone.return_value = None
+        elif isinstance(payload, dict) and "fetchone" in payload:
+            res.fetchone.return_value = payload["fetchone"]
+            res.fetchall.return_value = []
+            res.scalar.return_value = None
         else:
             res.fetchall.return_value = payload
             res.scalar.return_value = None
+            res.fetchone.return_value = None
         return res
 
     conn.execute.side_effect = _execute
@@ -753,15 +759,29 @@ class TestNoLeakage:
 # 6. assert_no_source_duplicates()
 # ===========================================================================
 
+DAMBULLA_MARKET_ID = "11111111-1111-1111-1111-111111111111"
+PETTAH_MARKET_ID = "22222222-2222-2222-2222-222222222222"
+
+
+def _resolve_dambulla_payload(market_id: str = DAMBULLA_MARKET_ID) -> dict:
+    """The resolve_market_id_by_code(MKT00000001) payload -- ALWAYS the
+    first conn.execute() call assert_no_source_duplicates() issues, per
+    SF2 (reviewer should-fix): the {HARTI, DAMBULLA_DEC} coexistence
+    allowance is scoped to this resolved Dambulla market id."""
+    return {"fetchone": (market_id,)}
+
+
 class TestNoSourceDuplicates:
     def test_passes_cleanly_when_no_duplicates_found(self):
-        engine, conn, _ = _mock_engine_sequenced([[], {"scalar": 42}])
+        engine, conn, _ = _mock_engine_sequenced(
+            [_resolve_dambulla_payload(), [], {"scalar": 42}])
         result = dq.assert_no_source_duplicates(engine)
         assert result == 42
 
     def test_raises_with_offending_triples_when_duplicates_found(self):
         dup_row = ("crop-1", "2025-01-01", "market-1", 2)
-        engine, conn, _ = _mock_engine_sequenced([[dup_row]])
+        engine, conn, _ = _mock_engine_sequenced(
+            [_resolve_dambulla_payload(), [dup_row]])
 
         with pytest.raises(AssertionError) as exc_info:
             dq.assert_no_source_duplicates(engine)
@@ -773,21 +793,90 @@ class TestNoSourceDuplicates:
         assert "market-1" in msg
 
     def test_query_shape_is_real_group_by_having_count_distinct_source(self):
-        engine, conn, _ = _mock_engine_sequenced([[], {"scalar": 0}])
+        engine, conn, _ = _mock_engine_sequenced(
+            [_resolve_dambulla_payload(), [], {"scalar": 0}])
         dq.assert_no_source_duplicates(engine)
 
-        first_call_sql = str(conn.execute.call_args_list[0][0][0])
-        assert "GROUP BY CropId, ObservedDate, MarketId" in first_call_sql
-        assert "HAVING COUNT(DISTINCT Source) > 1" in first_call_sql
-        assert "CropId IS NOT NULL" in first_call_sql
+        # Call 0 is the Dambulla market-id resolve; call 1 is the candidate
+        # (CropId, ObservedDate, MarketId, Source) query.
+        candidate_call_sql = str(conn.execute.call_args_list[1][0][0])
+        assert "GROUP BY CropId, ObservedDate, MarketId" in candidate_call_sql
+        assert "HAVING COUNT(DISTINCT Source) > 1" in candidate_call_sql
+        assert "CropId IS NOT NULL" in candidate_call_sql
 
     def test_scoped_to_cropid_not_null(self):
         """An unresolved-crop row (CropId IS NULL) must not be considered
         for cross-source duplication -- it has no stable dedup identity."""
-        engine, conn, _ = _mock_engine_sequenced([[], {"scalar": 0}])
+        engine, conn, _ = _mock_engine_sequenced(
+            [_resolve_dambulla_payload(), [], {"scalar": 0}])
+        dq.assert_no_source_duplicates(engine)
+        candidate_call_sql = str(conn.execute.call_args_list[1][0][0])
+        assert "CropId IS NOT NULL" in candidate_call_sql
+
+    def test_missing_dambulla_market_row_raises(self):
+        """Fail-closed: if the Dambulla Markets row cannot be resolved, the
+        check must raise rather than silently applying (or silently NOT
+        applying) the coexistence allowance."""
+        engine, conn, _ = _mock_engine_sequenced([{"fetchone": None}])
+        with pytest.raises(RuntimeError, match="MKT00000001"):
+            dq.assert_no_source_duplicates(engine)
+
+    # -----------------------------------------------------------------
+    # SF2 (reviewer should-fix): the {HARTI, DAMBULLA_DEC} allowance is
+    # scoped to the DAMBULLA market only.
+    # -----------------------------------------------------------------
+    def test_harti_dec_pair_at_dambulla_is_allowed(self):
+        """The adjudicated overlap (exactly {HARTI, DAMBULLA_DEC} AT the
+        resolved Dambulla market) must NOT raise."""
+        dup_rows = [
+            ("crop-1", "2025-06-01", DAMBULLA_MARKET_ID, "HARTI"),
+            ("crop-1", "2025-06-01", DAMBULLA_MARKET_ID, "DAMBULLA_DEC"),
+        ]
+        engine, conn, _ = _mock_engine_sequenced(
+            [_resolve_dambulla_payload(), dup_rows, {"scalar": 100}])
+        result = dq.assert_no_source_duplicates(engine)  # must not raise
+        assert result == 100
+
+    def test_harti_dec_pair_at_a_non_dambulla_market_still_raises(self):
+        """SF2's actual target: the SAME allowed source pair appearing at a
+        market OTHER than Dambulla (e.g. a hypothetical mis-resolved-market
+        mirror bug writing DEC rows at Pettah) must still be flagged as a
+        real violation, not silently absorbed by the carve-out."""
+        dup_rows = [
+            ("crop-1", "2025-06-01", PETTAH_MARKET_ID, "HARTI"),
+            ("crop-1", "2025-06-01", PETTAH_MARKET_ID, "DAMBULLA_DEC"),
+        ]
+        engine, conn, _ = _mock_engine_sequenced(
+            [_resolve_dambulla_payload(), dup_rows])
+
+        with pytest.raises(AssertionError) as exc_info:
+            dq.assert_no_source_duplicates(engine)
+
+        msg = str(exc_info.value)
+        assert "SOURCE DUPLICATION" in msg
+        assert "crop-1" in msg
+        assert PETTAH_MARKET_ID in msg
+
+    def test_dambulla_market_id_resolved_by_code_not_hardcoded(self):
+        engine, conn, _ = _mock_engine_sequenced(
+            [_resolve_dambulla_payload(), [], {"scalar": 0}])
         dq.assert_no_source_duplicates(engine)
         first_call_sql = str(conn.execute.call_args_list[0][0][0])
-        assert "CropId IS NOT NULL" in first_call_sql
+        assert "MarketCode" in first_call_sql
+        first_call_params = conn.execute.call_args_list[0][0][1]
+        assert first_call_params == {"code": dq._DAMBULLA_MARKET_CODE}
+
+    def test_market_id_comparison_is_case_insensitive(self):
+        """SQL Server GUID string casing can vary by driver -- the Dambulla
+        match must not falsely reject a same-GUID-different-case pairing."""
+        dup_rows = [
+            ("crop-1", "2025-06-01", DAMBULLA_MARKET_ID.upper(), "HARTI"),
+            ("crop-1", "2025-06-01", DAMBULLA_MARKET_ID.upper(), "DAMBULLA_DEC"),
+        ]
+        engine, conn, _ = _mock_engine_sequenced(
+            [_resolve_dambulla_payload(DAMBULLA_MARKET_ID.lower()), dup_rows, {"scalar": 1}])
+        result = dq.assert_no_source_duplicates(engine)  # must not raise
+        assert result == 1
 
 
 # ===========================================================================
