@@ -52,6 +52,10 @@ COPY ingest_harti_service.py .
 # missed COPY here is exactly the ingest_cbsl_macro.py class of bug (script
 # absent from a freshly-built image) -- see run-daily.sh's daily wiring.
 COPY mirror_dec_prices.py .
+# verify_ingestion.py (post-ingestion 14-check verification battery) is
+# invoked by run-daily.sh AFTER mirror_dec_prices.py / BEFORE build_features.
+# Same class of bug as above if omitted -- see agriforecast_ml/ingest_verify.py.
+COPY verify_ingestion.py .
 
 EXPOSE 8077
 
