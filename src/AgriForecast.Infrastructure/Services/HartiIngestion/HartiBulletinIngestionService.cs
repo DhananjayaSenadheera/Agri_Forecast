@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using AgriForecast.Application.common;
 using AgriForecast.Domain.Interfaces;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -76,7 +77,7 @@ public class HartiBulletinIngestionService : IHartiBulletinIngestionService
         _logger = logger;
     }
 
-    public async Task IngestAsync(CancellationToken ct)
+    public async Task<IngestionRunStats> IngestAsync(CancellationToken ct)
     {
         var watermark = await _watermarks.GetOrCreateAsync(SourceKey, ct: ct);
 
@@ -85,7 +86,8 @@ public class HartiBulletinIngestionService : IHartiBulletinIngestionService
             _logger.LogInformation(
                 "HARTI ingestion: source is DISABLED ({Reason}) — skipping (not a failure).",
                 watermark.LastMessage ?? "no reason recorded");
-            return;
+            // Expressive outcome: a disabled source is a SKIP, not a green success (S1).
+            return new IngestionRunStats(Outcome: IngestionRunOutcome.Skipped);
         }
 
         // Fail loud on missing admin key (mirrors NewsIngestionService / SqlDbService F-01 guard):
@@ -130,9 +132,12 @@ public class HartiBulletinIngestionService : IHartiBulletinIngestionService
                 + "If this is a first-run cold backfill (empty watermark), the full ~3000-PDF corpus "
                 + "may exceed the HTTP timeout — seed via the ingest_harti.py CLI once (no HTTP timeout), "
                 + "then the incremental Worker passes take over. See docs.");
-            watermark.RecordFailure("Transport failure calling /admin/ingest-harti (first-run backfill may exceed the HTTP timeout — seed via ingest_harti.py CLI, see docs).");
+            const string transportReason = "Transport failure calling /admin/ingest-harti (first-run backfill may exceed the HTTP timeout — seed via ingest_harti.py CLI, see docs).";
+            watermark.RecordFailure(transportReason);
             await _watermarks.SaveChangesAsync(ct);
-            return;
+            // Fail-safe but EXPRESSIVE (S1): never throws to the Worker, yet the run row is marked
+            // Failed with the same reason the watermark got — not a green Succeeded row.
+            return new IngestionRunStats(Outcome: IngestionRunOutcome.Failed, FailureReason: transportReason);
         }
 
         using (resp)
@@ -143,9 +148,10 @@ public class HartiBulletinIngestionService : IHartiBulletinIngestionService
                 _logger.LogWarning(
                     "HARTI ingestion: ML /admin/ingest-harti returned {StatusCode}. Body: {Body}",
                     (int)resp.StatusCode, body);
-                watermark.RecordFailure($"ML returned {(int)resp.StatusCode}.");
+                var statusReason = $"ML returned {(int)resp.StatusCode}.";
+                watermark.RecordFailure(statusReason);
                 await _watermarks.SaveChangesAsync(ct);
-                return;
+                return new IngestionRunStats(Outcome: IngestionRunOutcome.Failed, FailureReason: statusReason);
             }
 
             IngestHartiResponse? result;
@@ -156,9 +162,10 @@ public class HartiBulletinIngestionService : IHartiBulletinIngestionService
             catch (JsonException ex)
             {
                 _logger.LogWarning(ex, "HARTI ingestion: could not parse /admin/ingest-harti response.");
-                watermark.RecordFailure("Unparseable /admin/ingest-harti response.");
+                const string parseReason = "Unparseable /admin/ingest-harti response.";
+                watermark.RecordFailure(parseReason);
                 await _watermarks.SaveChangesAsync(ct);
-                return;
+                return new IngestionRunStats(Outcome: IngestionRunOutcome.Failed, FailureReason: parseReason);
             }
 
             _logger.LogInformation(
@@ -185,6 +192,15 @@ public class HartiBulletinIngestionService : IHartiBulletinIngestionService
                 newest,
                 $"inserted={result?.PriceObservations?.Inserted ?? 0}, updated={result?.PriceObservations?.Updated ?? 0}");
             await _watermarks.SaveChangesAsync(ct);
+
+            // Map the counts the Python side returned onto the source's IngestionRun row. Coverage
+            // window = the requested resume lower bound (sinceDate) .. the newest landed ObservedDate.
+            // "updated" has no run-stats column and is dropped from the audit row (still logged above).
+            return new IngestionRunStats(
+                CoveredFromDate: sinceDate,
+                CoveredToDate: newest,
+                RowsInserted: result?.PriceObservations?.Inserted ?? 0,
+                RowsSkipped: result?.PriceObservations?.SkippedNoMarket ?? 0);
         }
     }
 

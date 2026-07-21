@@ -10,6 +10,11 @@
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.2" />
     <PackageReference Include="FluentAssertions" Version="8.10.0" />
+    <!-- SQLite EF provider — used only to pin the run-tracking context-isolation guarantee (B1):
+         an audit write must run on its own ChangeTracker and never flush the ingestion context.
+         SQLite (relational) is used rather than the InMemory provider because the production model
+         seeds Market rows relying on a store default (IsEconomicCenter), which InMemory rejects. -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.12" />
     <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.9" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="Moq" Version="4.20.72" />

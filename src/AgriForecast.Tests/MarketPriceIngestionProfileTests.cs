@@ -138,6 +138,25 @@ public class MarketPriceIngestionProfileTests
         return (svc, crops, profiles, prices, aliasRepo, uow);
     }
 
+    // ── Run-tracking stats: IngestAsync returns the SAME counts it already logs ───────────────
+    // (ingestion run-tracking foundation). The Worker attaches these to the source's IngestionRun
+    // row; the service must not recount — RowsSkipped folds existing-date + zero-price skips, and
+    // RowsFetched stays null because the loop tracks no fetched total.
+    [Fact]
+    public async Task IngestAsync_ReturnsStats_MappingInsertedSkippedAndDistinctCrops()
+    {
+        // One feed item (product 1) with no pre-existing crop/alias -> provisions a crop + inserts 1.
+        var (svc, _, _, _, _, _) = Build(new SingleItemDambullaClient(), maxProductId: "1",
+                                         aliases: new FakeGenericRepository<CommodityAlias>());
+
+        var stats = await svc.IngestAsync(CancellationToken.None);
+
+        stats.RowsInserted.Should().Be(1, "the single feed item lands as one insert");
+        stats.RowsSkipped.Should().Be(0, "nothing was skipped this run");
+        stats.DistinctCrops.Should().Be(1, "the one provisioned crop is the only distinct crop resolved");
+        stats.RowsFetched.Should().BeNull("the loop tracks no fetched total — null is the honest value");
+    }
+
     // ── Self-heal: a crop with no profile gets a PENDING one ─────────────────────────────────
 
     [Fact]

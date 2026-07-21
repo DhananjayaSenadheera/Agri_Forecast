@@ -58,7 +58,7 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         _codeSettings = codeSettings;
     }
 
-    public async Task IngestAsync(CancellationToken ct)
+    public async Task<IngestionRunStats> IngestAsync(CancellationToken ct)
     {
         var maxProductId = int.Parse(_config["MarketPriceSources:DambullaDec:MaxProductId"] ?? "101");
 
@@ -137,6 +137,8 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         int zeroSkipped = 0;
         int newCropsFromFeed = 0;
         int failedProducts = 0;
+        // Distinct crops actually TOUCHED (inserted) this pass — not the whole ~96-crop alias route.
+        var insertedCropIds = new HashSet<Guid>();
 
         // 4. Pull the latest prices, creating crops on the fly for brand-new products.
         for (int productId = 1; productId <= maxProductId; productId++)
@@ -194,6 +196,11 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
                     await _marketPriceRepository.AddRangeAsync(toInsert, ct);
                     await _unitofWorkRepository.CommitAsync();
                     inserted += toInsert.Count;
+                    // Only crops on rows that actually committed count toward DistinctCrops.
+                    // (Every inserted row carries a non-null CropId — it is resolved/provisioned above.)
+                    foreach (var mp in toInsert)
+                        if (mp.CropId is Guid insertedCropId)
+                            insertedCropIds.Add(insertedCropId);
                 }
             }
             catch (Exception ex)
@@ -206,6 +213,17 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         _logger.LogInformation(
             "Dambulla ingestion completed. Inserted={Inserted}, SkippedExisting={Skipped}, ZeroSkipped={ZeroSkipped}, CropsAutoCreated={CropsAutoCreated}, NewCropsFromFeed={NewCropsFromFeed}, Backfilled={Backfilled}, FailedProducts={FailedProducts}",
             inserted, skipped, zeroSkipped, cropsAutoCreated, newCropsFromFeed, backfilled, failedProducts);
+
+        // Return the SAME counts already logged (no recount) for the source's IngestionRun row.
+        // RowsSkipped folds both dedup-skips (existing dates) and zero-price market-closed skips.
+        // DistinctCrops (S3) is the number of distinct crops on rows actually INSERTED this pass —
+        // NOT the whole ~96-crop alias route, which would report ~96 every pass regardless of work
+        // done. RowsFetched / coverage dates are left null — the loop tracks no fetched total or date
+        // window, and null is the honest "not tracked" value rather than a fabricated number.
+        return new IngestionRunStats(
+            RowsInserted: inserted,
+            RowsSkipped: skipped + zeroSkipped,
+            DistinctCrops: insertedCropIds.Count);
     }
 
     // Builds the governing resolution lookup: feed ProductId -> CropId, from ACTIVE DEC-scoped
