@@ -564,19 +564,39 @@ class TestFruitLivePins:
             )
 
     def test_backfilled_fruit_rows_have_no_market_prices_rows(self):
-        """Live proof mirroring TestFruitMarketPricesIsolation: zero
-        MarketPrices rows exist for any of the 4 fruit CropIds, even after
-        the full backfill."""
+        """Live proof mirroring TestFruitMarketPricesIsolation.
+
+        REPINNED 2026-07-21 (was stale since 2026-07-17): PR #38's gated
+        adoption deliberately ran a ONE-TIME MarketPrices backfill for
+        Ambul FRT000003 (ext -26) and Seeni FRT000006 (ext -27) -- 2,173
+        rows each -- superseding the original all-fruits-zero isolation
+        for those two crops only. The pin was measured pre-apply (811
+        baseline) and went stale when the backfill was applied post-merge.
+
+        The contract now: NON-adopted fruits (Kolikuttu FRT000005, Papaya
+        FRT000018) still have ZERO HARTI MarketPrices rows, and the adopted
+        pair stays EXACTLY at the one-time backfill count under the correct
+        synthetic ext ids -- equality catches any accidental ongoing fruit
+        splice into MarketPrices (the daily job must never grow these)."""
         engine = _db_or_skip()
         with engine.connect() as conn:
-            row = conn.execute(sa.text(
-                """SELECT COUNT(*)
+            rows = conn.execute(sa.text(
+                """SELECT c.CropCode, mp.ExternalProductId, COUNT(*)
                    FROM MarketPrices mp
                    JOIN Crops c ON c.Id = mp.CropId
                    WHERE c.CropCode IN ('FRT000003', 'FRT000005', 'FRT000006', 'FRT000018')
-                     AND mp.Source = 'HARTI'"""
-            )).fetchone()
-        assert row[0] == 0
+                     AND mp.Source = 'HARTI'
+                   GROUP BY c.CropCode, mp.ExternalProductId"""
+            )).fetchall()
+        counts = {(r[0], r[1]): r[2] for r in rows}
+        assert counts == {
+            ("FRT000003", -26): 2173,
+            ("FRT000006", -27): 2173,
+        }, (
+            "HARTI fruit MarketPrices rows deviate from the one-time PR #38 "
+            "backfill contract (Ambul/Seeni 2,173 each, Kolikuttu/Papaya "
+            f"zero); got {counts}"
+        )
 
     def test_all_fruit_priceobservations_rows_are_unit_confirmed(self):
         """HARTI's own unit is a verified constant for these rows (per-kg,
