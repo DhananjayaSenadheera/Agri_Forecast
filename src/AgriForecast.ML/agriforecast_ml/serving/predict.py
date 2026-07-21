@@ -73,6 +73,87 @@ def _is_model_served(crop_id: str) -> bool:
     return str(crop_id).lower() in served
 
 
+# --- Per-crop fallback-predictor choice (chip task_9b1cd894) ------------------
+# The trainer backtests, per fallback-served crop, whether a challenger fallback
+# (carry-forward = last observed AvgPrice) beats the recency-mean incumbent, and
+# ships the winning switches in the (signed) payload under fallback["choice"] =
+# {crop_id_lower: "carry_forward"}. Serving reads that map and re-centers the
+# fallback interval on the chosen predictor. FAIL-CLOSED in every degenerate
+# case (no key, old payload, unknown crop, missing/invalid price, any error) ->
+# the crop keeps today's recency-mean/category fallback behavior. Only the
+# central p50 + band CENTRE change; confidence stays "Low", every string field
+# (confidenceReason/reasonCode/activePredictor/fallbackTier) is unchanged.
+_SERVABLE_FALLBACK_CHOICES = {"carry_forward"}
+
+
+def _fallback_choice(crop_id: str) -> str | None:
+    """The shipped fallback-predictor choice for this crop, or None (= keep the
+    recency-mean/category incumbent). Old payloads without the key -> None."""
+    choice = ((_PAYLOAD or {}).get("fallback") or {}).get("choice") or {}
+    ch = choice.get(str(crop_id).lower())
+    return ch if ch in _SERVABLE_FALLBACK_CHOICES else None
+
+
+# Max age of the carry-forward anchor. Mirrors the P3 macro convention
+# (_MACRO_STALENESS_DAYS = 60 in features.py): a carried-forward value is only
+# trusted for ~60 days. A switched crop that goes silent between retrains would
+# otherwise anchor on an arbitrarily old price; past the cap we FAIL CLOSED to
+# the incumbent (category/crop-median tier) rather than serve a stale level.
+_CARRY_FORWARD_STALENESS_DAYS = 60
+
+
+def _within_carry_forward_staleness(obs_date, as_of: date) -> bool:
+    """True iff the anchor's observation is within the staleness cap of the
+    request reference date. Pure/point-in-time (age measured against as_of, never
+    a future date)."""
+    age = (pd.Timestamp(as_of) - pd.Timestamp(obs_date)).days
+    return age <= _CARRY_FORWARD_STALENESS_DAYS
+
+
+def _carry_forward_price(crop_id: str, as_of: date) -> float | None:
+    """Last NON-NULL positive AvgPrice at/before ``as_of`` (the carry-forward
+    anchor), but ONLY if that observation is within the staleness cap. Returns
+    None (-> caller fails closed to the incumbent) when there is no scoreable
+    price OR the newest non-null price is older than the cap. BOTH endpoints use
+    this so they agree on the last-non-null anchor + the 60d cap."""
+    sql = text("""
+        SELECT TOP 1 AvgPrice, ObservationDate FROM CropFeatureDaily
+        WHERE CropId = :cid AND ObservationDate <= :asof AND AvgPrice IS NOT NULL
+        ORDER BY ObservationDate DESC
+    """)
+    with get_engine().connect() as conn:
+        df = pd.read_sql(sql, conn, params={"cid": crop_id, "asof": as_of})
+    if not len(df) or pd.isna(df["AvgPrice"].iloc[0]):
+        return None
+    if not _within_carry_forward_staleness(df["ObservationDate"].iloc[0], as_of):
+        return None
+    v = float(df["AvgPrice"].iloc[0])
+    return v if v > 0 else None
+
+
+def _spread_source(crop_id: str, fb_q: dict) -> dict:
+    """The band half-spreads to keep when re-centring on a switched predictor.
+    Prefer the crop's OWN per-crop quantiles (its true price dispersion) over the
+    resolved tier's (which, at the category tier, pools many crops and is far too
+    wide for a narrow-level crop). Falls back to the resolved tier if the crop has
+    no own per-crop entry (old payloads / unknown crop)."""
+    per = ((_PAYLOAD or {}).get("fallback") or {}).get("per_crop", {}).get(crop_id)
+    return per if per is not None else fb_q
+
+
+def _recenter_on(spread_q: dict, centre: float) -> tuple[float, float, float]:
+    """Re-centre the fallback interval on ``centre`` (the chosen point predictor),
+    keeping ``spread_q``'s asymmetric half-spreads. The band is DELIBERATELY
+    absolute-width — the crop's historical Rs half-spreads (p50-p10, p90-p50), NOT
+    a proportion of the new anchor level — so a low current price still carries a
+    realistic Rs uncertainty band rather than an artificially tight one; and
+    confidence stays pinned "Low" at the call sites regardless. Lower bound is
+    clamped >=0 (price is non-negative); ordering is left to the caller's sort."""
+    lower_gap = max(float(spread_q["p50"]) - float(spread_q["p10"]), 0.0)
+    upper_gap = max(float(spread_q["p90"]) - float(spread_q["p50"]), 0.0)
+    return max(centre - lower_gap, 0.0), centre, centre + upper_gap
+
+
 def _resolve_fallback(crop_id: str, crop_name: str | None = None) -> tuple[dict, str]:
     """Fallback ladder: per-crop (if n_obs >= threshold) -> category -> global.
 
@@ -403,6 +484,17 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
     else:
         p10, p50, p90 = fb_q["p10"], fb_q["p50"], fb_q["p90"]
         active = "crop_mean_fallback"
+        # Per-crop fallback-predictor switch (chip task_9b1cd894): if the payload
+        # selected carry-forward for this crop, re-centre the interval on the last
+        # NON-NULL AvgPrice within the staleness cap. Uses _carry_forward_price
+        # (NOT row["AvgPrice"], whose newest row may be NULL) so predict_harvest
+        # and timeline agree on the anchor + 60d cap. Purely a better central
+        # estimate; all string/confidence fields stay unchanged. Fail-closed: no
+        # scoreable / too-stale price keeps the incumbent quantiles.
+        if _fallback_choice(crop_id) == "carry_forward":
+            cf = _carry_forward_price(crop_id, plant_date)
+            if cf is not None:
+                p10, p50, p90 = _recenter_on(_spread_source(crop_id, fb_q), cf)
         # When the fallback is taken because there is NO scoreable feature row as of
         # the plant date, the prediction is un-scoreable/inert -> force "Low" trust
         # regardless of the resolved tier (fallbackTier still reports the real tier).
@@ -539,6 +631,15 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
         # a guard-degraded ML attempt (row present, predict failed) or a promoted-
         # model-without-scoreable-row must report "Low", never the tier's trust.
         active = "crop_mean_fallback"
+        # Per-crop fallback-predictor switch (chip task_9b1cd894), mirror of
+        # predict_harvest: if carry-forward was selected for this crop, anchor the
+        # (flat) central forecast on the last observed price <= as_of. One extra
+        # lightweight query, only for switched crops. Fail-closed to the incumbent
+        # quantiles when no valid price exists. Band still widens with horizon.
+        if _fallback_choice(crop_id) == "carry_forward":
+            cf = _carry_forward_price(crop_id, as_of)
+            if cf is not None:
+                p10, p50, p90 = sorted(_recenter_on(_spread_source(crop_id, fb_q), cf))
         # row_missing only when the model IS meant to serve this crop but no row
         # exists; a history-gated-out crop is not "missing a row", it is routed by
         # the gate (not_model_served), so keep those signals distinct.

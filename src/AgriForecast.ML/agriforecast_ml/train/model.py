@@ -672,6 +672,33 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
 
     fallback = _crop_fallback(df)
 
+    # --- Per-crop fallback-predictor selection (chip task_9b1cd894) -----------
+    # For every fallback-served crop (NOT in served_on_crops), pick the fallback
+    # point predictor that serves it best on a leakage-safe purged walk-forward
+    # backtest over {recency-mean incumbent, carry-forward challenger}. A crop is
+    # switched away from the recency-mean incumbent ONLY if the challenger beats it
+    # by >=10% MAE on >=30 origins AND does not regress vs the category-median tier
+    # serving actually deploys today. The winning choices ride (signed) in the
+    # payload under fallback["choice"]; serving reads them and FAILS CLOSED to the
+    # recency-mean incumbent for any crop absent from the map. Only carry-forward
+    # is SHIPPED (trivially servable = last observed AvgPrice); seasonal-naive is
+    # evaluated + reported (see the offline experiment) but not wired to serving.
+    from . import fallback_select
+    fb_choice_map, fb_choice_table, fb_choice_agg = \
+        fallback_select.select_fallback_choices(df, gated_final)
+    fallback["choice"] = fb_choice_map
+    if verbose:
+        print(f"\n=== Fallback-predictor selection (fallback segment) ===")
+        print(f"  switched {len(fb_choice_map)} crops to a non-recency-mean "
+              f"fallback (all carry-forward).")
+        print(f"  pooled fallback MAE (recency-mean incumbent) {fb_choice_agg['pooled_recmean_MAE']:.2f}"
+              f" -> with switches {fb_choice_agg['pooled_switched_MAE']:.2f}")
+        print(f"  vs REAL serving incumbent (category tier) "
+              f"{fb_choice_agg['pooled_serving_category_MAE']:.2f} -> with switches "
+              f"{fb_choice_agg['pooled_switched_vs_serving_MAE']:.2f}")
+        print(f"  aggregate gate applied={fb_choice_agg['applied']} "
+              f"({fb_choice_agg['reason']})")
+
     metadata = {
         "model": "ModelA_harvest_price",
         "algo": "pooled XGBoost (quantile)",
@@ -721,6 +748,18 @@ def train_and_register(verbose=True, promote_override: bool | None = None):
         # route to the fallback ladder at serve time. Lowercased GUID strings.
         "served_on_crops": served_on_crops,
         "n_served_crops": len(served_on_crops),
+        # Per-crop fallback-predictor selection (chip task_9b1cd894). The MAP is
+        # also in the (signed) payload under fallback["choice"]; this metadata
+        # block is the human-auditable record of the decision + gate numbers.
+        "fallback_choice": {
+            "map": fb_choice_map,
+            "n_switched": len(fb_choice_map),
+            "aggregate": fb_choice_agg,
+            "min_origins": fallback_select.DEFAULT_MIN_ORIGINS,
+            "switch_margin": fallback_select.DEFAULT_SWITCH_MARGIN,
+            "servable_challengers": list(fallback_select.DEFAULT_SERVABLE_CHALLENGERS),
+            "table": fb_choice_table,
+        },
         "min_history_obs": _DEFAULT_MIN_HISTORY_OBS,
         "n_train_rows": int(len(df)),
         "n_crops": int(df["CropId"].nunique()),
