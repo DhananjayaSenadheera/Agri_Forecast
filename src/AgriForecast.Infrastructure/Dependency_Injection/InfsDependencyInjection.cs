@@ -92,6 +92,11 @@ public static class InfsDependencyInjection
         // swallows-and-logs (never adds a failure mode to login/registration/admin ops) — same B1
         // discipline as IngestionRunRepository, so it depends only on IServiceScopeFactory.
         services.AddScoped<IUserActivityAudit, UserActivityAudit>();
+        // Logs hub PR A (Phase 3): fire-safe system-error writer for GlobalExceptionMiddleware's 500
+        // path. SINGLETON (deliberate deviation from UserActivityAudit's Scoped) so the storm-guard
+        // window + retention counter are process-wide instance state; safe because it self-scopes every
+        // DB access and captures no scoped dependency, and it lets the middleware constructor-inject it.
+        services.AddSingleton<ISystemErrorLog, SystemErrorLog>();
         services.Configure<JwtSettings>(configuration.GetSection(JwtSettings.SectionName));
         services.AddHttpClient<IDambullaApiClient, DambullaApiClient>(http =>
         {

@@ -31,6 +31,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<IngestionVerification> IngestionVerifications { get; set; }
     public DbSet<ModelTrainingRun> ModelTrainingRuns { get; set; }
     public DbSet<UserActivityEvent> UserActivityLog { get; set; }
+    public DbSet<SystemError> SystemErrors { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -552,6 +553,31 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.HasIndex(x => x.OccurredUtc)
                 .IsDescending()
                 .HasDatabaseName("IX_UserActivityLog_OccurredUtc");
+        });
+
+        // SYSTEM ERROR rows (Logs hub PR A / Phase 3) — one per unhandled 500. WRITTEN by the .NET side
+        // (ISystemErrorLog from GlobalExceptionMiddleware) with a fire-safe, self-scoping writer; net-new,
+        // additive (no seed, no backfill). OccurredUtc is DB-defaulted so any write path stamps an
+        // instant. StackTrace is nvarchar(max) (the factory still hard-caps to 8000). Only exception
+        // type/message/stack + request method/path (path only) + trace id are stored — no request
+        // field (query string/header/body) is captured directly, but Message/StackTrace hold the
+        // verbatim (length-capped) exception text; see the SystemError entity's PRIVACY note.
+        modelBuilder.Entity<SystemError>(e =>
+        {
+            e.Property(x => x.Source).HasMaxLength(20).IsRequired();
+            e.Property(x => x.ExceptionType).HasMaxLength(200).IsRequired();
+            e.Property(x => x.Message).HasMaxLength(1000);
+            e.Property(x => x.StackTrace); // nvarchar(max) — factory caps to 8000 chars
+            e.Property(x => x.Path).HasMaxLength(200);
+            e.Property(x => x.Method).HasMaxLength(10);
+            e.Property(x => x.TraceId).HasMaxLength(50);
+
+            e.Property(x => x.OccurredUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+
+            // Primary read path: most-recent errors first.
+            e.HasIndex(x => x.OccurredUtc)
+                .IsDescending()
+                .HasDatabaseName("IX_SystemErrors_OccurredUtc");
         });
 
         SeedMarkets(modelBuilder);
