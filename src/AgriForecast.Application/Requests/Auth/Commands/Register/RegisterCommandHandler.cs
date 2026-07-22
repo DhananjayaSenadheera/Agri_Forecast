@@ -14,6 +14,7 @@ public class RegisterCommandHandler : IRequestHandler<RegisterCommand, Result<Au
     private readonly IUnitofWorkRepository _unitofWorkRepository;
     private readonly IPasswordHasher _passwordHasher;
     private readonly IJwtTokenGenerator _jwtTokenGenerator;
+    private readonly IUserActivityAudit _activityAudit;
     private readonly ILogger<RegisterCommandHandler> _logger;
 
     public RegisterCommandHandler(
@@ -21,12 +22,14 @@ public class RegisterCommandHandler : IRequestHandler<RegisterCommand, Result<Au
         IUnitofWorkRepository unitofWorkRepository,
         IPasswordHasher passwordHasher,
         IJwtTokenGenerator jwtTokenGenerator,
+        IUserActivityAudit activityAudit,
         ILogger<RegisterCommandHandler> logger)
     {
         _userRepository = userRepository;
         _unitofWorkRepository = unitofWorkRepository;
         _passwordHasher = passwordHasher;
         _jwtTokenGenerator = jwtTokenGenerator;
+        _activityAudit = activityAudit;
         _logger = logger;
     }
 
@@ -58,6 +61,7 @@ public class RegisterCommandHandler : IRequestHandler<RegisterCommand, Result<Au
         await _userRepository.AddAsync(user);
         await _unitofWorkRepository.CommitAsync();
         _logger.LogInformation("New user registered. Username: {Username}", user.Username);
+        await _activityAudit.RecordUserRegisteredAsync(user.Id, cancellationToken);
 
         var (token, expiresAt) = _jwtTokenGenerator.Generate(user);
         var response = new AuthResponseDto

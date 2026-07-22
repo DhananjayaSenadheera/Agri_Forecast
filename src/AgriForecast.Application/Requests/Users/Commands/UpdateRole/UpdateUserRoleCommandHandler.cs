@@ -26,17 +26,20 @@ public class UpdateUserRoleCommandHandler : IRequestHandler<UpdateUserRoleComman
     private readonly IUserRepository _userRepository;
     private readonly IUnitofWorkRepository _unitofWorkRepository;
     private readonly IRefreshTokenService _refreshTokenService;
+    private readonly IUserActivityAudit _activityAudit;
     private readonly ILogger<UpdateUserRoleCommandHandler> _logger;
 
     public UpdateUserRoleCommandHandler(
         IUserRepository userRepository,
         IUnitofWorkRepository unitofWorkRepository,
         IRefreshTokenService refreshTokenService,
+        IUserActivityAudit activityAudit,
         ILogger<UpdateUserRoleCommandHandler> logger)
     {
         _userRepository = userRepository;
         _unitofWorkRepository = unitofWorkRepository;
         _refreshTokenService = refreshTokenService;
+        _activityAudit = activityAudit;
         _logger = logger;
     }
 
@@ -76,6 +79,8 @@ public class UpdateUserRoleCommandHandler : IRequestHandler<UpdateUserRoleComman
         _logger.LogInformation(
             "Admin {ActingUserId} changed role of user {TargetUserId} to {Role}.",
             request.ActingUserId, target.Id, request.Role);
+        await _activityAudit.RecordRoleChangedAsync(
+            request.ActingUserId, target.Id, request.Role, cancellationToken);
 
         return Result<AdminUserDto>.Success(target.ToAdminDto());
     }

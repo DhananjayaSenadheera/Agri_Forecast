@@ -24,17 +24,20 @@ public class DeleteUserCommandHandler : IRequestHandler<DeleteUserCommand, Resul
     private readonly IUserRepository _userRepository;
     private readonly IUnitofWorkRepository _unitofWorkRepository;
     private readonly IRefreshTokenService _refreshTokenService;
+    private readonly IUserActivityAudit _activityAudit;
     private readonly ILogger<DeleteUserCommandHandler> _logger;
 
     public DeleteUserCommandHandler(
         IUserRepository userRepository,
         IUnitofWorkRepository unitofWorkRepository,
         IRefreshTokenService refreshTokenService,
+        IUserActivityAudit activityAudit,
         ILogger<DeleteUserCommandHandler> logger)
     {
         _userRepository = userRepository;
         _unitofWorkRepository = unitofWorkRepository;
         _refreshTokenService = refreshTokenService;
+        _activityAudit = activityAudit;
         _logger = logger;
     }
 
@@ -66,6 +69,7 @@ public class DeleteUserCommandHandler : IRequestHandler<DeleteUserCommand, Resul
         _logger.LogInformation(
             "Admin {ActingUserId} deleted user {TargetUserId}.",
             request.ActingUserId, target.Id);
+        await _activityAudit.RecordUserDeletedAsync(request.ActingUserId, target.Id, cancellationToken);
 
         return Result<bool>.Success(true);
     }

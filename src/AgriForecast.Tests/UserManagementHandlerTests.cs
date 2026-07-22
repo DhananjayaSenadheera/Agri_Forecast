@@ -130,7 +130,8 @@ public class UserManagementHandlerTests
         refresh.Setup(r => r.RevokeAllForUserAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
         var handler = new UpdateUserRoleCommandHandler(
-            repo.Object, uow.Object, refresh.Object, Mock.Of<ILogger<UpdateUserRoleCommandHandler>>());
+            repo.Object, uow.Object, refresh.Object, Mock.Of<IUserActivityAudit>(),
+            Mock.Of<ILogger<UpdateUserRoleCommandHandler>>());
         return (handler, repo, uow, refresh);
     }
 
@@ -258,7 +259,8 @@ public class UserManagementHandlerTests
         refresh.Setup(r => r.RevokeAllForUserAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
         var handler = new DeleteUserCommandHandler(
-            repo.Object, uow.Object, refresh.Object, Mock.Of<ILogger<DeleteUserCommandHandler>>());
+            repo.Object, uow.Object, refresh.Object, Mock.Of<IUserActivityAudit>(),
+            Mock.Of<ILogger<DeleteUserCommandHandler>>());
         return (handler, repo, uow, refresh);
     }
 
