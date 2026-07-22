@@ -1,94 +1,269 @@
+using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using AgriForecast.Application.common;
 using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
-using AgriForecast.Infrastructure.ExternalSources.Interfaces;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Infrastructure.Services.CbslIngestion;
 
-// CBSL Daily Price Report ingestion (R1.1 P1 Step 6) — a properly-wired SKELETON that is
-// DISABLED, not faked.
+// CBSL Daily Price Report ingestion — LIVE (feat/cbsl-price-parser, 2026-07-22; capture-only).
 //
-// State of play: nothing CBSL existed in the repo before this step. The service, typed client,
-// DTO, DI registration and Worker wiring are all real and match house style. What is NOT real
-// is the PDF parse: the CBSL report is a new, un-probed format and (per the single-source-of-
-// truth rule the HARTI parser follows) the parser belongs on the Python side. Rather than ship
-// a guessing parser, this service is feature-flagged OFF by default.
+// The R1.1 P1 Step 6 skeleton is now real: the PDF parser was corpus-probed and built on the
+// Python side (agriforecast_ml/cbsl_report — the single-source-of-truth rule the HARTI parser
+// follows), and this service orchestrates it over the same authenticated HTTP->FastAPI seam as
+// HARTI/News, via POST /admin/ingest-cbsl. The old typed-client skeleton (CbslPriceReportClient,
+// which could only throw NotSupportedException) is retired.
 //
-// WATERMARK CONTRACT (why Disabled matters): a Disabled source is a NO-OP and, critically, is
-// NEVER counted as a source failure. This is deliberate — a source we chose not to run must not
-// pollute the fail-isolation signal or trip alerting. The watermark row is created/kept in the
-// Disabled state with the reason recorded, so ops can see at a glance that CBSL is intentionally
-// off (distinct from "failing").
+// FEATURE FLAG (MarketPriceSources:Cbsl:Enabled) is the source's single pause switch: flag OFF =>
+// the watermark is kept in the Disabled state (a documented no-op, NEVER a source failure) exactly
+// as before; flag ON => the pass runs regardless of a Disabled watermark left by the flag-off era
+// (the Disabled state is the flag's REFLECTION, not an independent control — a successful pass
+// flips it to Ok via RecordSuccess).
 //
-// Enabling later: set MarketPriceSources:Cbsl:Enabled = true once a Python CBSL parser +
-// /admin/ingest-cbsl route exist; the service will then call the parse path, which currently
-// throws NotSupportedException loudly (never a silent empty pass).
+// Resume/look-back mirrors HARTI: sinceDate = LastObservedDate - CbslLookbackDays (default 3;
+// reports for a holiday-adjacent date can appear around gaps, and the idempotent upsert makes
+// re-scanning free). A NULL watermark sends a null sinceDate and the Python side applies its own
+// last-7-days default — the capture-only contract (owner 2026-07-22): a cold start must never
+// trigger a silent historical backfill (deliberate backfills go through the ingest_cbsl.py CLI).
+//
+// Fail-safe but EXPRESSIVE (S1): transport/HTTP/parse failures record a watermark Failure WITHOUT
+// advancing the resume point and return Outcome=Failed — never a throw to the Worker, never a
+// green run row for a failed pass.
 public class CbslPriceReportIngestionService : ICbslPriceReportIngestionService
 {
     public const string SourceKey = "CBSL";
 
     private const string EnabledConfigKey = "MarketPriceSources:Cbsl:Enabled";
     private const string DisabledReason =
-        "CBSL parser not implemented (Python-owned, PDF format un-probed) — feature-flagged OFF.";
+        "CBSL Daily Price Report ingestion feature-flagged OFF (MarketPriceSources:Cbsl:Enabled=false) — documented no-op.";
 
-    private readonly ICbslPriceReportClient _client;
+    // Same admin-key contract as HARTI/News (security fix F-02).
+    private const string AdminApiKeyConfigKey = "MlService:AdminApiKey";
+    private const string AdminApiKeyHeaderName = "X-API-Key";
+
+    private const string LookbackDaysConfigKey = "MlService:CbslLookbackDays";
+    private const int DefaultLookbackDays = 3;
+
+    private readonly HttpClient _httpClient;
     private readonly IConfiguration _configuration;
     private readonly IIngestionWatermarkRepository _watermarks;
     private readonly ILogger<CbslPriceReportIngestionService> _logger;
 
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
     public CbslPriceReportIngestionService(
-        ICbslPriceReportClient client,
+        HttpClient httpClient,
         IConfiguration configuration,
         IIngestionWatermarkRepository watermarks,
         ILogger<CbslPriceReportIngestionService> logger)
     {
-        _client = client;
+        _httpClient = httpClient;
         _configuration = configuration;
         _watermarks = watermarks;
         _logger = logger;
     }
 
-    public async Task IngestAsync(CancellationToken ct)
+    public async Task<IngestionRunStats> IngestAsync(CancellationToken ct)
     {
         var enabled = _configuration.GetValue<bool>(EnabledConfigKey);
 
-        // Default (and current) path: feature-flagged OFF. Ensure the watermark reflects the
-        // Disabled state (create it Disabled if absent, or move it to Disabled if it was left in
-        // some other state) and return — a no-op that is explicitly NOT a source failure.
         if (!enabled)
         {
-            var watermark = await _watermarks.GetOrCreateAsync(
+            // Flag OFF: keep the watermark in the Disabled state (create it Disabled if absent) —
+            // a no-op that is explicitly NOT a source failure, exactly the pre-parser behaviour.
+            var disabledWm = await _watermarks.GetOrCreateAsync(
                 SourceKey, IngestionSourceStatus.Disabled, DisabledReason, ct);
 
-            if (watermark.Status != IngestionSourceStatus.Disabled)
+            if (disabledWm.Status != IngestionSourceStatus.Disabled)
             {
-                watermark.Disable(DisabledReason);
+                disabledWm.Disable(DisabledReason);
                 await _watermarks.SaveChangesAsync(ct);
             }
 
             _logger.LogInformation(
                 "CBSL ingestion: DISABLED (feature flag {Flag} is off) — skipping. {Reason}",
                 EnabledConfigKey, DisabledReason);
-            return;
+            return new IngestionRunStats(Outcome: IngestionRunOutcome.Skipped);
         }
 
-        // Enabled path (only reachable once a Python CBSL parser + route exist). Reads the
-        // resume watermark, then calls the client — which currently throws NotSupportedException
-        // loudly. We do NOT swallow that into a fake success: it surfaces to the Worker's
-        // per-source try/catch as an ERROR, exactly like any other broken source.
-        var wm = await _watermarks.GetOrCreateAsync(SourceKey, ct: ct);
-        _logger.LogInformation(
-            "CBSL ingestion: ENABLED — fetching report(s) after {Since}.", wm.LastObservedDate);
+        var watermark = await _watermarks.GetOrCreateAsync(SourceKey, ct: ct);
 
-        var rows = await _client.GetDailyPriceReportAsync(wm.LastObservedDate, ct);
+        // Fail loud on a missing admin key (mirrors HARTI/News; a silent missing header would
+        // surface as a confusing 401 from the ML service).
+        var apiKey = _configuration[AdminApiKeyConfigKey];
+        if (string.IsNullOrWhiteSpace(apiKey))
+            throw new InvalidOperationException(
+                "Missing MlService:AdminApiKey. The ML service requires the X-API-Key header on " +
+                "/admin/ingest-cbsl (security fix F-02). Set it for local dev via " +
+                "'dotnet user-secrets set \"MlService:AdminApiKey\" \"<value>\"', or in production " +
+                "via the MlService__AdminApiKey environment variable. The value must match the ML " +
+                "service's ML_ADMIN_API_KEY.");
 
-        // Upsert-into-PriceObservations wiring intentionally lives on the Python loader side (as
-        // with HARTI), so nothing to persist here yet; the enabled path exists to prove the seam
-        // and will be completed alongside the Python parser.
-        _logger.LogInformation("CBSL ingestion: parsed {Count} row(s).", rows.Count);
+        var lookbackDays = _configuration.GetValue<int?>(LookbackDaysConfigKey) ?? DefaultLookbackDays;
+        if (lookbackDays < 0) lookbackDays = 0;   // never widen into the future; a negative would.
+        DateOnly? sinceDate = watermark.LastObservedDate?.AddDays(-lookbackDays);
+        var payload = new IngestCbslRequest
+        {
+            SinceDate = sinceDate?.ToString("yyyy-MM-dd")
+        };
 
-        wm.RecordSuccess(DateTime.UtcNow, message: $"parsed={rows.Count}");
-        await _watermarks.SaveChangesAsync(ct);
+        HttpResponseMessage resp;
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, "admin/ingest-cbsl")
+            {
+                Content = JsonContent.Create(payload, options: JsonOptions)
+            };
+            request.Headers.Add(AdminApiKeyHeaderName, apiKey);
+
+            resp = await _httpClient.SendAsync(request, ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "CBSL ingestion: ML /admin/ingest-cbsl call failed (service down or timed out).");
+            const string transportReason = "Transport failure calling /admin/ingest-cbsl.";
+            watermark.RecordFailure(transportReason);
+            await _watermarks.SaveChangesAsync(ct);
+            return new IngestionRunStats(Outcome: IngestionRunOutcome.Failed, FailureReason: transportReason);
+        }
+
+        using (resp)
+        {
+            if (!resp.IsSuccessStatusCode)
+            {
+                var body = await SafeReadBodyAsync(resp, ct);
+                _logger.LogWarning(
+                    "CBSL ingestion: ML /admin/ingest-cbsl returned {StatusCode}. Body: {Body}",
+                    (int)resp.StatusCode, body);
+                var statusReason = $"ML returned {(int)resp.StatusCode}.";
+                watermark.RecordFailure(statusReason);
+                await _watermarks.SaveChangesAsync(ct);
+                return new IngestionRunStats(Outcome: IngestionRunOutcome.Failed, FailureReason: statusReason);
+            }
+
+            IngestCbslResponse? result;
+            try
+            {
+                result = await resp.Content.ReadFromJsonAsync<IngestCbslResponse>(JsonOptions, ct);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogWarning(ex, "CBSL ingestion: could not parse /admin/ingest-cbsl response.");
+                const string parseReason = "Unparseable /admin/ingest-cbsl response.";
+                watermark.RecordFailure(parseReason);
+                await _watermarks.SaveChangesAsync(ct);
+                return new IngestionRunStats(Outcome: IngestionRunOutcome.Failed, FailureReason: parseReason);
+            }
+
+            _logger.LogInformation(
+                "CBSL ingestion: PriceObservations inserted {Inserted}, updated {Updated}, "
+                + "no-market-skip {NoMarketSkip} (the two unseeded retail columns skip by design); "
+                + "healed {Healed} crop(s), {Unresolved} label(s) left unresolved (CropId NULL, "
+                + "never guessed); gaps info/warn/error {GapInfo}/{GapWarn}/{GapError}.",
+                result?.PriceObservations?.Inserted ?? 0,
+                result?.PriceObservations?.Updated ?? 0,
+                result?.PriceObservations?.SkippedNoMarket ?? 0,
+                result?.Heal?.Healed ?? 0,
+                result?.Heal?.Unresolved ?? 0,
+                result?.Gaps?.NInfo ?? 0,
+                result?.Gaps?.NWarning ?? 0,
+                result?.Gaps?.NError ?? 0);
+
+            DateOnly? newest = TryParseDateOnly(result?.PriceObservations?.MaxObservedDate);
+            watermark.RecordSuccess(
+                DateTime.UtcNow,
+                newest,
+                $"inserted={result?.PriceObservations?.Inserted ?? 0}, updated={result?.PriceObservations?.Updated ?? 0}");
+            await _watermarks.SaveChangesAsync(ct);
+
+            return new IngestionRunStats(
+                CoveredFromDate: sinceDate,
+                CoveredToDate: newest,
+                RowsInserted: result?.PriceObservations?.Inserted ?? 0,
+                RowsSkipped: result?.PriceObservations?.SkippedNoMarket ?? 0);
+        }
+    }
+
+    private static DateOnly? TryParseDateOnly(string? value)
+        => DateOnly.TryParse(value, out var d) ? d : (DateOnly?)null;
+
+    private static async Task<string> SafeReadBodyAsync(HttpResponseMessage resp, CancellationToken ct)
+    {
+        try
+        {
+            return await resp.Content.ReadAsStringAsync(ct);
+        }
+        catch
+        {
+            return "<unreadable>";
+        }
+    }
+
+    private sealed class IngestCbslRequest
+    {
+        // Resume lower bound (report date > sinceDate). Null => the Python side's own
+        // last-7-days default (capture-only: never a silent full backfill).
+        [JsonPropertyName("sinceDate")]
+        public string? SinceDate { get; set; }
+    }
+
+    // Response shape is deliberately IDENTICAL to /admin/ingest-harti's (one contract for the
+    // PDF-price sources); private mirror classes keep the two services decoupled in code.
+    private sealed class IngestCbslResponse
+    {
+        [JsonPropertyName("status")]
+        public string? Status { get; set; }
+
+        [JsonPropertyName("priceObservations")]
+        public PriceObservationsSummary? PriceObservations { get; set; }
+
+        [JsonPropertyName("heal")]
+        public HealSummary? Heal { get; set; }
+
+        [JsonPropertyName("gaps")]
+        public GapSummary? Gaps { get; set; }
+    }
+
+    private sealed class PriceObservationsSummary
+    {
+        [JsonPropertyName("inserted")]
+        public int Inserted { get; set; }
+
+        [JsonPropertyName("updated")]
+        public int Updated { get; set; }
+
+        [JsonPropertyName("skippedNoMarket")]
+        public int SkippedNoMarket { get; set; }
+
+        [JsonPropertyName("maxObservedDate")]
+        public string? MaxObservedDate { get; set; }
+    }
+
+    private sealed class HealSummary
+    {
+        [JsonPropertyName("healed")]
+        public int Healed { get; set; }
+
+        [JsonPropertyName("unresolved")]
+        public int Unresolved { get; set; }
+    }
+
+    private sealed class GapSummary
+    {
+        [JsonPropertyName("nInfo")]
+        public int NInfo { get; set; }
+
+        [JsonPropertyName("nWarning")]
+        public int NWarning { get; set; }
+
+        [JsonPropertyName("nError")]
+        public int NError { get; set; }
     }
 }

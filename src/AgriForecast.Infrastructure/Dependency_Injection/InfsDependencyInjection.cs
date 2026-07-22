@@ -75,7 +75,8 @@ public static class InfsDependencyInjection
         services.AddScoped<IIngestionWatermarkRepository, IngestionWatermarkRepository>();
         // Ingestion run-tracking store: one IngestionRun row per source per pass (audit foundation).
         services.AddScoped<IIngestionRunRepository, IngestionRunRepository>();
-        services.AddScoped<ICbslPriceReportIngestionService, CbslPriceReportIngestionService>();
+        // CbslPriceReportIngestionService is registered as a typed HttpClient further down
+        // alongside the other ML-service clients (it orchestrates POST /admin/ingest-cbsl).
         // R1 P3 (86cahefbh): CBSL macro (CCPI/MEI vintage) ingestion service — thin, feature-flagged
         // OFF skeleton over the Python /admin/ingest-cbsl-macro seam. Its typed HttpClient is
         // registered further down alongside the other ML-service clients.
@@ -162,16 +163,22 @@ public static class InfsDependencyInjection
             http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
         });
-        // CBSL daily price report: typed HttpClient skeleton. The service is feature-flagged OFF
-        // (Disabled watermark) until a Python CBSL parser exists, so no CBSL BaseUrl is required
-        // yet; the client is registered so the seam is real and DI-resolvable. BaseAddress is set
-        // from MarketPriceSources:Cbsl:BaseUrl when present (optional today).
-        services.AddHttpClient<ICbslPriceReportClient, CbslPriceReportClient>(http =>
+        // CBSL Daily Price Report ingestion (feat/cbsl-price-parser, capture-only) — typed
+        // HttpClient over the same ML service, triggering the Python CBSL pipeline via POST
+        // /admin/ingest-cbsl (orchestrated by the Ingestion Worker; the old NotSupported client
+        // skeleton is retired). The daily incremental pass downloads/parses at most a handful of
+        // 2-page PDFs, so a modest timeout suffices (override via MlService:CbslIngestTimeoutSeconds).
+        services.AddHttpClient<ICbslPriceReportIngestionService, CbslPriceReportIngestionService>(http =>
         {
-            var baseUrl = configuration["MarketPriceSources:Cbsl:BaseUrl"];
-            if (!string.IsNullOrWhiteSpace(baseUrl))
-                http.BaseAddress = new Uri(baseUrl);
-            http.Timeout = TimeSpan.FromSeconds(60);
+            var baseUrl = configuration["MlService:BaseUrl"];
+
+            if (string.IsNullOrWhiteSpace(baseUrl))
+                throw new InvalidOperationException("Missing MlService:BaseUrl");
+
+            var timeoutSeconds = configuration.GetValue<int?>("MlService:CbslIngestTimeoutSeconds") ?? 300;
+
+            http.BaseAddress = new Uri(baseUrl);
+            http.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
         });
         // R1 P3 (86cahefbh): CBSL macro ingestion — typed HttpClient over the same ML service,
         // triggering the Python macro pipeline via POST /admin/ingest-cbsl-macro (orchestrated by

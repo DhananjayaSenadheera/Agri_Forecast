@@ -700,18 +700,37 @@ def clear_outlier_hold(
 # is anything OTHER than exactly this pair (a 3rd source, or two sources that
 # are not this specific pair) is still a real violation -- see module
 # docstring Section 5 for the full rationale.
+# (Kept for reference/back-compat in messages; the operative structure is the
+# per-market _ADJUDICATED_OVERLAPS map below.)
 _ALLOWED_COEXISTING_SOURCES = frozenset({"HARTI", "DAMBULLA_DEC"})
 
-# SF2 (reviewer should-fix, R2 Step 2 gate): the allowance above is scoped to
-# the DAMBULLA market row ONLY -- DEC never legitimately writes anywhere
-# else, so a HARTI+DAMBULLA_DEC pair appearing at any OTHER market is not the
-# adjudicated overlap, it is exactly the double-write bug this check exists
-# to catch (e.g. a hypothetical mis-resolved-market mirror bug writing DEC
-# rows at Pettah). Resolved BY CODE at call time (never a hardcoded GUID --
-# GUIDs are per-DB), fail-closed: a missing Dambulla Markets row raises
-# rather than silently widening (or silently narrowing to nothing) the
-# allowance -- see canonical.resolve_market_id_by_code.
+# SF2 (reviewer should-fix, R2 Step 2 gate) + CBSL extension (2026-07-22): the
+# adjudicated overlaps are scoped PER MARKET row -- an allowed source pair
+# appearing at any market not adjudicated for it is not the by-design overlap,
+# it is exactly the double-write bug this check exists to catch (e.g. a
+# hypothetical mis-resolved-market mirror bug writing DEC rows at Pettah).
+#
+# The CBSL Daily Price Report source (feat/cbsl-price-parser) deliberately
+# observes markets other sources already cover -- that is its cross-validation
+# value -- so each market row's adjudicated set below is the FULL set of
+# sources allowed to coexist there; a triple is allowed iff its actual source
+# set is a SUBSET of its market's adjudicated set ({HARTI, DAMBULLA_DEC} at
+# Dambulla stays allowed with or without CBSL present):
+#   MKT00000001 Dambulla DEC:              DAMBULLA_DEC + HARTI + CBSL
+#   MKT00000004 Pettah (HARTI wholesale):  HARTI + CBSL
+#   MKT00000005 Narahenpita (HARTI retail): HARTI + CBSL
+#
+# Resolved BY CODE at call time (never a hardcoded GUID -- GUIDs are per-DB),
+# fail-closed: a missing Markets row for any adjudicated code raises rather
+# than silently widening (or silently narrowing to nothing) the allowance --
+# see canonical.resolve_market_id_by_code.
 _DAMBULLA_MARKET_CODE = "MKT00000001"
+
+_ADJUDICATED_OVERLAPS: dict[str, frozenset] = {
+    _DAMBULLA_MARKET_CODE: frozenset({"HARTI", "DAMBULLA_DEC", "CBSL"}),
+    "MKT00000004": frozenset({"HARTI", "CBSL"}),  # Pettah (HARTI wholesale)
+    "MKT00000005": frozenset({"HARTI", "CBSL"}),  # Narahenpita (HARTI retail)
+}
 
 
 def assert_no_source_duplicates(engine: "sa.engine.Engine | None" = None) -> int:
@@ -747,7 +766,11 @@ def assert_no_source_duplicates(engine: "sa.engine.Engine | None" = None) -> int
     from .canonical import resolve_market_id_by_code
 
     eng = engine if engine is not None else get_engine()
-    dambulla_market_id = resolve_market_id_by_code(eng, market_code=_DAMBULLA_MARKET_CODE)
+    # Adjudicated-market ids resolved BY CODE, fail-closed (a missing row raises).
+    allowed_by_market_id: dict[str, frozenset] = {
+        str(resolve_market_id_by_code(eng, market_code=code)).upper(): sources
+        for code, sources in _ADJUDICATED_OVERLAPS.items()
+    }
 
     with eng.connect() as conn:
         candidate_rows = conn.execute(sa.text(
@@ -779,11 +802,14 @@ def assert_no_source_duplicates(engine: "sa.engine.Engine | None" = None) -> int
         key = (str(crop_id), str(observed_date), str(market_id))
         by_triple[key].add(source)
 
-    dambulla_key = str(dambulla_market_id).upper()
-
     def _is_allowed(key: tuple, sources: set) -> bool:
+        # Allowed iff this market row has an adjudicated overlap set AND the
+        # actual source set is within it (subset, so any adjudicated pair out
+        # of a larger adjudicated trio stays allowed). Any source combination
+        # at a non-adjudicated market remains a violation.
         _crop_id, _obs_date, market_id = key
-        return sources == _ALLOWED_COEXISTING_SOURCES and market_id.upper() == dambulla_key
+        allowed = allowed_by_market_id.get(market_id.upper())
+        return allowed is not None and sources <= allowed
 
     violations = {
         key: sources for key, sources in by_triple.items()
@@ -800,8 +826,8 @@ def assert_no_source_duplicates(engine: "sa.engine.Engine | None" = None) -> int
         raise AssertionError(
             f"SOURCE DUPLICATION: {len(violations)} (CropId, ObservedDate, "
             f"MarketId) triples exist from a Source combination/location "
-            f"other than the adjudicated {sorted(_ALLOWED_COEXISTING_SOURCES)} "
-            f"overlap AT DAMBULLA ({dambulla_key}) ONLY:"
+            f"outside the adjudicated per-market overlaps "
+            f"({ {c: sorted(s) for c, s in _ADJUDICATED_OVERLAPS.items()} }):"
             f"\n{dup_lines}"
             + (f"\n  ... and {len(violations) - 20} more" if len(violations) > 20 else "")
         )
@@ -809,8 +835,8 @@ def assert_no_source_duplicates(engine: "sa.engine.Engine | None" = None) -> int
     logger.info(
         "assert_no_source_duplicates: PASSED -- %d (CropId, ObservedDate, "
         "MarketId) triples examined, 0 unexpected cross-source duplicates "
-        "(%d legitimate %s overlaps allowed by design)",
-        total, n_allowed, sorted(_ALLOWED_COEXISTING_SOURCES),
+        "(%d legitimate adjudicated overlaps allowed by design)",
+        total, n_allowed,
     )
     return total
 
