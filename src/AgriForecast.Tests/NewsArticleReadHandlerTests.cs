@@ -33,9 +33,10 @@ public class NewsArticleReadHandlerTests
     private static NewsArticleGetLatestQueryHandler Handler(FakeStore store) =>
         new(store, Mock.Of<ILogger<NewsArticleGetLatestQueryHandler>>());
 
-    private static NewsArticleRow Row(string url, DateTime? published = null) =>
+    private static NewsArticleRow Row(
+        string url, DateTime? published = null, string? topics = "flood", double? sentiment = -0.42) =>
         new(url, "lbo", $"Title for {url}", "Summary", published,
-            new DateTime(2026, 7, 22, 8, 0, 0), "en");
+            new DateTime(2026, 7, 22, 8, 0, 0), "en", topics, sentiment);
 
     [Fact]
     public async Task Maps_rows_to_dtos_verbatim()
@@ -56,6 +57,23 @@ public class NewsArticleReadHandlerTests
         dto.PublishedDateUtc.Should().Be(new DateTime(2026, 7, 22, 11, 5, 6));
         dto.RetrievedAtUtc.Should().Be(new DateTime(2026, 7, 22, 8, 0, 0));
         dto.Language.Should().Be("en");
+        dto.Topics.Should().Be("flood");
+        dto.SentimentScore.Should().Be(-0.42);
+    }
+
+    [Fact]
+    public async Task Unscored_article_signals_flow_through_as_null()
+    {
+        var store = new FakeStore
+        {
+            Rows = { Row("https://example.com/a", topics: null, sentiment: null) },
+        };
+
+        var result = await Handler(store).Handle(new NewsArticleGetLatestQuery(), default);
+
+        var dto = result.Data.Single();
+        dto.Topics.Should().BeNull();
+        dto.SentimentScore.Should().BeNull();
     }
 
     [Fact]

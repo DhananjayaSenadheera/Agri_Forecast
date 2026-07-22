@@ -42,6 +42,8 @@ public class NewsArticleGetLatestQueryHandler
             PublishedDateUtc = r.PublishedDateUtc,
             RetrievedAtUtc = r.RetrievedAtUtc,
             Language = r.Language,
+            Topics = r.Topics,
+            SentimentScore = r.SentimentScore,
         }).ToList();
 
         _logger.LogInformation("{Count} ingested news articles retrieved (take={Take}).", dtos.Count, take);
