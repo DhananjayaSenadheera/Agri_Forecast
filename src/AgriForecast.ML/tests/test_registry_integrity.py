@@ -87,6 +87,12 @@ def models_dir(tmp_path, monkeypatch):
     fake = tmp_path / "models"
     fake.mkdir()
     monkeypatch.setattr(registry, "_MODELS_DIR", fake)
+    # Neutralise the admin Logs-hub training-log hook (PR B): save_model now
+    # writes a ModelTrainingRuns row via _record_training_run. It is fail-open,
+    # but we must never let a save_model test attempt a real DB connection, so
+    # stub it out here in the same sandbox fixture. (training_log's own SQL is
+    # covered hermetically in test_training_log.py.)
+    monkeypatch.setattr(registry, "_record_training_run", lambda *a, **k: None)
     return fake
 
 

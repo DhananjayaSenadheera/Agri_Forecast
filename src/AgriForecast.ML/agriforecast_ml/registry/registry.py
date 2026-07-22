@@ -150,7 +150,63 @@ def save_model(payload: dict, metadata: dict, promote: bool) -> str:
     (vdir / "metadata.json").write_text(json.dumps(metadata, indent=2))
     if promote:
         (_MODELS_DIR / "promoted.json").write_text(json.dumps({"version": version}, indent=2))
+    # Admin Logs hub (PR B): write/refresh this version's ModelTrainingRuns row
+    # and re-sync the Promoted flags. Done AFTER the version dir + metadata AND
+    # the promoted.json pointer are final, so Promoted is derived from the live
+    # pointer, never echoed from metadata. FAIL-OPEN: training/saving must never
+    # break on a DB hiccup (see _record_training_run). The hook is itself
+    # fail-open; this outer guard is the last resort so even a bug in the
+    # hook's own error handling can never cost a finished model.
+    try:
+        _record_training_run(metadata)
+    except Exception:
+        _log.warning("training_log hook failed unexpectedly; model save unaffected")
     return version
+
+
+def _current_promoted_version() -> "str | None":
+    """The live version from promoted.json, or None if nothing is promoted.
+    Read AFTER save_model has (possibly) rewritten the pointer, so it reflects
+    the final promotion decision -- the single source of truth for Promoted."""
+    pointer = _MODELS_DIR / "promoted.json"
+    if not pointer.exists():
+        return None
+    try:
+        return json.loads(pointer.read_text()).get("version")
+    except (ValueError, OSError):
+        return None
+
+
+def _record_training_run(metadata: dict) -> None:
+    """Fail-open hook: upsert the ModelTrainingRuns row for this version and
+    re-sync Promoted flags from promoted.json. Any failure (no DB configured,
+    DB down, table absent) is swallowed with a REDACTED warning -- the training
+    log is best-effort and must never break saving/training/promotion.
+
+    Kept as a module-level function (not inlined) so tests can neutralise it to
+    stay hermetic against the real DB.
+    """
+    try:
+        from ..db import get_engine
+        from .. import training_log
+
+        engine = get_engine()
+        training_log.upsert_training_run(
+            engine, **training_log.values_from_metadata(metadata)
+        )
+        live = _current_promoted_version()
+        if live is not None:
+            training_log.sync_promoted_flags(engine, live)
+    except Exception as exc:  # noqa: BLE001 -- fail-open; training must not break
+        try:
+            from .. import training_log
+            detail = training_log.redact_sensitive(str(exc))
+        except Exception:  # noqa: BLE001 -- redaction itself must never raise here
+            detail = "<unavailable>"
+        _log.warning(
+            "training_log write skipped (%s): %s -- training/save unaffected.",
+            type(exc).__name__, detail,
+        )
 
 
 def _verify_integrity(pkl_path: Path, metadata: dict, version: str) -> None:
