@@ -135,6 +135,37 @@ class TestTopicFlags:
 
 
 # ===========================================================================
+# TestTopicsCsv -- the string persisted to NewsArticles.Topics (admin News feed
+# contract: '' = scored/no topic; stable TOPIC_NAMES order; FE splits on ',').
+# ===========================================================================
+
+class TestTopicsCsv:
+    def test_no_flags_is_empty_string(self):
+        from agriforecast_ml.news.sentiment import topics_csv
+        assert topics_csv({t: False for t in TOPIC_NAMES}) == ""
+
+    def test_single_flag(self):
+        from agriforecast_ml.news.sentiment import topics_csv
+        flags = {t: (t == "flood") for t in TOPIC_NAMES}
+        assert topics_csv(flags) == "flood"
+
+    def test_order_is_topic_names_not_input_order(self):
+        from agriforecast_ml.news.sentiment import topics_csv
+        # All fired -> exact documented ordering, regardless of dict order.
+        flags = {t: True for t in reversed(TOPIC_NAMES)}
+        assert topics_csv(flags) == ",".join(TOPIC_NAMES)
+
+    def test_missing_keys_treated_as_false(self):
+        from agriforecast_ml.news.sentiment import topics_csv
+        assert topics_csv({"pest": True}) == "pest"
+
+    def test_roundtrips_with_topic_flags(self):
+        from agriforecast_ml.news.sentiment import topics_csv
+        csv = topics_csv(topic_flags("Flood damage after the drought broke"))
+        assert csv == "flood,drought"
+
+
+# ===========================================================================
 # TestScoreArticles
 # ===========================================================================
 

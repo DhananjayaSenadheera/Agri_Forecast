@@ -25,19 +25,33 @@ public class NewsArticleReadStore : INewsArticleReadStore
             .FirstAsync(ct) > 0;
         if (!tableExists) return Array.Empty<NewsArticleRow>();
 
+        // Topics/SentimentScore are added by the Python SCORER (store_sentiment.py ALTERs),
+        // not the loader's base DDL — a DB where ingestion ran but scoring never did lacks
+        // them. Probe once and select NULL literals in that case (same fail-soft posture as
+        // the table probe; the columns arrive on the first scoring pass).
+        var signalColumns = await _db.Database
+            .SqlQuery<int>($"SELECT COUNT(*) AS [Value] FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'NewsArticles' AND COLUMN_NAME IN ('Topics', 'SentimentScore')")
+            .FirstAsync(ct) == 2;
+
         // The row limit is parameterized by the interpolation (never string-concatenated).
         // COALESCE: articles whose feed omitted a publish date still sort by fetch time.
-        var raw = await _db.Database
-            .SqlQuery<SqlRow>($@"
-SELECT [Url], [Source], [Title], [Summary], [PublishedDateUtc], [RetrievedAtUtc], [Language]
+        var raw = signalColumns
+            ? await _db.Database.SqlQuery<SqlRow>($@"
+SELECT [Url], [Source], [Title], [Summary], [PublishedDateUtc], [RetrievedAtUtc], [Language], [Topics], [SentimentScore]
 FROM [NewsArticles]
 ORDER BY COALESCE([PublishedDateUtc], [RetrievedAtUtc]) DESC, [Url]
-OFFSET 0 ROWS FETCH NEXT {take} ROWS ONLY")
-            .ToListAsync(ct);
+OFFSET 0 ROWS FETCH NEXT {take} ROWS ONLY").ToListAsync(ct)
+            : await _db.Database.SqlQuery<SqlRow>($@"
+SELECT [Url], [Source], [Title], [Summary], [PublishedDateUtc], [RetrievedAtUtc], [Language],
+       CAST(NULL AS NVARCHAR(100)) AS [Topics], CAST(NULL AS FLOAT) AS [SentimentScore]
+FROM [NewsArticles]
+ORDER BY COALESCE([PublishedDateUtc], [RetrievedAtUtc]) DESC, [Url]
+OFFSET 0 ROWS FETCH NEXT {take} ROWS ONLY").ToListAsync(ct);
 
         return raw
             .Select(x => new NewsArticleRow(
-                x.Url, x.Source, x.Title, x.Summary, x.PublishedDateUtc, x.RetrievedAtUtc, x.Language))
+                x.Url, x.Source, x.Title, x.Summary, x.PublishedDateUtc, x.RetrievedAtUtc,
+                x.Language, x.Topics, x.SentimentScore))
             .ToList();
     }
 
@@ -51,5 +65,7 @@ OFFSET 0 ROWS FETCH NEXT {take} ROWS ONLY")
         public DateTime? PublishedDateUtc { get; set; }
         public DateTime RetrievedAtUtc { get; set; }
         public string Language { get; set; } = string.Empty;
+        public string? Topics { get; set; }
+        public double? SentimentScore { get; set; }
     }
 }

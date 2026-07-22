@@ -213,6 +213,18 @@ def _pascal(snake: str) -> str:
     return "".join(part.capitalize() for part in snake.split("_"))
 
 
+def topics_csv(flags: "dict[str, bool]") -> str:
+    """Fired topics as a stable CSV string ('' when none fired).
+
+    Order is TOPIC_NAMES (the one documented ordering), so the same article
+    always serialises identically — the string is stored on NewsArticles.Topics
+    and consumed verbatim by the admin News feed (.NET reads it, FE splits on
+    ','). Empty string (not NULL) = scored-and-general, distinguishing it from
+    NULL = not yet scored.
+    """
+    return ",".join(topic for topic in TOPIC_NAMES if flags.get(topic))
+
+
 def score_and_aggregate(articles: pd.DataFrame) -> "tuple[pd.DataFrame, pd.DataFrame]":
     """Convenience: score_articles then aggregate_daily.
 

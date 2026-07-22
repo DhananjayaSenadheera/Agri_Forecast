@@ -19,6 +19,12 @@ public interface INewsArticleReadStore
 
 // One captured article. Url is the identity (the Python loader's PK / dedupe key).
 // PublishedDateUtc/RetrievedAtUtc are naive UTC wall-clock (the Python loader's convention).
+//
+// Topics/SentimentScore are the PER-ARTICLE signals the Python scorer writes back
+// (score_news.py, on every ingest-news pass): Topics is a stable-order CSV of fired agri
+// topic flags (pest,flood,drought,policy,fertiliser,import_ban), '' = scored but no topic;
+// SentimentScore is the VADER compound in [-1,1]. BOTH are null when the article has not
+// been scored yet (captured after the last scoring pass, or a pre-signal DB).
 public sealed record NewsArticleRow(
     string Url,
     string Source,
@@ -26,4 +32,6 @@ public sealed record NewsArticleRow(
     string Summary,
     DateTime? PublishedDateUtc,
     DateTime RetrievedAtUtc,
-    string Language);
+    string Language,
+    string? Topics,
+    double? SentimentScore);

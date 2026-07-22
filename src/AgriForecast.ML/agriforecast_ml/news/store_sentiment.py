@@ -93,7 +93,12 @@ def write_daily(daily: pd.DataFrame, *, engine=None) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Optional: write per-article scores back to NewsArticles.SentimentScore.
+# Per-article signal writeback: NewsArticles.SentimentScore + .Topics.
+#
+# NO LONGER a debug aid: the admin News feed (.NET GET /api/news-articles)
+# surfaces both columns per article (category badge + bullish/bearish glyph in
+# the FE), so score_news.run writes them by default on every pass. Column
+# semantics: NULL = not yet scored; Topics '' = scored, no agri topic fired.
 # --------------------------------------------------------------------------- #
 _DDL_ADD_SCORE_COLUMN = f"""IF NOT EXISTS (
     SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
@@ -104,25 +109,45 @@ BEGIN
 END
 """
 
+# NVARCHAR(100) comfortably fits every topic CSV (all six topics joined = 44 chars).
+_DDL_ADD_TOPICS_COLUMN = f"""IF NOT EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_NAME = '{ARTICLES_TABLE}' AND COLUMN_NAME = 'Topics'
+)
+BEGIN
+    ALTER TABLE {ARTICLES_TABLE} ADD Topics NVARCHAR(100) NULL;
+END
+"""
+
 
 def add_sentiment_score_column(*, engine=None) -> None:
-    """Idempotently add NewsArticles.SentimentScore FLOAT NULL if missing."""
+    """Idempotently add the per-article signal columns if missing.
+
+    (Name kept for backwards compatibility; it now ensures BOTH SentimentScore
+    and Topics.)
+    """
     eng = engine or get_engine()
     with eng.begin() as conn:
         conn.execute(text(_DDL_ADD_SCORE_COLUMN))
-    logger.debug("add_sentiment_score_column: %s.SentimentScore ready", ARTICLES_TABLE)
+        conn.execute(text(_DDL_ADD_TOPICS_COLUMN))
+    logger.debug(
+        "add_sentiment_score_column: %s.SentimentScore + .Topics ready", ARTICLES_TABLE
+    )
 
 
 def write_article_scores(scored: pd.DataFrame, *, engine=None) -> int:
-    """Write per-article SentimentScore back to NewsArticles (debug aid).
+    """Write per-article SentimentScore + Topics CSV back to NewsArticles.
 
     Args:
-        scored: Output of sentiment.score_articles -- must have Url + SentimentScore.
+        scored: Output of sentiment.score_articles -- must have Url +
+                SentimentScore + one bool column per TOPIC_NAMES topic.
         engine: SQLAlchemy engine; created from config if None.
 
     Returns:
         Number of rows updated.
     """
+    from .sentiment import TOPIC_NAMES as _topics, topics_csv
+
     eng = engine or get_engine()
     add_sentiment_score_column(engine=eng)
 
@@ -131,16 +156,22 @@ def write_article_scores(scored: pd.DataFrame, *, engine=None) -> int:
 
     updated = 0
     with eng.begin() as conn:
-        for url, score in zip(scored["Url"].tolist(), scored["SentimentScore"].tolist()):
+        for row in scored.to_dict("records"):
+            flags = {topic: bool(row.get(topic)) for topic in _topics}
             conn.execute(
                 text(
-                    f"UPDATE {ARTICLES_TABLE} SET SentimentScore = :score "
+                    f"UPDATE {ARTICLES_TABLE} "
+                    "SET SentimentScore = :score, Topics = :topics "
                     "WHERE Url = :url"
                 ),
-                {"score": float(score), "url": url},
+                {
+                    "score": float(row["SentimentScore"]),
+                    "topics": topics_csv(flags),
+                    "url": row["Url"],
+                },
             )
             updated += 1
-    logger.info("write_article_scores: updated %d rows", updated)
+    logger.info("write_article_scores: updated %d rows (score + topics)", updated)
     return updated
 
 

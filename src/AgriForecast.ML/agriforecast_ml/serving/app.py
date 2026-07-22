@@ -170,7 +170,9 @@ class IngestNewsRequest(BaseModel):
     """
     dryRun: bool = False
     skipQa: bool = False
-    writebackScores: bool = False
+    # Per-article SentimentScore + Topics writeback is the default: the admin
+    # News feed (.NET /api/news-articles) surfaces those columns per article.
+    writebackScores: bool = True
 
 
 @admin_router.post("/ingest-news")

@@ -4,12 +4,13 @@ Reads NewsArticles -> scores each (VADER compound + topic flags) -> aggregates
 to the national daily signal -> rebuilds the NewsSentimentDaily table.
 
 Usage:
-    # Full live run (DB required; NewsArticles must have rows):
+    # Full live run (DB required; NewsArticles must have rows). Also writes
+    # per-article SentimentScore + Topics back to NewsArticles by default —
+    # the admin News feed surfaces those columns:
     python score_news.py
 
-    # Also write per-article compound scores back to NewsArticles.SentimentScore
-    # (debug aid; the daily table is the real deliverable):
-    python score_news.py --writeback-scores
+    # Skip the per-article writeback (daily table only):
+    python score_news.py --no-writeback-scores
 
     # Score + aggregate but do NOT write to DB (prints summary only):
     python score_news.py --dry-run
@@ -32,7 +33,7 @@ import logging
 import sys
 
 
-def run(dry_run: bool = False, writeback_scores: bool = False) -> dict:
+def run(dry_run: bool = False, writeback_scores: bool = True) -> dict:
     """Run the news sentiment scoring pipeline programmatically.
 
     Mirrors `main()` (the CLI) but takes plain args and RETURNS a summary
@@ -91,10 +92,14 @@ def main() -> None:
         action="store_true",
         help="Score + aggregate but do NOT write to DB",
     )
+    # Per-article writeback (SentimentScore + Topics) is now the DEFAULT — the
+    # admin News feed reads those columns. Flag kept for an explicit skip.
     parser.add_argument(
         "--writeback-scores",
-        action="store_true",
-        help="Also write per-article SentimentScore back to NewsArticles (debug)",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write per-article SentimentScore + Topics back to NewsArticles "
+        "(default on; --no-writeback-scores to skip)",
     )
     parser.add_argument(
         "--log-level",

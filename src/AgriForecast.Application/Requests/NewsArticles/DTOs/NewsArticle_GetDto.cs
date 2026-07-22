@@ -14,4 +14,11 @@ public class NewsArticle_GetDto
     public DateTime? PublishedDateUtc { get; set; }
     public DateTime RetrievedAtUtc { get; set; }
     public string Language { get; set; } = string.Empty;
+
+    // Per-article signals from the Python scorer (null = not yet scored). topics is a
+    // stable-order CSV of fired agri topic flags ('' = scored, none fired); sentimentScore
+    // is the VADER compound in [-1,1]. The FE derives the farmer-facing category badge and
+    // bullish/bearish glyph from these — the wire carries facts, not presentation.
+    public string? Topics { get; set; }
+    public double? SentimentScore { get; set; }
 }
