@@ -297,6 +297,61 @@ def ingest_harti_endpoint(req: IngestHartiRequest):
         )
 
 
+class IngestCbslRequest(BaseModel):
+    """Orchestration knobs for the CBSL Daily Price Report pass.
+
+    Mirrors IngestHartiRequest. ``sinceDate`` is the .NET watermark's resume
+    lower bound (exclusive); ABSENT/None => the downloader's own last-7-days
+    default (capture-only contract, 2026-07-22: an empty watermark must never
+    trigger a silent full backfill — deliberate backfills go through the
+    ingest_cbsl.py CLI with an explicit --since / --max-dates).
+    """
+    sinceDate: Optional[str] = None
+    noDownload: bool = False
+    dryRun: bool = False
+
+
+@admin_router.post("/ingest-cbsl")
+def ingest_cbsl_endpoint(req: IngestCbslRequest):
+    """Run the CBSL Daily Price Report ingestion pass in-process.
+
+    Internal admin endpoint orchestrated by the .NET Ingestion Worker
+    (CbslPriceReportIngestionService), consistent with /admin/ingest-harti:
+    download (deterministic per-date URL; 404 = no report published = normal
+    gap) -> parse -> upsert into PriceObservations, then
+    assert_no_source_duplicates as a HARD FAIL surfaced as a 502 so the Worker
+    logs it and does NOT advance its watermark. Lazy import so any CBSL-module
+    breakage can never block serving startup or /predict.
+    """
+    try:
+        import ingest_cbsl_service
+    except Exception:  # pragma: no cover - import wiring guard
+        _log.exception("CBSL ingestion module unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="CBSL ingestion module unavailable.",
+        )
+
+    try:
+        return ingest_cbsl_service.run(
+            since_date=req.sinceDate,
+            no_download=req.noDownload,
+            dry_run=req.dryRun,
+        )
+    except AssertionError:
+        _log.exception("CBSL ingestion: cross-source duplicate check FAILED")
+        raise HTTPException(
+            status_code=502,
+            detail="CBSL ingestion failed data-quality gate (cross-source duplicates).",
+        )
+    except Exception:
+        _log.exception("CBSL ingestion failed")
+        raise HTTPException(
+            status_code=502,
+            detail="CBSL ingestion failed.",
+        )
+
+
 class IngestCbslMacroRequest(BaseModel):
     """Orchestration knobs for the monthly CBSL macro pass.
 

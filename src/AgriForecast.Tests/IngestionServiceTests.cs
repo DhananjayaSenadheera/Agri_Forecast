@@ -347,62 +347,152 @@ public class IngestionServiceTests
             "a disabled source stays disabled — it is never mistaken for a failure");
     }
 
-    // ── CBSL: disabled by default is a no-op that is NOT a failure ───────────────────────────
+    // ── CBSL: flag off is a no-op (no HTTP) that is NOT a failure ────────────────────────────
 
     [Fact]
-    public async Task Cbsl_DefaultDisabled_IsNoOp_DoesNotCallClient_AndIsNotAFailure()
+    public async Task Cbsl_FlagOff_IsNoOp_MakesNoHttpCall_AndIsNotAFailure()
     {
         var wms = new FakeWatermarkRepository();
-        var clientCalled = false;
-        var client = new StubCbslClient(() => { clientCalled = true; });
+        var handler = new StubHttpMessageHandler(_ => throw new InvalidOperationException("must not call ML when disabled"));
 
         var svc = new CbslPriceReportIngestionService(
-            client,
+            ClientFrom(handler),
             Config(),   // MarketPriceSources:Cbsl:Enabled unset => false
             wms,
             NullLogger<CbslPriceReportIngestionService>.Instance);
 
-        await svc.IngestAsync(CancellationToken.None);
+        var stats = await svc.IngestAsync(CancellationToken.None);
 
-        clientCalled.Should().BeFalse("the disabled path must not touch the (unimplemented) parser");
+        handler.Calls.Should().Be(0, "the flag-off path must not touch the ML service");
+        stats.Outcome.Should().Be(IngestionRunOutcome.Skipped, "a disabled source is a SKIP, never a green success");
         var wm = wms.Peek(CbslPriceReportIngestionService.SourceKey)!;
         wm.Status.Should().Be(IngestionSourceStatus.Disabled);
         wm.Status.Should().NotBe(IngestionSourceStatus.Failed, "a disabled source is never a failure");
     }
 
-    // ── CBSL: enabled path fails LOUD (never a silent fake success) ──────────────────────────
+    // ── CBSL: enabled happy path triggers /admin/ingest-cbsl and advances the watermark ──────
 
     [Fact]
-    public async Task Cbsl_Enabled_CallsClient_AndSurfacesNotSupportedLoudly()
+    public async Task Cbsl_Enabled_TriggersMlPass_ReportsCounts_AndAdvancesWatermark()
     {
         var wms = new FakeWatermarkRepository();
-        // The real client throws NotSupported; use it to prove the enabled path does not swallow.
-        var client = new AgriForecast.Infrastructure.ExternalSources.Interfaces.CbslPriceReportClient(
-            new HttpClient(), NullLogger<AgriForecast.Infrastructure.ExternalSources.Interfaces.CbslPriceReportClient>.Instance);
+        var seeded = IngestionWatermark.Create(CbslPriceReportIngestionService.SourceKey);
+        seeded.RecordSuccess(new DateTime(2026, 7, 18, 6, 0, 0, DateTimeKind.Utc), new DateOnly(2026, 7, 17));
+        wms.Seed(seeded);
+
+        var handler = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK,
+            """{"status":"ok","priceObservations":{"inserted":57,"updated":40,"skippedNoMarket":40,"maxObservedDate":"2026-07-21"},"heal":{"healed":0,"unresolved":12},"gaps":{"nInfo":1,"nWarning":0,"nError":0}}"""));
 
         var svc = new CbslPriceReportIngestionService(
-            client,
-            Config(("MarketPriceSources:Cbsl:Enabled", "true")),
+            ClientFrom(handler),
+            Config(("MarketPriceSources:Cbsl:Enabled", "true"),
+                   ("MlService:AdminApiKey", "secret-key")),
+            wms,
+            NullLogger<CbslPriceReportIngestionService>.Instance);
+
+        var stats = await svc.IngestAsync(CancellationToken.None);
+
+        handler.Calls.Should().Be(1);
+        handler.LastRequest!.RequestUri!.AbsolutePath.Should().EndWith("admin/ingest-cbsl");
+        // Look-back: sinceDate = LastObservedDate - 3 (default CbslLookbackDays).
+        handler.LastRequestBody.Should().Contain("2026-07-14");
+        stats.Outcome.Should().Be(IngestionRunOutcome.Succeeded);
+        stats.RowsInserted.Should().Be(57);
+        stats.RowsSkipped.Should().Be(40);
+        stats.CoveredToDate.Should().Be(new DateOnly(2026, 7, 21));
+        var wm = wms.Peek(CbslPriceReportIngestionService.SourceKey)!;
+        wm.LastObservedDate.Should().Be(new DateOnly(2026, 7, 21), "a confirmed success advances the resume point");
+    }
+
+    // ── CBSL: enabling the flag overrides the flag-off era's Disabled watermark ──────────────
+
+    [Fact]
+    public async Task Cbsl_Enabled_RunsEvenIfWatermarkWasLeftDisabled_ByTheFlagOffEra()
+    {
+        // The Disabled watermark is the FLAG's reflection, not an independent control: with the
+        // flag on, the pass must run (otherwise the source could never start after enabling).
+        var wms = new FakeWatermarkRepository();
+        var disabled = IngestionWatermark.Create(CbslPriceReportIngestionService.SourceKey);
+        disabled.Disable("CBSL parser not implemented — feature-flagged OFF.");
+        wms.Seed(disabled);
+
+        var handler = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK,
+            """{"status":"ok","priceObservations":{"inserted":5,"updated":0,"skippedNoMarket":0,"maxObservedDate":"2026-07-21"}}"""));
+
+        var svc = new CbslPriceReportIngestionService(
+            ClientFrom(handler),
+            Config(("MarketPriceSources:Cbsl:Enabled", "true"),
+                   ("MlService:AdminApiKey", "secret-key")),
+            wms,
+            NullLogger<CbslPriceReportIngestionService>.Instance);
+
+        var stats = await svc.IngestAsync(CancellationToken.None);
+
+        handler.Calls.Should().Be(1);
+        stats.Outcome.Should().Be(IngestionRunOutcome.Succeeded);
+        wms.Peek(CbslPriceReportIngestionService.SourceKey)!.Status.Should().Be(IngestionSourceStatus.Ok,
+            "a successful enabled pass flips the flag-off era's Disabled state to Ok");
+    }
+
+    // ── CBSL: missing admin key fails loud; failures hold the resume point ───────────────────
+
+    [Fact]
+    public async Task Cbsl_Enabled_Throws_WhenAdminKeyMissing()
+    {
+        var wms = new FakeWatermarkRepository();
+        var handler = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK, "{}"));
+        var svc = new CbslPriceReportIngestionService(
+            ClientFrom(handler),
+            Config(("MarketPriceSources:Cbsl:Enabled", "true"), ("MlService:AdminApiKey", "")),
             wms,
             NullLogger<CbslPriceReportIngestionService>.Instance);
 
         var act = () => svc.IngestAsync(CancellationToken.None);
 
-        await act.Should().ThrowAsync<NotSupportedException>(
-            "the enabled path must fail loudly until a real parser exists, never fake a success");
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        handler.Calls.Should().Be(0, "no HTTP call must be made without an admin key");
     }
 
-    private sealed class StubCbslClient : ICbslPriceReportClient
+    [Fact]
+    public async Task Cbsl_HttpError_RecordsFailure_ButDoesNotThrow_NorAdvanceResumePoint()
     {
-        private readonly Action _onCall;
-        public StubCbslClient(Action onCall) => _onCall = onCall;
+        var wms = new FakeWatermarkRepository();
+        var seeded = IngestionWatermark.Create(CbslPriceReportIngestionService.SourceKey);
+        seeded.RecordSuccess(new DateTime(2026, 7, 18, 6, 0, 0, DateTimeKind.Utc), new DateOnly(2026, 7, 17));
+        wms.Seed(seeded);
 
-        public Task<IReadOnlyList<CbslDailyPriceReportDto>> GetDailyPriceReportAsync(
-            DateOnly? sinceDate, CancellationToken ct)
-        {
-            _onCall();
-            return Task.FromResult<IReadOnlyList<CbslDailyPriceReportDto>>(Array.Empty<CbslDailyPriceReportDto>());
-        }
+        var handler = new StubHttpMessageHandler(_ => Json(HttpStatusCode.BadGateway, "duplicate gate failed"));
+        var svc = new CbslPriceReportIngestionService(
+            ClientFrom(handler),
+            Config(("MarketPriceSources:Cbsl:Enabled", "true"),
+                   ("MlService:AdminApiKey", "secret-key")),
+            wms,
+            NullLogger<CbslPriceReportIngestionService>.Instance);
+
+        var stats = await svc.IngestAsync(CancellationToken.None);
+
+        stats.Outcome.Should().Be(IngestionRunOutcome.Failed, "a 502 (e.g. the cross-source duplicate gate) is a real failure");
+        var wm = wms.Peek(CbslPriceReportIngestionService.SourceKey)!;
+        wm.Status.Should().Be(IngestionSourceStatus.Failed);
+        wm.LastObservedDate.Should().Be(new DateOnly(2026, 7, 17), "a failed pass must not advance the resume point");
+    }
+
+    [Fact]
+    public async Task Cbsl_TransportException_RecordsFailure_ButDoesNotThrow()
+    {
+        var wms = new FakeWatermarkRepository();
+        var handler = new StubHttpMessageHandler(_ => throw new HttpRequestException("connection refused"));
+        var svc = new CbslPriceReportIngestionService(
+            ClientFrom(handler),
+            Config(("MarketPriceSources:Cbsl:Enabled", "true"),
+                   ("MlService:AdminApiKey", "secret-key")),
+            wms,
+            NullLogger<CbslPriceReportIngestionService>.Instance);
+
+        var stats = await svc.IngestAsync(CancellationToken.None);
+
+        stats.Outcome.Should().Be(IngestionRunOutcome.Failed);
+        wms.Peek(CbslPriceReportIngestionService.SourceKey)!.Status.Should().Be(IngestionSourceStatus.Failed);
     }
 
     // ── CBSL MACRO (P3, 86cahefbh): disabled by default is a no-op that makes no HTTP call and is

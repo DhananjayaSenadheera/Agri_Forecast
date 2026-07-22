@@ -119,15 +119,17 @@ public class Worker : BackgroundService
             return (IngestionRunStats?)stats;
         }, stoppingToken);
 
-        // R1.1 P1 Step 6: CBSL daily price report ingestion. Feature-flagged OFF by default
-        // (Disabled watermark, a deliberate no-op that is NOT a source failure). Status-only row.
+        // CBSL Daily Price Report ingestion (feat/cbsl-price-parser — LIVE, capture-only): the
+        // service orchestrates the Python parser via /admin/ingest-cbsl and reports counts. The
+        // MarketPriceSources:Cbsl:Enabled flag remains the pause switch (flag off => Disabled
+        // watermark, a deliberate no-op that is NOT a source failure, reported as Skipped).
         await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, CbslPriceReportIngestionService.SourceKey, async ct =>
         {
             var cbsl = scope.ServiceProvider.GetRequiredService<ICbslPriceReportIngestionService>();
             _logger.LogInformation("CBSL ingestion started");
-            await cbsl.IngestAsync(ct);
+            var stats = await cbsl.IngestAsync(ct);
             _logger.LogInformation("CBSL ingestion finished");
-            return (IngestionRunStats?)null;
+            return (IngestionRunStats?)stats;
         }, stoppingToken);
 
         // R1 P3 (86cahefbh): CBSL macro (CCPI/MEI vintage) ingestion. Feature-flagged OFF by default
