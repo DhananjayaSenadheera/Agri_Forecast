@@ -1,4 +1,5 @@
 using AgriForecast.Application.Requests.Crop.Quaries.GetBest;
+using AgriForecast.Application.Requests.Forecast.Quaries.GetCropReadiness;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetHarvest;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetMarketOverview;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetMonthly;
@@ -44,6 +45,19 @@ public class ForecastController(IMediator mediator) : ControllerBase
     public async Task<IActionResult> GetCropTimeline(Guid cropId, [FromQuery] int months = 12, [FromQuery] DateOnly? asOf = null)
     {
         var result = await mediator.Send(new GetCropTimelineQuery { CropId = cropId, Months = months, AsOf = asOf });
+        if (result.IsSuccess)
+            return Ok(result.Data);
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
+    // Per-crop forecast-readiness map (crop-status colouring, UI 2026-07-22).
+    // Read-only passthrough of the promoted model payload's serving decision;
+    // recomputed by every train run. The empty map (modelActive=false) is a
+    // valid 200 — only ML-service transport failure returns the 400 error shape.
+    [HttpGet("crop-readiness")]
+    public async Task<IActionResult> GetCropReadiness()
+    {
+        var result = await mediator.Send(new GetCropReadinessQuery());
         if (result.IsSuccess)
             return Ok(result.Data);
         return BadRequest(ToErrorResponse(result.Error));

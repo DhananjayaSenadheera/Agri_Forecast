@@ -87,6 +87,27 @@ public sealed class HarvestPredictionClient : IHarvestPredictionClient
         }
     }
 
+    public async Task<CropReadinessDto?> GetCropReadinessAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            using var resp = await _httpClient.GetAsync("crop-readiness", ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "ML /crop-readiness returned {StatusCode}.", (int)resp.StatusCode);
+                return null;
+            }
+
+            return await resp.Content.ReadFromJsonAsync<CropReadinessDto>(JsonOptions, ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
+        {
+            _logger.LogWarning(ex, "ML /crop-readiness call failed.");
+            return null;
+        }
+    }
+
     private sealed class PredictRequest
     {
         [JsonPropertyName("cropId")]
