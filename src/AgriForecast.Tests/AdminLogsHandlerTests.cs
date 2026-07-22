@@ -1,4 +1,5 @@
 using AgriForecast.Application.Requests.Admin.Logs.Common;
+using AgriForecast.Application.Requests.Admin.Logs.Queries.GetSystemErrors;
 using AgriForecast.Application.Requests.Admin.Logs.Queries.GetTrainingRuns;
 using AgriForecast.Application.Requests.Admin.Logs.Queries.GetUserActivity;
 using AgriForecast.Application.Services;
@@ -21,6 +22,7 @@ public class AdminLogsHandlerTests
     {
         public List<TrainingRunRow> Training = new();
         public List<(UserActivityRow Row, long Id)> Activity = new();
+        public List<SystemErrorRow> Errors = new();
         public UserActivityEventType? CapturedType;
 
         public Task<TrainingRunsPage> GetTrainingRunsPageAsync(int page, int pageSize, CancellationToken ct = default)
@@ -46,10 +48,27 @@ public class AdminLogsHandlerTests
             var items = filtered.Skip((page - 1) * pageSize).Take(pageSize).ToList();
             return Task.FromResult(new UserActivityPage(items, total));
         }
+
+        public Task<SystemErrorsPage> GetSystemErrorsAsync(int page, int pageSize, CancellationToken ct = default)
+        {
+            var ordered = Errors
+                .OrderByDescending(e => e.OccurredUtc).ThenByDescending(e => e.Id)
+                .ToList();
+            var total = ordered.Count;
+            var items = ordered.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            return Task.FromResult(new SystemErrorsPage(items, total));
+        }
     }
 
     private static GetTrainingRunsQueryHandler TrainingHandler(FakeStore s) => new(s);
     private static GetUserActivityQueryHandler ActivityHandler(FakeStore s) => new(s);
+    private static GetSystemErrorsQueryHandler ErrorsHandler(FakeStore s) => new(s);
+
+    private static SystemErrorRow ERow(long id, DateTime occurredUtc,
+        string exceptionType = "System.InvalidOperationException", string? message = "boom",
+        string? path = "/api/forecast", string? method = "GET", string? traceId = "trace-1",
+        string? stackTrace = "   at Foo()")
+        => new(id, occurredUtc, "API", exceptionType, message, path, method, traceId, stackTrace);
 
     private static TrainingRunRow TRun(string version, DateTime trainedAtUtc,
         bool promoted = true, bool decisionPromoted = true)
@@ -223,9 +242,88 @@ public class AdminLogsHandlerTests
         ((int)type).Should().Be(expected);
     }
 
+    // ── SYSTEM-ERRORS: paging + newest-first tiebreak + mapping ─────────────────────
+    [Fact]
+    public async Task Errors_PagingMath_ReturnsRequestedPageAndTotal()
+    {
+        var store = new FakeStore();
+        for (var i = 0; i < 5; i++)
+            store.Errors.Add(ERow(i + 1, DateTime.UtcNow.AddMinutes(-i)));
+
+        var dto = (await ErrorsHandler(store).Handle(
+            new GetSystemErrorsQuery { Page = 2, PageSize = 2 }, default)).Data;
+
+        dto.Total.Should().Be(5);
+        dto.Page.Should().Be(2);
+        dto.PageSize.Should().Be(2);
+        dto.Items.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task Errors_Tiebreak_SameTimestamp_OrdersByIdDesc_AndMapsFields()
+    {
+        var store = new FakeStore();
+        var ts = new DateTime(2026, 7, 21, 5, 0, 0, DateTimeKind.Unspecified);
+        store.Errors.Add(ERow(1, ts, message: "first"));
+        store.Errors.Add(ERow(3, ts, message: "third"));
+        store.Errors.Add(ERow(2, ts, message: "second"));
+
+        var dto = (await ErrorsHandler(store).Handle(new GetSystemErrorsQuery(), default)).Data;
+
+        dto.Items.Select(i => i.Id).Should().ContainInOrder(3L, 2L, 1L); // Id DESC tiebreak
+        var top = dto.Items[0];
+        top.Source.Should().Be("API");
+        top.ExceptionType.Should().Be("System.InvalidOperationException");
+        top.Message.Should().Be("third");
+        top.Path.Should().Be("/api/forecast");
+        top.Method.Should().Be("GET");
+        top.TraceId.Should().Be("trace-1");
+        top.StackTrace.Should().Be("   at Foo()");
+    }
+
+    [Fact]
+    public async Task Errors_UtcField_HasUtcKind_SoJsonEmitsZ()
+    {
+        var store = new FakeStore();
+        var unspecified = new DateTime(2026, 7, 20, 3, 0, 0, DateTimeKind.Unspecified);
+        store.Errors.Add(ERow(1, unspecified));
+
+        var dto = (await ErrorsHandler(store).Handle(new GetSystemErrorsQuery(), default)).Data;
+
+        dto.Items.Single().OccurredUtc.Kind.Should().Be(DateTimeKind.Utc);
+    }
+
+    [Fact]
+    public async Task Errors_EmptyStore_ReturnsEmptyPage()
+    {
+        var dto = (await ErrorsHandler(new FakeStore()).Handle(new GetSystemErrorsQuery(), default)).Data;
+        dto.Items.Should().BeEmpty();
+        dto.Total.Should().Be(0);
+    }
+
     // ── VALIDATION ──────────────────────────────────────────────────────────────────
     private readonly GetTrainingRunsValidator _trainingValidator = new();
     private readonly GetUserActivityValidator _activityValidator = new();
+    private readonly GetSystemErrorsValidator _errorsValidator = new();
+
+    [Theory]
+    [InlineData(0, 20)]   // page < 1
+    [InlineData(1, 0)]    // pageSize < 1
+    [InlineData(1, 101)]  // pageSize > 100
+    public async Task ErrorsValidator_RejectsBadBounds(int page, int pageSize)
+    {
+        var result = await _errorsValidator.ValidateAsync(
+            new GetSystemErrorsQuery { Page = page, PageSize = pageSize });
+        result.IsValid.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task ErrorsValidator_AllowsInBounds()
+    {
+        var result = await _errorsValidator.ValidateAsync(
+            new GetSystemErrorsQuery { Page = 1, PageSize = 100 });
+        result.IsValid.Should().BeTrue();
+    }
 
     [Theory]
     [InlineData(0, 20)]   // page < 1

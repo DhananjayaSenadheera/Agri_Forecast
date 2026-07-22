@@ -1,3 +1,4 @@
+using AgriForecast.Application.Requests.Admin.Logs.Queries.GetSystemErrors;
 using AgriForecast.Application.Requests.Admin.Logs.Queries.GetTrainingRuns;
 using AgriForecast.Application.Requests.Admin.Logs.Queries.GetUserActivity;
 using AgriForecast.Domain.Constants;
@@ -56,6 +57,23 @@ public class AdminLogsController(IMediator mediator) : ControllerBase
             Page = page,
             PageSize = pageSize,
             Type = type
+        });
+        if (result.IsSuccess)
+            return Ok(result.Data);
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
+    // GET /api/admin/logs/errors?page=1&pageSize=20 — paged unhandled-500 history, newest first. Bad
+    // page/pageSize -> 400 (GetSystemErrorsValidator). Empty page -> 200 with empty items.
+    [HttpGet("errors")]
+    public async Task<IActionResult> GetSystemErrors(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20)
+    {
+        var result = await mediator.Send(new GetSystemErrorsQuery
+        {
+            Page = page,
+            PageSize = pageSize
         });
         if (result.IsSuccess)
             return Ok(result.Data);

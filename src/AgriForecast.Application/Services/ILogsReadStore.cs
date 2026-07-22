@@ -17,6 +17,11 @@ public interface ILogsReadStore
     // one EventType, plus the total count of matching rows. page is 1-based.
     Task<UserActivityPage> GetUserActivityPageAsync(
         int page, int pageSize, UserActivityEventType? type, CancellationToken ct = default);
+
+    // Page of system-error rows newest OccurredUtc first (Id DESC tiebreak), plus the total count. page
+    // is 1-based; the store applies Skip/Take.
+    Task<SystemErrorsPage> GetSystemErrorsAsync(
+        int page, int pageSize, CancellationToken ct = default);
 }
 
 // One ModelTrainingRun row projected for the admin training-runs list.
@@ -43,6 +48,20 @@ public sealed record UserActivityRow(
     string? UsernameAttempted,
     string? Details);
 
+// One SystemErrors row projected for the admin system-errors list.
+public sealed record SystemErrorRow(
+    long Id,
+    DateTime OccurredUtc,
+    string Source,
+    string ExceptionType,
+    string? Message,
+    string? Path,
+    string? Method,
+    string? TraceId,
+    string? StackTrace);
+
 public sealed record TrainingRunsPage(IReadOnlyList<TrainingRunRow> Items, int Total);
 
 public sealed record UserActivityPage(IReadOnlyList<UserActivityRow> Items, int Total);
+
+public sealed record SystemErrorsPage(IReadOnlyList<SystemErrorRow> Items, int Total);

@@ -63,4 +63,26 @@ public class LogsReadStore : ILogsReadStore
 
         return new UserActivityPage(items, total);
     }
+
+    public async Task<SystemErrorsPage> GetSystemErrorsAsync(
+        int page, int pageSize, CancellationToken ct = default)
+    {
+        var q = _db.SystemErrors.AsNoTracking();
+
+        var total = await q.CountAsync(ct);
+
+        var skip = (int)Math.Clamp((long)(page - 1) * pageSize, 0L, int.MaxValue);
+
+        var items = await q
+            .OrderByDescending(e => e.OccurredUtc)
+            .ThenByDescending(e => e.Id) // stable tiebreak so paging is deterministic across pages
+            .Skip(skip)
+            .Take(pageSize)
+            .Select(e => new SystemErrorRow(
+                e.Id, e.OccurredUtc, e.Source, e.ExceptionType, e.Message,
+                e.Path, e.Method, e.TraceId, e.StackTrace))
+            .ToListAsync(ct);
+
+        return new SystemErrorsPage(items, total);
+    }
 }
