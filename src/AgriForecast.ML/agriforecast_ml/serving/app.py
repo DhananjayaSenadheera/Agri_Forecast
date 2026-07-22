@@ -113,6 +113,20 @@ def model_info():
     return predict.model_info()
 
 
+@app.get("/crop-readiness")
+def crop_readiness_endpoint():
+    """Per-crop readiness map for the app's crop-status colouring (UI 2026-07-22).
+
+    Defensive like /timeline: any unexpected failure returns the honest empty
+    shape (modelActive=false, no crops -> the UI shows no tint), never a 500.
+    """
+    try:
+        return predict.crop_readiness()
+    except Exception:
+        _log.exception("crop_readiness failed — returning empty readiness map")
+        return {"modelVersion": None, "minHistoryObs": None, "modelActive": False, "crops": {}}
+
+
 @app.post("/predict")
 def predict_endpoint(req: PredictRequest):
     return predict.predict_harvest(req.cropId, req.plantDate)

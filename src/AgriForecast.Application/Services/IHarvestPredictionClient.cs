@@ -8,4 +8,6 @@ public interface IHarvestPredictionClient
     Task<HarvestPredictionDto?> PredictAsync(Guid cropId, DateOnly plantDate, CancellationToken ct = default);
 
     Task<CropTimelineDto?> GetTimelineAsync(Guid cropId, DateOnly? asOf, int months, CancellationToken ct = default);
+
+    Task<CropReadinessDto?> GetCropReadinessAsync(CancellationToken ct = default);
 }

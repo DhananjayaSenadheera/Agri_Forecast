@@ -700,3 +700,39 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
 
 def model_info() -> dict:
     return _META or {"status": "no model registered"}
+
+
+def crop_readiness() -> dict:
+    """Per-crop forecast-readiness map for the app's crop-status colouring.
+
+    Truth MIRRORS the real serving decision above (predict_harvest/timeline):
+    a crop is `ready` iff the promoted payload's ML path is active
+    (beats_baseline AND _ml_servable()) AND the crop passes the history gate
+    (`served_on_crops`). Everything else — thin-history fallback crops, brand-new
+    crops absent from the payload, an inactive payload — is NOT ready ("still
+    collecting data"). Legacy payloads without `served_on_crops` keep the
+    _is_model_served compat rule (every known crop eligible). `nObs` is the
+    crop's labelled-row count from fallback.per_crop where available (None on
+    old payloads) so callers can show collection progress honestly. Read-only
+    over the loaded payload — no DB query, no model call, safe to poll.
+    """
+    if _PAYLOAD is None:
+        return {"modelVersion": None, "minHistoryObs": None, "modelActive": False, "crops": {}}
+    model_active = bool(_PAYLOAD.get("beats_baseline")) and _ml_servable()
+    served = _served_on_crops()
+    per_raw = (_PAYLOAD.get("fallback") or {}).get("per_crop") or {}
+    # Keys are lowercased GUIDs by trainer convention; normalize defensively anyway.
+    per = {str(k).lower(): (v or {}) for k, v in per_raw.items()}
+    crops: dict[str, dict] = {}
+    for cid in sorted(set(per.keys()) | (served or set())):
+        n_obs = per.get(cid, {}).get("n_obs")
+        crops[cid] = {
+            "ready": bool(model_active and (served is None or cid in served)),
+            "nObs": int(n_obs) if n_obs is not None else None,
+        }
+    return {
+        "modelVersion": (_META or {}).get("version"),
+        "minHistoryObs": _min_history_obs(),
+        "modelActive": model_active,
+        "crops": crops,
+    }
