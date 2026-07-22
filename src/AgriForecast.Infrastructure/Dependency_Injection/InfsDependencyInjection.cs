@@ -47,6 +47,9 @@ public static class InfsDependencyInjection
         services.AddScoped<IPolicyFlagRepository, PolicyFlagRepository>();
         services.AddScoped<IFestivalCalendarRepository, FestivalCalendarRepository>();
         services.AddScoped<INewsEventRepository, NewsEventRepository>();
+        // Read-only store over the Python-owned NewsArticles capture table (admin News page
+        // "Ingested articles" feed) — raw SQL, deliberately outside the EF model.
+        services.AddScoped<Application.Services.INewsArticleReadStore, Services.NewsArticleRead.NewsArticleReadStore>();
         services.AddScoped<IForecastingService, ForecastingService>();
         services.AddScoped<IRecommendationService, RecommendationService>();
         // Read-only market-overview snapshot store (GET /api/forecast/market-overview).
