@@ -74,6 +74,20 @@ public class UserActivityEvent
         ActorUserId = actorUserId
     };
 
+    // An admin provisioned the account instead of the user signing themselves up. Same event type as
+    // a self-registration (the read side's filter set stays closed at five), told apart by carrying a
+    // TargetUserId — the new account — while the actor is the admin who created it. A
+    // self-registration never has a target, so the two can never be confused.
+    public static UserActivityEvent UserCreatedByAdmin(
+        Guid actingAdminId, Guid newUserId, DateTime occurredUtc) => new()
+    {
+        EventType = UserActivityEventType.UserRegistered,
+        OccurredUtc = occurredUtc,
+        ActorUserId = actingAdminId,
+        TargetUserId = newUserId,
+        Details = Cap("created by admin", DetailsMaxLength)
+    };
+
     public static UserActivityEvent RoleChanged(
         Guid actorUserId, Guid targetUserId, string? details, DateTime occurredUtc) => new()
     {
