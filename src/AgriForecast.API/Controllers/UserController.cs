@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using AgriForecast.Application.Requests.Users.Commands.Create;
 using AgriForecast.Application.Requests.Users.Commands.Delete;
 using AgriForecast.Application.Requests.Users.Commands.UpdateRole;
 using AgriForecast.Application.Requests.Users.DTOs;
@@ -45,6 +46,33 @@ public class UserController(IMediator mediator) : ControllerBase
     public async Task<IActionResult> GetAll([FromQuery] int page = 1, [FromQuery] int pageSize = 500)
     {
         var result = await mediator.Send(new GetAllUsersQuery { Page = page, PageSize = pageSize });
+        if (result.IsSuccess)
+            return Ok(result.Data);
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
+    // POST /api/users/create  body: { username, email, password, role }
+    // Admin-only provisioning of an account. Distinct from the anonymous POST /api/auth/register:
+    // that path issues a refresh cookie to the CALLER, which here would replace the acting admin's
+    // own cookie with the new user's. This one issues no token and no cookie — it returns the
+    // AdminUserDto projection only. The acting id comes from the JWT, never the body.
+    [HttpPost("create")]
+    public async Task<IActionResult> Create([FromBody] CreateUserDto body)
+    {
+        var actingId = GetActingUserId();
+        if (actingId is null)
+            return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
+
+        var command = new CreateUserCommand
+        {
+            Username = body.Username,
+            Email = body.Email,
+            Password = body.Password,
+            Role = body.Role,
+            ActingUserId = actingId.Value
+        };
+
+        var result = await mediator.Send(command);
         if (result.IsSuccess)
             return Ok(result.Data);
         return BadRequest(ToErrorResponse(result.Error));

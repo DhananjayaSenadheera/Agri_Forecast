@@ -35,6 +35,9 @@ public class UserActivityAudit : IUserActivityAudit
     public Task RecordUserRegisteredAsync(Guid actorUserId, CancellationToken ct = default) =>
         WriteAsync(UserActivityEvent.UserRegistered(actorUserId, DateTime.UtcNow), ct);
 
+    public Task RecordUserCreatedByAdminAsync(Guid actingAdminId, Guid newUserId, CancellationToken ct = default) =>
+        WriteAsync(UserActivityEvent.UserCreatedByAdmin(actingAdminId, newUserId, DateTime.UtcNow), ct);
+
     public Task RecordRoleChangedAsync(Guid actorUserId, Guid targetUserId, string newRole, CancellationToken ct = default) =>
         WriteAsync(UserActivityEvent.RoleChanged(actorUserId, targetUserId, $"role -> {newRole}", DateTime.UtcNow), ct);
 
