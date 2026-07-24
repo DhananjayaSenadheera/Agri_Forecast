@@ -43,8 +43,10 @@ public class MarketsQueryHandlerTests
         public HashSet<Guid> PriceCarrying = new();
     }
 
-    private static MarketListRow Row(Guid id, string name, string? district, MarketType type, bool eco)
-        => new(id, name, district, type, eco);
+    private static MarketListRow Row(
+        Guid id, string name, string? district, MarketType type, bool eco,
+        bool hasStoredData = false, DateOnly? lastStoredDate = null, bool isTrainingSource = false)
+        => new(id, name, district, type, eco, hasStoredData, lastStoredDate, isTrainingSource);
 
     // ---- Empty ------------------------------------------------------------
 
@@ -89,6 +91,61 @@ public class MarketsQueryHandlerTests
         agg.District.Should().BeNull();
         ((int)agg.MarketType).Should().Be(3);
         agg.IsEconomicCenter.Should().BeFalse();
+    }
+
+    // ---- Monitoring fields map through (storage/freshness/training) --------
+
+    [Fact]
+    public async Task Maps_monitoring_fields_storing_lastDate_and_trainingSource()
+    {
+        var lastDay = new DateOnly(2026, 07, 22);
+        var store = new FakeStore
+        {
+            Rows =
+            {
+                // A live DEC: stores data, fresh, and feeds training.
+                Row(M1, "Dambulla", "Matale", MarketType.DEC, true,
+                    hasStoredData: true, lastStoredDate: lastDay, isTrainingSource: true),
+                // The national-average placeholder: stores nothing, never feeds training.
+                Row(M2, "CBSL National Average", null, MarketType.NationalAggregate, false,
+                    hasStoredData: false, lastStoredDate: null, isTrainingSource: false),
+            }
+        };
+
+        var result = await Build(store).Handle(new GetMarketsQuery(), default);
+
+        var live = result.Data.Single(m => m.Id == M1);
+        live.HasStoredData.Should().BeTrue();
+        live.LastStoredDate.Should().Be(lastDay);
+        live.IsTrainingSource.Should().BeTrue();
+
+        var placeholder = result.Data.Single(m => m.Id == M2);
+        placeholder.HasStoredData.Should().BeFalse();
+        placeholder.LastStoredDate.Should().BeNull();
+        placeholder.IsTrainingSource.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Stored_but_not_usable_market_is_not_a_training_source()
+    {
+        // Models the honest distinction the store draws: a market can hold rows (stored ✓)
+        // yet contribute nothing usable, so training source stays false. The handler simply
+        // carries whatever the store computed — this pins that it does not re-derive it.
+        var store = new FakeStore
+        {
+            Rows =
+            {
+                Row(M1, "Held-only Market", "Colombo", MarketType.Wholesale, false,
+                    hasStoredData: true, lastStoredDate: new DateOnly(2026, 07, 20),
+                    isTrainingSource: false),
+            }
+        };
+
+        var result = await Build(store).Handle(new GetMarketsQuery(), default);
+
+        var m = result.Data.Single();
+        m.HasStoredData.Should().BeTrue();
+        m.IsTrainingSource.Should().BeFalse();
     }
 
     // ---- hasPrices flag threading + filter --------------------------------
