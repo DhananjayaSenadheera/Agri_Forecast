@@ -33,7 +33,10 @@ public class GetMarketsQueryHandler
             Name = r.Name,
             District = r.District,
             MarketType = r.MarketType,
-            IsEconomicCenter = r.IsEconomicCenter
+            IsEconomicCenter = r.IsEconomicCenter,
+            HasStoredData = r.HasStoredData,
+            LastStoredDate = r.LastStoredDate,
+            IsTrainingSource = r.IsTrainingSource
         }).ToList();
 
         _logger.LogInformation(

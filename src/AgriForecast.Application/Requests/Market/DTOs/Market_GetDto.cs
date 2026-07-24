@@ -18,4 +18,14 @@ public class Market_GetDto
     public string? District { get; set; }
     public MarketType MarketType { get; set; }
     public bool IsEconomicCenter { get; set; }
+
+    // --- Monitoring status (admin Markets registry) ---
+    // Whether the market stores any price observations at all (any status).
+    public bool HasStoredData { get; set; }
+    // Most recent observed date of its stored data; null when nothing is stored.
+    // DateOnly serializes as "yyyy-MM-dd" (no JsonStringEnumConverter here); the FE
+    // renders it with formatDate() and treats null as "never".
+    public DateOnly? LastStoredDate { get; set; }
+    // Whether this market currently feeds model training (feature-safe + usable data).
+    public bool IsTrainingSource { get; set; }
 }
