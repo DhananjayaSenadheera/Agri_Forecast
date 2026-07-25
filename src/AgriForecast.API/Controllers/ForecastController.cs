@@ -1,6 +1,7 @@
 using AgriForecast.Application.Requests.Crop.Quaries.GetBest;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetCropReadiness;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetHarvest;
+using AgriForecast.Application.Requests.Forecast.Quaries.GetHarvestWindow;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetMarketOverview;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetMonthly;
 using AgriForecast.Application.Requests.Forecast.Quaries.GetTimeline;
@@ -45,6 +46,19 @@ public class ForecastController(IMediator mediator) : ControllerBase
     public async Task<IActionResult> GetCropTimeline(Guid cropId, [FromQuery] int months = 12, [FromQuery] DateOnly? asOf = null)
     {
         var result = await mediator.Send(new GetCropTimelineQuery { CropId = cropId, Months = months, AsOf = asOf });
+        if (result.IsSuccess)
+            return Ok(result.Data);
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
+    // Best planting/harvest window (UI 2026-07-25). Ranks candidate planting dates
+    // by the price their harvest is forecast to fetch. A not-rankable response
+    // (rankable=false + reasonCode) is a valid 200 — the UI shows an honest "we
+    // cannot rank dates for this crop yet" state. Only ML transport failure 400s.
+    [HttpGet("crop/{cropId}/harvest-window")]
+    public async Task<IActionResult> GetHarvestWindow(Guid cropId, [FromQuery] int horizonDays = 90, [FromQuery] DateOnly? asOf = null)
+    {
+        var result = await mediator.Send(new GetHarvestWindowQuery { CropId = cropId, HorizonDays = horizonDays, AsOf = asOf });
         if (result.IsSuccess)
             return Ok(result.Data);
         return BadRequest(ToErrorResponse(result.Error));

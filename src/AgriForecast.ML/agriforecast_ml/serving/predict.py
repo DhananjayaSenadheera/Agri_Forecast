@@ -13,8 +13,9 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
+from .. import features
 from ..db import get_engine
-from ..load import resolve_forecast_gp
+from ..load import load_festivals, resolve_forecast_gp
 from ..registry import registry
 from . import explain
 from .build_x import build_x
@@ -420,27 +421,31 @@ def _model_quantiles_safe(row, crop_id: str | None = None) -> dict | None:
         return None
 
 
-def _model_quantiles(row, crop_id: str | None = None) -> dict:
-    """Quantile predictions for the promoted ML path.
+def _model_quantiles_frame(X, crop_id: str | None = None) -> dict:
+    """Quantile predictions for an ALREADY-BUILT model-input frame of 1..N rows.
 
     served_ml_kind == "model":    expm1(model_pred)
     served_ml_kind == "residual": expm1(model_pred + log1p(offset)) where offset
                                   is the persisted per-crop train-only mean.
+
+    The inverse-transform maths lives here ONCE so the single-shot path
+    (_model_quantiles) and the multi-date what-if sweep (harvest_window) can never
+    disagree about how a raw model output becomes a rupee price. Returns arrays
+    aligned with X's rows.
     """
-    X = _build_X(row)
     kind = _served_ml_kind()
     if kind == "residual":
-        offset = _residual_offset(crop_id)
-        log_off = float(np.log1p(offset))
-        out = {}
-        for q, mdl in _PAYLOAD["residual_models"].items():
-            out[q] = float(np.expm1(mdl.predict(X)[0] + log_off))
-        return out
+        log_off = float(np.log1p(_residual_offset(crop_id)))
+        return {q: np.expm1(mdl.predict(X) + log_off)
+                for q, mdl in _PAYLOAD["residual_models"].items()}
     # default pooled "model" path
-    out = {}
-    for q, mdl in _PAYLOAD["models"].items():
-        out[q] = float(np.expm1(mdl.predict(X))[0])
-    return out
+    return {q: np.expm1(mdl.predict(X)) for q, mdl in _PAYLOAD["models"].items()}
+
+
+def _model_quantiles(row, crop_id: str | None = None) -> dict:
+    """Quantile predictions for ONE feature row (the 1-row case of the frame path)."""
+    out = _model_quantiles_frame(_build_X(row), crop_id)
+    return {q: float(v[0]) for q, v in out.items()}
 
 
 def predict_harvest(crop_id: str, plant_date: date) -> dict:
@@ -543,6 +548,231 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
     if top_factors is not None:
         result["topFactors"] = top_factors
     return result
+
+
+# =============================================================================
+# Best harvest window — the "when should I plant to sell into a good price?" sweep
+# =============================================================================
+# HOW IT WORKS, and why it is honest.
+#
+# The model is trained as: features known at observation date D -> price at
+# D + GrowthPeriodDays. So scoring a row IS asking "if I plant on D, what will the
+# harvest fetch?". Sweeping D over the next few months and comparing the answers
+# is therefore a question the model was literally built to answer.
+#
+# The trap: _latest_feature_row(crop, D) returns the newest row with
+# ObservationDate <= D, so for every FUTURE D that is the same row — today's. A
+# naive sweep re-scores identical inputs and draws a perfectly flat line, then
+# "picks a winner" out of floating-point noise. That is the failure mode this
+# function exists to avoid.
+#
+# The fix is a WHAT-IF row per candidate date:
+#   FROZEN at the anchor row's values -- price/lags/rolling means, weather, macro,
+#     FX, sentiment, policy, cross-market spreads. These are genuinely unknown for
+#     a future date; holding them at their last OBSERVED value is the honest
+#     choice (assuming anything else would be inventing data).
+#   RECOMPUTED per candidate date -- the calendar/seasonality columns and the
+#     harvest-anchored festival columns. These are pure functions of a date
+#     (features.calendar_features / features._festival_features, the SAME code the
+#     training rows were built with), and the festival calendar is knowable in
+#     advance, so recomputing them introduces no lookahead and no leakage.
+#
+# What the farmer is therefore being told: "holding today's market and weather
+# conditions constant, this is how the SEASONAL and FESTIVAL-DEMAND structure of
+# the year prices your harvest." It ranks TIMING, not future weather — and the
+# API says exactly that in `explanation` so the UI cannot overclaim.
+#
+# Every path that cannot support that claim returns rankable=False with a reason
+# code instead of a window. Fabricating a recommendation here would be worse than
+# offering none: a farmer can plant on a date they cannot un-plant.
+
+_WINDOW_HORIZON_DAYS = 90     # default sweep length (candidate planting dates)
+_WINDOW_MAX_HORIZON = 365     # hard cap: one seasonal cycle; beyond it the frozen
+                              # price anchor is far too stale to mean anything
+_WINDOW_LEN_DEFAULT = 14      # window length when the crop has no HarvestWindowDays
+_WINDOW_LEN_MIN = 7           # a 1-3 day "window" is not actionable advice
+_WINDOW_LEN_MAX = 30
+# Peak-to-trough spread, as a fraction of the median forecast, below which we
+# refuse to name a best window. A curve this flat carries no timing signal — any
+# "winner" would be model noise dressed up as advice.
+_WINDOW_FLAT_EPS = 0.005
+
+
+def _window_len_for(row) -> int:
+    """Window length in days: the crop's own HarvestWindowDays (how long it keeps
+    yielding once mature) when curated, else a sane default. Clamped so the answer
+    is always actionable — neither a single day nor a whole season."""
+    raw = row.get("HarvestWindowDays") if row is not None else None
+    n = int(raw) if raw is not None and pd.notna(raw) else _WINDOW_LEN_DEFAULT
+    return max(_WINDOW_LEN_MIN, min(n, _WINDOW_LEN_MAX))
+
+
+def _window_unavailable(crop_id, crop_name, as_of, gp, reason_code, explanation):
+    """The honest empty answer: no points, no window, and a code saying why."""
+    return {
+        "cropId": crop_id,
+        "cropName": crop_name,
+        "asOf": as_of.isoformat(),
+        "growthPeriodDays": gp,
+        "rankable": False,
+        "reasonCode": reason_code,
+        "activePredictor": "unavailable",
+        "confidence": "Low",
+        "modelVersion": (_META or {}).get("version"),
+        "explanation": explanation,
+        "windowDays": None,
+        "points": [],
+        "best": None,
+    }
+
+
+def harvest_window(crop_id: str, as_of: date,
+                   horizon_days: int = _WINDOW_HORIZON_DAYS) -> dict:
+    """Rank candidate planting dates over the next `horizon_days` by the price
+    their harvest is forecast to fetch, and name the best contiguous window.
+
+    See the module-section comment above for the what-if construction and the
+    honesty gates. Returns rankable=False (never a fabricated window) whenever the
+    crop has no harvest horizon, the promoted model cannot serve it, or the
+    resulting curve is too flat to carry a timing signal.
+    """
+    if _PAYLOAD is None:
+        raise RuntimeError("No model registered — run train_model_a.py first.")
+
+    crop_id = str(crop_id).lower()  # GUID case varies by caller; normalize
+    horizon_days = max(1, min(int(horizon_days), _WINDOW_MAX_HORIZON))
+
+    row = _latest_feature_row(crop_id, as_of)
+    crop_name, gp = (row["CropName"], int(row["GrowthPeriodDays"])) if row is not None \
+        and pd.notna(row.get("GrowthPeriodDays")) else _crop_meta(crop_id)
+
+    # --- honesty gates, in the order that makes the reason most specific --------
+    if not gp:
+        return _window_unavailable(
+            crop_id, crop_name, as_of, None, "no_growth_period",
+            "This crop has no verified growth period yet, so we cannot say which "
+            "planting date leads to which harvest date.")
+    if row is None:
+        return _window_unavailable(
+            crop_id, crop_name, as_of, gp, "no_feature_row",
+            "We have no recent data for this crop to base a timing comparison on.")
+    if not (bool(_PAYLOAD.get("beats_baseline")) and _ml_servable()):
+        return _window_unavailable(
+            crop_id, crop_name, as_of, gp, "model_inactive",
+            "The forecasting model is not active, and the baseline predictor is "
+            "the same for every date — so it cannot rank planting dates.")
+    if not _is_model_served(crop_id):
+        return _window_unavailable(
+            crop_id, crop_name, as_of, gp, "crop_not_model_served",
+            "We are still collecting data for this crop. Until the model covers "
+            "it, every date would return the same price — so we will not guess.")
+
+    # --- build the what-if rows -------------------------------------------------
+    plant_dates = [as_of + timedelta(days=i) for i in range(horizon_days + 1)]
+    harvest_dates = [d + timedelta(days=gp) for d in plant_dates]
+    plant_idx = pd.DatetimeIndex(plant_dates)
+
+    cal = features.calendar_features(plant_idx)
+    try:
+        events_arr, fest_windows = features._festival_windows(load_festivals())
+    except Exception:
+        # A missing/unreadable calendar must not 500 the request; degrade to "no
+        # festivals known", exactly as the feature build does. Seasonality still
+        # varies by date, so the sweep remains meaningful (just festival-blind).
+        _log.warning("Festival calendar unavailable for the harvest-window sweep "
+                     "— seasonality only.", exc_info=True)
+        events_arr, fest_windows = features._festival_windows(None)
+    fest = features._festival_features(
+        pd.Series(plant_idx), pd.Series(pd.DatetimeIndex(harvest_dates)),
+        events_arr, fest_windows)
+
+    anchor = dict(row)
+    frames = []
+    for i in range(len(plant_dates)):
+        whatif = dict(anchor)  # frozen: price / weather / macro / market columns
+        for c in features.CALENDAR_FEATURE_COLS:
+            whatif[c] = cal.iloc[i][c]
+        for c in features.FESTIVAL_FEATURE_COLS:
+            whatif[c] = fest.iloc[i][c]
+        # Per-row build_x so the coercion + NaN discipline is byte-identical to
+        # the single-shot path; batched below purely to predict once, not N times.
+        frames.append(build_x(whatif, _PAYLOAD))
+    X = pd.concat(frames, ignore_index=True)
+    for c in _PAYLOAD["categorical"]:
+        if c in X.columns:
+            X[c] = X[c].astype("category")  # concat can drop the category dtype
+
+    try:
+        q = _model_quantiles_frame(X, crop_id)
+    except Exception:
+        _log.warning("Harvest-window sweep failed to score crop %s under promoted "
+                     "model %s.", crop_id, (_META or {}).get("version"),
+                     exc_info=True)
+        return _window_unavailable(
+            crop_id, crop_name, as_of, gp, "scoring_failed",
+            "We could not compare planting dates for this crop just now.")
+
+    p10s, p50s, p90s = q["p10"], q["p50"], q["p90"]
+
+    # --- flat-curve gate: refuse to rank noise ----------------------------------
+    level = float(np.median(p50s))
+    spread = float(np.max(p50s) - np.min(p50s))
+    if level <= 0 or (spread / level) < _WINDOW_FLAT_EPS:
+        return _window_unavailable(
+            crop_id, crop_name, as_of, gp, "flat_curve",
+            "For this crop the forecast is effectively the same whenever you "
+            "plant, so there is no better or worse time to aim for.")
+
+    # --- pick the best contiguous window ---------------------------------------
+    window_days = _window_len_for(row)
+    span = min(window_days, len(p50s))
+    means = np.convolve(p50s, np.ones(span) / span, mode="valid")
+    start = int(np.argmax(means))
+    end = start + span - 1
+
+    # Uplift is stated against the AVERAGE date in the swept horizon — "better than
+    # planting at a typical time", not against the worst date (which would inflate
+    # the number) nor against today (which would flip sign arbitrarily).
+    baseline = float(np.mean(p50s))
+    best_price = float(means[start])
+
+    points = [{
+        "plantDate": plant_dates[i].isoformat(),
+        "harvestDate": harvest_dates[i].isoformat(),
+        "predictedPrice": round(float(p50s[i]), 2),
+        "lowerBound": round(float(min(p10s[i], p50s[i])), 2),
+        "upperBound": round(float(max(p90s[i], p50s[i])), 2),
+        "inBestWindow": start <= i <= end,
+    } for i in range(len(plant_dates))]
+
+    _, tier = _resolve_fallback(crop_id, crop_name)
+    return {
+        "cropId": crop_id,
+        "cropName": crop_name,
+        "asOf": as_of.isoformat(),
+        "growthPeriodDays": gp,
+        "rankable": True,
+        "reasonCode": "ml_served",
+        "activePredictor": _served_ml_kind(),
+        "confidence": _confidence_for(model_served=True, tier=tier),
+        "modelVersion": (_META or {}).get("version"),
+        "explanation": (
+            "Compares planting dates using the season and festival demand around "
+            "each harvest date. Today's prices and weather are held constant, so "
+            "this ranks TIMING — it is not a weather forecast."),
+        "windowDays": span,
+        "points": points,
+        "best": {
+            "plantStart": plant_dates[start].isoformat(),
+            "plantEnd": plant_dates[end].isoformat(),
+            "harvestStart": harvest_dates[start].isoformat(),
+            "harvestEnd": harvest_dates[end].isoformat(),
+            "predictedPrice": round(best_price, 2),
+            "lowerBound": round(float(np.mean(p10s[start:end + 1])), 2),
+            "upperBound": round(float(np.mean(p90s[start:end + 1])), 2),
+            "upliftPct": round((best_price - baseline) / baseline * 100.0, 1),
+        },
+    }
 
 
 def _monthly_history(crop_id: str, as_of: date, max_months: int = 12) -> list[dict]:
