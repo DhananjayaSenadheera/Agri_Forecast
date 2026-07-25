@@ -11,9 +11,8 @@ namespace AgriForecast.Application.Requests.Forecast.Quaries.GetHarvest;
 public class GetHarvestForecastQueryHandler
     : IRequestHandler<GetHarvestForecastQuery, Result<HarvestForecast_GetDto>>
 {
-    // Trailing window for the "current price" average (agri-ml-engineer: avoid a
-    // single noisy day flipping the recommendation).
-    private const int CurrentPriceWindow = 14;
+    // The "current price" rule lives in CurrentPriceRule so the best-harvest-window
+    // screen computes the identical number — the two screens are read side by side.
 
     // Staleness guard: if the freshest servable price is older than this before the
     // plant date, treat the signal as low-trust (caps the recommendation).
@@ -36,20 +35,10 @@ public class GetHarvestForecastQueryHandler
     public async Task<Result<HarvestForecast_GetDto>> Handle(
         GetHarvestForecastQuery request, CancellationToken cancellationToken)
     {
-        // a. Current price = average of the daily mid (Min+Max)/2 over the trailing
-        //    14 rows as of the plant date; fall back to the single latest day if
-        //    fewer rows are available. asOf = PlantDate prevents lookahead leakage
-        //    (a historical plant date must not see prices observed after planting).
-        var recent = await _marketPriceRepository.GetRecentByCropIdAsync(
-            request.CropId, CurrentPriceWindow, request.PlantDate, cancellationToken);
-
-        decimal currentPrice = 0m;
-        DateOnly? latestObservation = null;
-        if (recent.Count > 0)
-        {
-            currentPrice = Math.Round(recent.Average(p => (p.MinPrice + p.MaxPrice) / 2m), 2);
-            latestObservation = recent.Max(p => p.PriceDate);
-        }
+        // a. Current price, as of the PLANT date so a historical plant date cannot
+        //    see prices observed after the planting decision was made.
+        var (currentPrice, latestObservation) = await CurrentPriceRule.ComputeAsync(
+            _marketPriceRepository, request.CropId, request.PlantDate, cancellationToken);
 
         // b. Call the Python ML service. Fail safe on null.
         var prediction = await _predictionClient.PredictAsync(

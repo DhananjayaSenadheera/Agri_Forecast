@@ -448,6 +448,129 @@ def _model_quantiles(row, crop_id: str | None = None) -> dict:
     return {q: float(v[0]) for q, v in out.items()}
 
 
+# =============================================================================
+# The WHAT-IF row — the ONE definition of "score this crop for planting date D"
+# =============================================================================
+# Both date-answering endpoints ask the same question — /predict asks it once,
+# /harvest-window asks it for every candidate date — so they must build the model
+# input the same way. They did not: harvest_window built a what-if row per date
+# while predict_harvest scored the anchor row untouched. Result (the reported
+# symptom): the window panel recommended a planting date, the forecast screen
+# quoted a different price for that SAME date, and a farmer who picked a date from
+# INSIDE the recommended window could then be told "not recommended". That
+# contradiction is the bug this helper exists to make structurally impossible.
+#
+# The mechanism. _latest_feature_row(crop, D) returns the newest row with
+# ObservationDate <= D. For any FUTURE D that is TODAY's row; even for a PAST D it
+# is usually some days earlier than D. Scoring it unchanged answers "what if I
+# plant on the anchor's observation date", never "what if I plant on D".
+#
+# So we build a WHAT-IF row per requested date:
+#   FROZEN at the anchor row's values -- price/lags/rolling means, weather, macro,
+#     FX, sentiment, policy, cross-market spreads. These are genuinely unknown for
+#     a future date; holding them at their last OBSERVED value is the honest
+#     choice (assuming anything else would be inventing data).
+#   RECOMPUTED for the requested date -- the calendar/seasonality columns and the
+#     harvest-anchored festival columns, through features.calendar_features /
+#     features._festival_features, i.e. the SAME code the training rows were built
+#     with (no train/serve skew one layer above what build_x.py guards).
+#
+# Why the recompute is NOT lookahead. Those columns are pure functions of a DATE
+# plus a festival calendar that is gazetted in advance. Knowing that day-of-year
+# 104 sits where it sits in the seasonal cycle, or that 2026-04-13 is Avurudu,
+# requires zero knowledge of the future market. Nothing that would have to be
+# OBSERVED (a price, a rainfall total, a CPI print) is ever moved forward — that
+# is the line, and it is exactly the line the feature build draws.
+#
+# Past dates get the recompute too: encoding the date the farmer actually asked
+# about is strictly more correct than inheriting the anchor's older encoding, and
+# it is the same deterministic calendar maths either way.
+# --- Festival-calendar cache -------------------------------------------------
+# _whatif_rows now runs on EVERY /predict and /timeline request, not just the
+# sweep, so re-reading FestivalCalendarEntries per request would put a DB
+# round-trip on the two hottest endpoints for a ~64-row table that changes a few
+# times a year. Cached process-wide, exactly like the promoted _PAYLOAD above.
+#
+# STALENESS TRADEOFF (write this down rather than discover it later): a gazette
+# update — a new/moved festival date seeded through the .NET admin path — does
+# NOT reach a running serving process until it restarts. That is the same
+# lifecycle the promoted model payload already has (loaded once at import), so
+# serving is consistent about it: model + calendar both refresh on deploy.
+#
+# Deliberately NOT cached: an EMPTY calendar. load_festivals() swallows DB errors
+# and returns an empty frame, so "empty" is indistinguishable from "unreachable";
+# caching it would pin a transient outage into festival-blind forecasts until the
+# next restart. Empty is cheap to re-query, so we retry on the next request.
+# Tests force a reload by monkeypatching _FESTIVAL_WINDOWS back to None.
+_FESTIVAL_WINDOWS: tuple | None = None
+
+
+def _festival_windows_cached():
+    """(events_arr, leadup_windows) for the what-if build — see the cache note."""
+    global _FESTIVAL_WINDOWS
+    if _FESTIVAL_WINDOWS is not None:
+        return _FESTIVAL_WINDOWS
+    try:
+        events_arr, windows = features._festival_windows(load_festivals())
+    except Exception:
+        # A missing/unreadable calendar must not fail the request; degrade to "no
+        # festivals known", exactly as the feature build does. Seasonality still
+        # varies by date, so the answer stays meaningful (just festival-blind).
+        # Not cached -> the next request retries.
+        _log.warning("Festival calendar unavailable for the what-if row build "
+                     "— seasonality only.", exc_info=True)
+        return features._festival_windows(None)
+    if events_arr.size:
+        _FESTIVAL_WINDOWS = (events_arr, windows)
+    return events_arr, windows
+
+
+def _whatif_rows(anchor_row, plant_dates, gp: int) -> list[dict]:
+    """One what-if row (plain dict, ready for build_x) per planting date.
+
+    ``anchor_row`` is a CropFeatureDaily row (pandas Series or dict) whose
+    non-calendar columns are frozen; ``gp`` is the crop's growth period in days
+    and anchors the festival features on the HARVEST date, matching how the
+    training label (price.shift(-GrowthPeriodDays)) was constructed.
+
+    Raises only on a genuinely broken calendar/date computation; every caller
+    treats that as "cannot honestly encode this date" and degrades to its own
+    fallback rather than scoring the anchor's stale calendar.
+    """
+    plant_idx = pd.DatetimeIndex(list(plant_dates))
+    harvest_idx = plant_idx + pd.Timedelta(days=int(gp))
+
+    cal = features.calendar_features(plant_idx)
+    events_arr, fest_windows = _festival_windows_cached()
+    fest = features._festival_features(
+        pd.Series(plant_idx), pd.Series(harvest_idx), events_arr, fest_windows)
+
+    anchor = dict(anchor_row)
+    rows: list[dict] = []
+    for i in range(len(plant_idx)):
+        whatif = dict(anchor)  # frozen: price / weather / macro / market columns
+        for c in features.CALENDAR_FEATURE_COLS:
+            whatif[c] = cal.iloc[i][c]
+        for c in features.FESTIVAL_FEATURE_COLS:
+            whatif[c] = fest.iloc[i][c]
+        rows.append(whatif)
+    return rows
+
+
+def _ordered_interval(p10, p50, p90) -> tuple[float, float, float]:
+    """Round to 2dp and force p10 <= p50 <= p90.
+
+    ONE rounding rule for both date-answering endpoints, so /predict for date D
+    and the /harvest-window point for date D can never print different numbers.
+    The quantile models are fitted independently and CAN cross on a given row;
+    sorting is the tie-break. It is display-only — harvest_window still ranks on
+    the RAW p50s, so this can never move the recommended window.
+    """
+    lo, mid, hi = sorted([round(float(p10), 2), round(float(p50), 2),
+                          round(float(p90), 2)])
+    return lo, mid, hi
+
+
 def predict_harvest(crop_id: str, plant_date: date) -> dict:
     if _PAYLOAD is None:
         raise RuntimeError("No model registered — run train_model_a.py first.")
@@ -475,7 +598,25 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
     # happened to catch.
     model_served_crop = _is_model_served(crop_id)
     ml_attempted = bool(model_active and model_served_crop and row is not None and gp)
-    q = _model_quantiles_safe(row, crop_id) if ml_attempted else None
+    # Score the WHAT-IF row for the REQUESTED plant date, never the anchor row as
+    # it happened to be observed (see the what-if section above). Without this the
+    # anchor's own — for a future date, TODAY's — calendar encoding is scored, so
+    # every plant date returns the same price and /predict contradicts
+    # /harvest-window, which has always recomputed the date columns. The fallback
+    # path below scores no model row at all and is therefore untouched by this.
+    score_row = None
+    if ml_attempted:
+        try:
+            score_row = _whatif_rows(row, [plant_date], int(gp))[0]
+        except Exception:
+            # We cannot honestly encode the requested date -> do NOT quietly score
+            # the anchor's stale calendar instead. Degrade through the same
+            # ml_failed clamp as any other predict-time failure (Low confidence).
+            _log.warning(
+                "What-if row construction failed for crop %s / plant date %s "
+                "-> serving the fallback ladder.", crop_id, plant_date,
+                exc_info=True)  # server log only; the API never returns tracebacks
+    q = _model_quantiles_safe(score_row, crop_id) if score_row is not None else None
     if q is not None:
         p10, p50, p90 = q["p10"], q["p50"], q["p90"]
         active = _served_ml_kind()
@@ -485,7 +626,10 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
         explanation = "ML model forecast from current price, season and recent weather."
         # Farmer-meaningful factor codes from the ACTUAL promoted model (SHAP on
         # the served p50 model), aggregated per code. Deterministic per input.
-        top_factors = explain.top_factor_codes(row, _PAYLOAD, top_n=4)
+        # MUST be the same what-if row the quantiles came from — SHAP over the raw
+        # anchor row would explain a DIFFERENT input than the number printed above
+        # it (e.g. crediting January seasonality for an August planting).
+        top_factors = explain.top_factor_codes(score_row, _PAYLOAD, top_n=4)
     else:
         p10, p50, p90 = fb_q["p10"], fb_q["p50"], fb_q["p90"]
         active = "crop_mean_fallback"
@@ -525,7 +669,7 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
             history_obs=_crop_history_obs(crop_id))
         explanation = _fallback_explanation(tier)
 
-    p10, p50, p90 = sorted([round(p10, 2), round(p50, 2), round(p90, 2)])
+    p10, p50, p90 = _ordered_interval(p10, p50, p90)
     result = {
         "cropId": crop_id,
         "cropName": crop_name,
@@ -566,16 +710,13 @@ def predict_harvest(crop_id: str, plant_date: date) -> dict:
 # "picks a winner" out of floating-point noise. That is the failure mode this
 # function exists to avoid.
 #
-# The fix is a WHAT-IF row per candidate date:
-#   FROZEN at the anchor row's values -- price/lags/rolling means, weather, macro,
-#     FX, sentiment, policy, cross-market spreads. These are genuinely unknown for
-#     a future date; holding them at their last OBSERVED value is the honest
-#     choice (assuming anything else would be inventing data).
-#   RECOMPUTED per candidate date -- the calendar/seasonality columns and the
-#     harvest-anchored festival columns. These are pure functions of a date
-#     (features.calendar_features / features._festival_features, the SAME code the
-#     training rows were built with), and the festival calendar is knowable in
-#     advance, so recomputing them introduces no lookahead and no leakage.
+# The fix is a WHAT-IF row per candidate date, built by the SHARED _whatif_rows()
+# above (freeze the observed columns, recompute the calendar + harvest-anchored
+# festival columns) — see that section for the full freeze/recompute rule and the
+# leakage reasoning. It is shared with predict_harvest precisely so that the point
+# this sweep shows for date D and the forecast /predict returns for date D are the
+# same number; two implementations of the rule would drift back into contradicting
+# each other.
 #
 # What the farmer is therefore being told: "holding today's market and weather
 # conditions constant, this is how the SEASONAL and FESTIVAL-DEMAND structure of
@@ -667,47 +808,30 @@ def harvest_window(crop_id: str, as_of: date,
             "We are still collecting data for this crop. Until the model covers "
             "it, every date would return the same price — so we will not guess.")
 
-    # --- build the what-if rows -------------------------------------------------
+    # --- build the what-if rows (the SHARED construction, one per date) ----------
     plant_dates = [as_of + timedelta(days=i) for i in range(horizon_days + 1)]
     harvest_dates = [d + timedelta(days=gp) for d in plant_dates]
-    plant_idx = pd.DatetimeIndex(plant_dates)
 
-    cal = features.calendar_features(plant_idx)
+    # The row BUILD sits inside the same guard as the scoring call on purpose: a
+    # failure to encode the candidate dates (calendar_features / _festival_features
+    # raising) is the same class of event as a failure to score them — we cannot
+    # honestly compare planting dates either way. Keeping it outside would make
+    # this the ONE endpoint that 500s where /predict and /timeline degrade, for the
+    # identical underlying fault.
     try:
-        events_arr, fest_windows = features._festival_windows(load_festivals())
-    except Exception:
-        # A missing/unreadable calendar must not 500 the request; degrade to "no
-        # festivals known", exactly as the feature build does. Seasonality still
-        # varies by date, so the sweep remains meaningful (just festival-blind).
-        _log.warning("Festival calendar unavailable for the harvest-window sweep "
-                     "— seasonality only.", exc_info=True)
-        events_arr, fest_windows = features._festival_windows(None)
-    fest = features._festival_features(
-        pd.Series(plant_idx), pd.Series(pd.DatetimeIndex(harvest_dates)),
-        events_arr, fest_windows)
-
-    anchor = dict(row)
-    frames = []
-    for i in range(len(plant_dates)):
-        whatif = dict(anchor)  # frozen: price / weather / macro / market columns
-        for c in features.CALENDAR_FEATURE_COLS:
-            whatif[c] = cal.iloc[i][c]
-        for c in features.FESTIVAL_FEATURE_COLS:
-            whatif[c] = fest.iloc[i][c]
-        # Per-row build_x so the coercion + NaN discipline is byte-identical to
-        # the single-shot path; batched below purely to predict once, not N times.
-        frames.append(build_x(whatif, _PAYLOAD))
-    X = pd.concat(frames, ignore_index=True)
-    for c in _PAYLOAD["categorical"]:
-        if c in X.columns:
-            X[c] = X[c].astype("category")  # concat can drop the category dtype
-
-    try:
+        # Per-row build_x so the coercion + NaN discipline is byte-identical to the
+        # single-shot path; batched below purely to predict once, not N times.
+        frames = [build_x(whatif, _PAYLOAD)
+                  for whatif in _whatif_rows(row, plant_dates, gp)]
+        X = pd.concat(frames, ignore_index=True)
+        for c in _PAYLOAD["categorical"]:
+            if c in X.columns:
+                X[c] = X[c].astype("category")  # concat can drop the category dtype
         q = _model_quantiles_frame(X, crop_id)
     except Exception:
-        _log.warning("Harvest-window sweep failed to score crop %s under promoted "
-                     "model %s.", crop_id, (_META or {}).get("version"),
-                     exc_info=True)
+        _log.warning("Harvest-window sweep failed to build or score the what-if "
+                     "rows for crop %s under promoted model %s.",
+                     crop_id, (_META or {}).get("version"), exc_info=True)
         return _window_unavailable(
             crop_id, crop_name, as_of, gp, "scoring_failed",
             "We could not compare planting dates for this crop just now.")
@@ -736,14 +860,28 @@ def harvest_window(crop_id: str, as_of: date,
     baseline = float(np.mean(p50s))
     best_price = float(means[start])
 
-    points = [{
-        "plantDate": plant_dates[i].isoformat(),
-        "harvestDate": harvest_dates[i].isoformat(),
-        "predictedPrice": round(float(p50s[i]), 2),
-        "lowerBound": round(float(min(p10s[i], p50s[i])), 2),
-        "upperBound": round(float(max(p90s[i], p50s[i])), 2),
-        "inBestWindow": start <= i <= end,
-    } for i in range(len(plant_dates))]
+    # Rounded through the SAME _ordered_interval as predict_harvest, so a point
+    # here and /predict for that point's date print identical numbers.
+    points = []
+    for i in range(len(plant_dates)):
+        lo, mid, hi = _ordered_interval(p10s[i], p50s[i], p90s[i])
+        points.append({
+            "plantDate": plant_dates[i].isoformat(),
+            "harvestDate": harvest_dates[i].isoformat(),
+            "predictedPrice": mid,
+            "lowerBound": lo,
+            "upperBound": hi,
+            "inBestWindow": start <= i <= end,
+        })
+
+    # The best block's band is the window-average of the p10s/p90s. Rounded through
+    # _ordered_interval like everything else so lowerBound <= predictedPrice <=
+    # upperBound holds here too: averaging cannot fix crossed quantiles, and this
+    # block is the one part of the response nothing renders today, which is exactly
+    # how an ordering violation would ship unnoticed.
+    best_lo, best_mid, best_hi = _ordered_interval(
+        float(np.mean(p10s[start:end + 1])), best_price,
+        float(np.mean(p90s[start:end + 1])))
 
     _, tier = _resolve_fallback(crop_id, crop_name)
     return {
@@ -767,9 +905,9 @@ def harvest_window(crop_id: str, as_of: date,
             "plantEnd": plant_dates[end].isoformat(),
             "harvestStart": harvest_dates[start].isoformat(),
             "harvestEnd": harvest_dates[end].isoformat(),
-            "predictedPrice": round(best_price, 2),
-            "lowerBound": round(float(np.mean(p10s[start:end + 1])), 2),
-            "upperBound": round(float(np.mean(p90s[start:end + 1])), 2),
+            "predictedPrice": best_mid,
+            "lowerBound": best_lo,
+            "upperBound": best_hi,
             "upliftPct": round((best_price - baseline) / baseline * 100.0, 1),
         },
     }
@@ -818,12 +956,22 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
     (flat) and we say so. In BOTH cases the band WIDENS with horizon (half-spread
     scaled by sqrt(horizon)) because a single-anchor forecast is progressively
     less trustworthy further out.
+
+    The ML path scores the WHAT-IF row for as_of (_whatif_rows), so h=1 returns
+    the identical p10/p50/p90 that predict_harvest(crop, as_of) returns — the two
+    are drawn on the same screen and must never contradict each other.
+
+    KNOWN AND DELIBERATELY NOT FIXED HERE: the central estimate is the SAME p50 at
+    h=1/3/6/12; only the band widens. Making it horizon-sensitive is a design
+    decision about what a /timeline point means (the model's label is a single
+    harvest-time price at as_of + GrowthPeriodDays, not a term structure), not a
+    mechanical change — tracked separately.
     """
     if _PAYLOAD is None:
         raise RuntimeError("No model registered — run train_model_a.py first.")
 
     crop_id = str(crop_id).lower()  # normalize GUID case (prior bug)
-    crop_name, _ = _crop_meta(crop_id)
+    crop_name, meta_gp = _crop_meta(crop_id)
 
     history = _monthly_history(crop_id, as_of, max_months=12)
 
@@ -844,7 +992,39 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
     # the incumbent model (e.g. a CropId unseen by an older promoted encoder after
     # a corpus widening) -> serve the fallback ladder instead of 500-ing.
     ml_attempted = bool(model_active and model_served_crop and row is not None)
-    q = _model_quantiles_safe(row, crop_id) if ml_attempted else None
+    # Score the WHAT-IF row for as_of, exactly as predict_harvest does for its plant
+    # date (see the what-if section above). This is not cosmetic: /timeline and
+    # /predict render on the SAME screen — the hero price comes from /predict and
+    # the chart's harvest marker from /timeline's first forecast point — so the two
+    # must encode the same date. The anchor row can be days or weeks older than
+    # as_of (the feature store lags), and scoring it unchanged made the two numbers
+    # diverge. The size of the gap scales with how far the store lags as_of, so it
+    # is environment-dependent and NOT reproducible from this repo alone; it was
+    # material (double-digit %) on the live v17 payload when this was fixed.
+    score_row = row
+    if ml_attempted:
+        # gp resolved the way the rest of serving does: the feature row's own
+        # GrowthPeriodDays, else the CropAgronomyProfiles value from _crop_meta.
+        gp = int(row["GrowthPeriodDays"]) if pd.notna(row.get("GrowthPeriodDays")) \
+            else meta_gp
+        if gp:
+            try:
+                score_row = _whatif_rows(row, [as_of], int(gp))[0]
+            except Exception:
+                # Cannot honestly encode as_of -> do NOT quietly score the anchor's
+                # stale calendar. Degrade through the ml_failed clamp below, the
+                # same way predict_harvest does, so the two endpoints stay in step.
+                _log.warning(
+                    "What-if row construction failed for crop %s / as_of %s "
+                    "-> serving the fallback ladder.", crop_id, as_of,
+                    exc_info=True)  # server log only; the API never returns tracebacks
+                score_row = None
+        # gp missing (no verified agronomy profile): the festival columns are
+        # HARVEST-anchored, so there is no honest harvest date to anchor them on.
+        # Keep the pre-existing behaviour (score the anchor row as-is) rather than
+        # inventing a growth period. Unreachable for a served crop in practice —
+        # training needs gp to build the label — so this is a defensive branch.
+    q = _model_quantiles_safe(score_row, crop_id) if score_row is not None else None
     if q is not None:
         p10, p50, p90 = float(q["p10"]), float(q["p50"]), float(q["p90"])
         p10, p50, p90 = sorted([p10, p50, p90])
@@ -901,14 +1081,21 @@ def timeline(crop_id: str, as_of: date, months: int) -> dict:
     forecast = []
     for h in horizons:
         scale = h ** 0.5
-        lower = round(max(p50 - lower_gap * scale, 0.0), 2)  # price can't be negative
-        upper = round(p50 + upper_gap * scale, 2)
+        lower = max(p50 - lower_gap * scale, 0.0)  # price can't be negative
+        upper = p50 + upper_gap * scale
+        # Rounded through the SAME _ordered_interval as predict_harvest and the
+        # harvest-window points. The band maths is untouched (still computed from
+        # the UNROUNDED p50 + half-spreads); this only fixes the last step, so a
+        # rounding difference can never make the h=1 marker and the hero price on
+        # the same screen disagree. At h=1 the scale is 1, so the triple reduces to
+        # exactly (p10, p50, p90) — the same three numbers /predict returns.
+        lo, mid, hi = _ordered_interval(lower, p50, upper)
         forecast.append({
             "horizonMonths": h,
             "date": _add_months(as_of, h).isoformat(),
-            "predictedPrice": round(p50, 2),
-            "lowerBound": lower,
-            "upperBound": upper,
+            "predictedPrice": mid,
+            "lowerBound": lo,
+            "upperBound": hi,
         })
 
     return {

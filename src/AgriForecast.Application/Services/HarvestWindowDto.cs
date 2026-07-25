@@ -1,8 +1,9 @@
 namespace AgriForecast.Application.Services;
 
 // Best harvest window — the Python ML service POST /harvest-window response,
-// consumed VERBATIM (no reshaping, no derived fields). Ranks candidate planting
-// dates by the price their harvest is forecast to fetch.
+// consumed VERBATIM (the ML fields are neither reshaped nor re-derived here).
+// Ranks candidate planting dates by the price their harvest is forecast to fetch.
+// `CurrentPrice` is the one .NET-side addition; see its note below.
 //
 // THE CONTRACT THAT MATTERS: `Rankable`. When it is false there is NO window and
 // NO points — only a `ReasonCode` and a farmer-readable `Explanation`. That is the
@@ -16,6 +17,14 @@ public sealed class HarvestWindowDto
     public string? CropName { get; set; }
     public DateOnly AsOf { get; set; }
     public int? GrowthPeriodDays { get; set; }
+
+    // Today's price, filled in by the .NET handler (the ML service does not send it)
+    // using the SAME CurrentPriceRule as the harvest-forecast screen — so the panel
+    // can show whether the recommended window actually beats selling now, and the
+    // two screens can never quote different "today" prices for the same crop.
+    // 0 means unknown (no recent market data); the UI hides the comparison rather
+    // than pretending the window beats a price we do not have.
+    public decimal CurrentPrice { get; set; }
 
     // false => Points is empty and Best is null; show ReasonCode/Explanation.
     public bool Rankable { get; set; }
