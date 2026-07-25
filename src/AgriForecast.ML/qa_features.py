@@ -7,6 +7,7 @@ import pandas as pd
 
 from agriforecast_ml import load, features
 from agriforecast_ml.db import get_engine
+from agriforecast_ml.envfile import load_env_file
 
 FF = 5  # must match features._FFILL_LIMIT
 
@@ -23,6 +24,7 @@ def main():
         (passed if ok else failed).append(name)
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
 
+    load_env_file()  # so a bare `python qa_features.py` works without sourcing .env first
     eng = get_engine()
     feats = pd.read_sql("SELECT * FROM CropFeatureDaily", eng)
     feats["ObservationDate"] = pd.to_datetime(feats["ObservationDate"])
@@ -61,11 +63,22 @@ def main():
         + features._SPREAD_DERIVED_COLS
         + market_cols
     )
-    missing_cols = expected_cols - set(feats.columns)
-    check("all contract columns present (features.py is the source of truth)",
-          not missing_cols,
-          f"{feats.shape[1]} cols in DB, missing={sorted(missing_cols)}" if missing_cols
-          else f"{feats.shape[1]} cols in DB, {len(expected_cols)} expected")
+    # SYMMETRIC: missing columns are the obvious risk, but EXTRA columns are the
+    # dangerous one -- train/dataset.py selects model inputs by DENYLIST
+    # (`[c for c in df.columns if c not in _EXCLUDE]`), so any stray column that
+    # lands in CropFeatureDaily (a merge_asof _x/_y suffix leftover, a raw joined
+    # date, a leftover helper column) becomes a MODEL INPUT automatically, and
+    # store.write_features uses if_exists="replace" so it propagates on the very
+    # next daily run. The old hardcoded "51 columns" total caught both directions
+    # by accident; this check catches both directions on purpose.
+    db_cols = set(feats.columns)
+    missing_cols = expected_cols - db_cols
+    extra_cols = db_cols - expected_cols
+    check("all contract columns present, none extra (features.py is the source of truth)",
+          not missing_cols and not extra_cols,
+          f"{feats.shape[1]} cols in DB, {len(expected_cols)} expected"
+          f"{', missing=' + str(sorted(missing_cols)) if missing_cols else ''}"
+          f"{', extra=' + str(sorted(extra_cols)) if extra_cols else ''}")
     check("no duplicate (crop,date) keys",
           not feats.duplicated(["CropId", "ObservationDate"]).any())
 
@@ -92,28 +105,60 @@ def main():
               f"db={got_lag30} exp={exp_lag30}")
 
     print(f"\n=== TC3: label correctness (Brinjal gp={bgp}) ===")
+    exp_labels = []
     for d in samples:
         hd = d + pd.Timedelta(days=bgp)
         exp_label = dp.get(hd, np.nan)
+        exp_labels.append(exp_label)
         got_label = fb.loc[d, "LabelHarvestPrice"]
         ok = (pd.isna(got_label) and pd.isna(exp_label)) or (pd.notna(got_label) and abs(got_label - exp_label) < 0.01)
         check(f"Label @ {d.date()} -> {hd.date()}", ok, f"db={got_label} exp={exp_label}")
+    # Teeth guard: the both-NaN branch above auto-passes with no real comparison.
+    # If the sample dates ever drift into the unlabelled tail (no trading day
+    # exists gp days ahead yet), every TC3 check would silently go vacuous. At
+    # least one sample must carry a real, independently-recomputed label.
+    check("TC3 has a non-NaN expected label (test has teeth, not vacuous both-NaN)",
+          any(pd.notna(v) for v in exp_labels),
+          f"{sum(pd.notna(v) for v in exp_labels)}/{len(exp_labels)} samples labelled")
 
     print("\n=== TC4: weather point-in-time (uses last COMPLETE month M-1) ===")
     weather = load.load_weather()
     wmap = {r.Month: (r.AvgTemperature, r.TotalRainfall) for r in weather.itertuples()}
-    for d in samples:
+    # Sample selection: fb.index[[100, 200, 300]] (used by TC2/TC3) lands in
+    # 2017-2023 -- long before WxAvgTempC coverage starts (weather is only
+    # loaded from 2025-02 onward). Comparing both-NaN there auto-passes without
+    # testing anything (measured: 48,230/83,914 store rows have NULL
+    # WxAvgTempC). Pick samples the STORE itself flags as weather-covered, then
+    # independently verify the recompute agrees -- a real, non-vacuous check.
+    wx_covered = fb.index[fb["WxAvgTempC"].notna()]
+    assert len(wx_covered) > 0, (
+        "no Brinjal rows have WxAvgTempC populated -- TC4 cannot select any "
+        "weather-covered sample; weather ingestion may be broken")
+    wx_samples = wx_covered[[0, len(wx_covered) // 2, -1]]
+    exp_temps = []
+    for d in wx_samples:
         cur = d.to_period("M") - 1
         exp_t = wmap.get(cur, (np.nan, np.nan))[0]
+        exp_temps.append(exp_t)
         got_t = fb.loc[d, "WxAvgTempC"]
         ok = (pd.isna(got_t) and pd.isna(exp_t)) or (pd.notna(got_t) and abs(got_t - exp_t) < 0.01)
         check(f"WxAvgTempC @ {d.date()} = wx[{cur}]", ok, f"db={got_t} exp={exp_t}")
+    # Teeth guard: mirrors TC3's -- at least one sample must have a real,
+    # independently-recomputed (non-NaN) expected temperature, or this whole
+    # test block is comparing NaN to NaN and proving nothing.
+    check("TC4 has a non-NaN expected temperature (test has teeth, not vacuous both-NaN)",
+          any(pd.notna(v) for v in exp_temps),
+          f"{sum(pd.notna(v) for v in exp_temps)}/{len(exp_temps)} samples had weather")
 
     print("\n=== TC5: LEAKAGE-BY-TRUNCATION — Beans, policy-transition era ===")
-    # Why Beans, not Brinjal: Brinjal's history starts 2025-05-05 and all seeded
-    # PolicyFlags have EffectiveFrom <= 2023-10-01, so Brinjal sees exactly ONE
-    # constant policy state across its entire history — truncation changes nothing
-    # and the test cannot catch a policy-join leak. Beans has 11 years of history
+    # Why Beans, not Brinjal: policy features are a NATIONAL signal (identical
+    # across crops for a given date -- see _attach_policy), so per se either
+    # crop's history overlaps the same 2020-2024 policy-transition window. The
+    # real reason is DATA DENSITY in the safe window: measured as of 2026-07,
+    # Brinjal has only 380 trading rows before the cutoff with 10 gaps > 30 days
+    # (its early-history coverage is thin/sparse), vs Beans' 1782 rows with just
+    # 1 such gap -- Beans gives a near-continuous, much larger safe-window sample,
+    # which is the stronger leakage guard. Beans has 11 years of history
     # (2015-06-22 onward) and the cutoff 2023-06-15 falls inside the 2020-2024
     # policy-transition window, giving 4 distinct ActivePolicyNetDirection values
     # in the safe window alone. This makes TC5 a genuine guard for all 5 policy
