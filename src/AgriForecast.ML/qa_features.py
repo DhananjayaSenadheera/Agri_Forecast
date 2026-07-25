@@ -27,14 +27,45 @@ def main():
     feats = pd.read_sql("SELECT * FROM CropFeatureDaily", eng)
     feats["ObservationDate"] = pd.to_datetime(feats["ObservationDate"])
     prices = load.load_prices()
+    crops = load.load_crops()
 
     print("=== TC1: table sanity ===")
     check("row count > 0", len(feats) > 0, f"{len(feats)} rows")
-    # 51 cols = 50 features + ComputedAtUtc. Prior 41 features + Chunk D's 9 new
-    # national signals: 4 sentiment (MeanSentiment, DroughtRatio, FloodRatio,
-    # PolicyRatio) + 5 policy (ActivePolicyNetDirection, ActivePolicyCount,
-    # PolicyImportBanActive, PolicyPriceCeilingActive, PolicyFertiliserSubsidyActive).
-    check("51 columns (50 features + ComputedAtUtc)", feats.shape[1] == 51, f"{feats.shape[1]} cols")
+    # CONTRACT check, not a magic count: assert every column the feature build is
+    # DECLARED to emit is actually present. Sourced from features.py's own shared
+    # constants (CALENDAR_FEATURE_COLS, FESTIVAL_FEATURE_COLS, and the private-but-
+    # importable *_FEATURES lists) plus the per-market spread columns generated
+    # from the live feature-safe market slugs, so this list is derived from the
+    # SAME source of truth build_features.py uses -- never re-typed by hand -- and
+    # still fails loudly if an expected column is ever dropped. A hardcoded total
+    # (the old "51 columns") goes stale every time a feature lands; this does not.
+    market_slugs = load.feature_safe_market_slugs()
+    market_cols = [f"Mkt{slug}AvgPrice" for slug in market_slugs] + \
+                  [f"Mkt{slug}Lag7" for slug in market_slugs]
+    expected_cols = set(
+        ["CropId", "CropCode", "CropName", "ObservationDate",
+         "AvgPrice", "MinPrice", "MaxPrice",
+         "RollMean7", "RollMean30", "RollMean90", "RollStd30", "RollStd90",
+         "Momentum", "PriceZScore90", "Lag7", "Lag30", "Lag60", "Lag90",
+         "PctChange30",
+         "WxAvgTempC", "WxRainfallMm", "WxTempLag1", "WxTempLag2",
+         "WxRainLag1", "WxRainLag2", "WxRainAnomaly",
+         "GrowthPeriodDays", "PlantingSeasonEnc", "HarvestWindowDays",
+         "HarvestDate", "LabelHarvestPrice", "LabelAvailable",
+         "FxUsdLkr", "ComputedAtUtc"]
+        + features.CALENDAR_FEATURE_COLS
+        + features.FESTIVAL_FEATURE_COLS
+        + features._SENTIMENT_FEATURES
+        + features._POLICY_FEATURES
+        + features._MACRO_FEATURES
+        + features._SPREAD_DERIVED_COLS
+        + market_cols
+    )
+    missing_cols = expected_cols - set(feats.columns)
+    check("all contract columns present (features.py is the source of truth)",
+          not missing_cols,
+          f"{feats.shape[1]} cols in DB, missing={sorted(missing_cols)}" if missing_cols
+          else f"{feats.shape[1]} cols in DB, {len(expected_cols)} expected")
     check("no duplicate (crop,date) keys",
           not feats.duplicated(["CropId", "ObservationDate"]).any())
 
@@ -43,6 +74,9 @@ def main():
     bcrop = brinjal["CropId"].iloc[0]
     dp = daily_price(brinjal)
     fb = feats[feats["CropId"] == bcrop].set_index("ObservationDate").sort_index()
+    bmeta = crops.set_index("CropId").loc[bcrop]
+    bgp = load.resolve_forecast_gp(bmeta.get("IsVerified"), bmeta["GrowthPeriodDays"])
+    assert bgp is not None, "Brinjal has no resolvable GrowthPeriodDays -- check CropAgronomyProfiles"
 
     print("\n=== TC2: feature recompute (Brinjal, 3 sample dates) ===")
     samples = fb.index[[100, 200, 300]]
@@ -57,9 +91,9 @@ def main():
         check(f"Lag30 @ {d.date()}", (pd.isna(got_lag30) and pd.isna(exp_lag30)) or abs(got_lag30 - exp_lag30) < 0.01,
               f"db={got_lag30} exp={exp_lag30}")
 
-    print("\n=== TC3: label correctness (Brinjal gp=90) ===")
+    print(f"\n=== TC3: label correctness (Brinjal gp={bgp}) ===")
     for d in samples:
-        hd = d + pd.Timedelta(days=90)
+        hd = d + pd.Timedelta(days=bgp)
         exp_label = dp.get(hd, np.nan)
         got_label = fb.loc[d, "LabelHarvestPrice"]
         ok = (pd.isna(got_label) and pd.isna(exp_label)) or (pd.notna(got_label) and abs(got_label - exp_label) < 0.01)
@@ -92,7 +126,6 @@ def main():
     # NewsSentimentDaily is currently empty in the DB, so _attach_sentiment's
     # backward merge_asof is never executed in the real-data path. TC5b (below)
     # exercises it with synthetic data.
-    crops = load.load_crops()
     wx = load.load_weather()
     fx = load.load_fx()
     policy = load.load_policy_flags()
