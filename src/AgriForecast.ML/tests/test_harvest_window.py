@@ -17,6 +17,14 @@ Two ways that claim can quietly become false, both pinned here:
      pins features.calendar_features against the columns build_crop_features
      actually emits, which is the reason that helper is shared rather than copied.
 
+  3. The two date-answering endpoints stop agreeing. `TestForecastAgreement` pins
+     that /harvest-window's point for date D and predict_harvest(crop, D) return
+     the SAME p10/p50/p90 — they share ONE what-if construction (predict._whatif_rows)
+     and ONE rounding rule (predict._ordered_interval). They did not always: until
+     the fix, predict_harvest scored the anchor row untouched, so it returned the
+     same price for every future date and directly contradicted the window panel
+     a farmer had just picked the date from.
+
 Everything else here is the honesty ladder: each gate that must return
 rankable=False instead of inventing a window a farmer cannot un-plant.
 
@@ -25,7 +33,7 @@ and the "models" are deterministic fakes.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -164,6 +172,11 @@ def _arm(monkeypatch, payload=None, *, row=_ANCHOR, servable=True,
         predict, "load_festivals",
         lambda: festivals if festivals is not None else pd.DataFrame(
             columns=["FestivalKey", "Date", "LeadUpDays", "IsProvisional", "Source"]))
+    # The festival calendar is cached process-wide (one DB read per process, see
+    # predict._FESTIVAL_WINDOWS). Reset it per test or the first test to supply a
+    # NON-empty calendar would leak its festivals into every later test — and
+    # monkeypatching load_festivals alone would silently have no effect.
+    monkeypatch.setattr(predict, "_FESTIVAL_WINDOWS", None)
 
 
 # Jan 1 start: day-of-year 1..91 climbs the rising quarter of the sine, so the
@@ -252,6 +265,202 @@ class TestSweep:
         assert len(out["points"]) == predict._WINDOW_MAX_HORIZON + 1
         for p in out["points"]:
             assert p["lowerBound"] <= p["predictedPrice"] <= p["upperBound"]
+        # The best block too — nothing renders it today, which is exactly how an
+        # ordering violation would ship unnoticed.
+        b = out["best"]
+        assert b["lowerBound"] <= b["predictedPrice"] <= b["upperBound"]
+
+    def test_crossed_quantiles_still_return_an_ordered_interval(self, monkeypatch):
+        """Independently-fitted quantile models CAN cross on a given row. Every
+        emitted interval must still be ordered — points and the best block."""
+        _arm(monkeypatch, payload=_payload(models={
+            "p10": _SeasonalModel(170.0),   # deliberately ABOVE p50/p90
+            "p50": _SeasonalModel(120.0),
+            "p90": _SeasonalModel(80.0),
+        }))
+        out = predict.harvest_window("c1", _AS_OF, horizon_days=90)
+        assert out["rankable"] is True
+        for p in out["points"]:
+            assert p["lowerBound"] <= p["predictedPrice"] <= p["upperBound"]
+        b = out["best"]
+        assert b["lowerBound"] <= b["predictedPrice"] <= b["upperBound"]
+
+
+# --------------------------------------------------------------------------- #
+# The two endpoints must not contradict each other.
+# --------------------------------------------------------------------------- #
+class TestForecastAgreement:
+    """The window panel and the forecast screen answer the SAME question.
+
+    A farmer taps a date out of the recommended window and lands on the forecast
+    screen for that date; if the two disagree, the app tells them "plant Aug 25"
+    and then "Aug 25 is not recommended". The only structural defence is that both
+    paths build the same what-if row and round it the same way — so these tests
+    compare the two outputs directly rather than re-deriving either.
+    """
+
+    def test_predict_harvest_matches_every_window_point(self, monkeypatch):
+        """THE agreement assertion: same crop, same anchor row, same date ->
+        identical p10/p50/p90 (and the same harvest date) from both endpoints."""
+        _arm(monkeypatch)
+        out = predict.harvest_window("c1", _AS_OF, horizon_days=90)
+        assert out["rankable"] is True
+
+        for p in out["points"]:
+            d = date.fromisoformat(p["plantDate"])
+            r = predict.predict_harvest("c1", d)
+            assert r["activePredictor"] == "model", "both must be on the ML path"
+            assert (r["lowerBound"], r["predictedPrice"], r["upperBound"]) == \
+                   (p["lowerBound"], p["predictedPrice"], p["upperBound"]), (
+                       f"window point and /predict disagree for {p['plantDate']}: "
+                       f"window={p['predictedPrice']} predict={r['predictedPrice']}")
+            assert r["harvestDate"] == p["harvestDate"]
+
+    def test_predict_harvest_varies_with_the_plant_date(self, monkeypatch):
+        """The bug itself. _latest_feature_row returns the same anchor for every
+        future date, so scoring it unchanged returned one price for all of them —
+        only the DISPLAYED harvest date moved."""
+        _arm(monkeypatch)
+        prices = [predict.predict_harvest("c1", _AS_OF + timedelta(days=i))
+                  ["predictedPrice"] for i in range(0, 91, 10)]
+        assert len(set(prices)) == len(prices), (
+            "predict_harvest is date-insensitive again — it is scoring the raw "
+            "anchor row instead of the what-if row for the requested date")
+        assert prices == sorted(prices), "Jan->Apr should climb the seasonal sine"
+
+    def test_past_plant_date_is_encoded_for_that_date_not_the_anchor(self, monkeypatch):
+        """A PAST date's anchor row is the newest row <= that date, which may still
+        be days earlier. Recomputing the calendar for the requested date is not
+        leakage (calendar/festival columns are deterministic date functions) and is
+        strictly more correct than inheriting the anchor's older encoding."""
+        _arm(monkeypatch)
+        past = _AS_OF - timedelta(days=120)
+        assert (predict.predict_harvest("c1", past)["predictedPrice"]
+                != predict.predict_harvest("c1", _AS_OF)["predictedPrice"])
+
+    def test_only_the_calendar_columns_move_the_price_freeze_holds(self, monkeypatch):
+        """The freeze rule: the what-if row handed to the model must carry the
+        anchor's OBSERVED columns untouched (price/weather/macro are unknowable for
+        a future date) and only the date-derived ones recomputed."""
+        _arm(monkeypatch)
+        seen: list[dict] = []
+        monkeypatch.setattr(predict, "_model_quantiles_safe",
+                            lambda row, crop_id=None: seen.append(dict(row)) or
+                            {"p10": 1.0, "p50": 2.0, "p90": 3.0})
+
+        d = _AS_OF + timedelta(days=45)
+        predict.predict_harvest("c1", d)
+        row = seen[0]
+
+        cal = features.calendar_features(pd.DatetimeIndex([d]))
+        for col in features.CALENDAR_FEATURE_COLS:
+            assert row[col] == pytest.approx(float(cal[col].iloc[0])), (
+                f"{col} was not recomputed for the requested plant date")
+        # Frozen: genuinely unknown for a future date, so held at last observed.
+        assert row["AvgPrice"] == _ANCHOR["AvgPrice"]
+
+    def test_shap_factors_describe_the_row_that_was_scored(self, monkeypatch):
+        """topFactors must explain the SAME row the number came from, or the
+        'why this forecast' list describes a different date than the price above it."""
+        _arm(monkeypatch)
+        scored: list[dict] = []
+        explained: list[dict] = []
+        monkeypatch.setattr(predict, "_model_quantiles_safe",
+                            lambda row, crop_id=None: scored.append(dict(row)) or
+                            {"p10": 1.0, "p50": 2.0, "p90": 3.0})
+        monkeypatch.setattr(
+            predict.explain, "top_factor_codes",
+            lambda row, payload, top_n=4: explained.append(dict(row)) or [])
+
+        predict.predict_harvest("c1", _AS_OF + timedelta(days=45))
+        assert scored and explained
+        assert scored[0] == explained[0]
+
+    def test_timeline_h1_matches_predict_for_the_same_as_of(self, monkeypatch):
+        """The other same-screen pair: ForecastUI draws the hero price from
+        /predict and TimelineChart's harvest marker from /timeline's first
+        forecast point, for the same crop and date, a few hundred pixels apart.
+        Both now score the what-if row for as_of, and at h=1 the band scale is 1,
+        so the three numbers must be identical."""
+        _arm(monkeypatch)
+        monkeypatch.setattr(predict, "_monthly_history",
+                            lambda cid, asof, max_months=12: [])
+
+        t = predict.timeline("c1", _AS_OF, 12)
+        p = predict.predict_harvest("c1", _AS_OF)
+        assert t["activePredictor"] == "model" and p["activePredictor"] == "model"
+
+        h1 = t["forecast"][0]
+        assert h1["horizonMonths"] == 1
+        assert (h1["lowerBound"], h1["predictedPrice"], h1["upperBound"]) == \
+               (p["lowerBound"], p["predictedPrice"], p["upperBound"]), (
+                   "timeline h=1 and predict_harvest disagree for the same as_of — "
+                   "the chart marker and the hero price contradict each other")
+
+    def test_timeline_without_a_growth_period_keeps_the_raw_anchor(self, monkeypatch):
+        """The festival columns are HARVEST-anchored, so with no growth period
+        there is no honest date to anchor them on. Keep the pre-existing behaviour
+        rather than inventing a growth period."""
+        row = {k: v for k, v in _ANCHOR.items() if k != "GrowthPeriodDays"}
+        _arm(monkeypatch, row=row, gp=None)
+        monkeypatch.setattr(predict, "_monthly_history",
+                            lambda cid, asof, max_months=12: [])
+        scored: list[dict] = []
+        monkeypatch.setattr(predict, "_model_quantiles_safe",
+                            lambda r, crop_id=None: scored.append(dict(r)) or
+                            {"p10": 1.0, "p50": 2.0, "p90": 3.0})
+
+        t = predict.timeline("c1", _AS_OF, 12)
+        assert t["activePredictor"] == "model"
+        assert scored[0] == row, "the anchor row must be scored untouched"
+
+    def test_timeline_whatif_failure_degrades_like_predict(self, monkeypatch):
+        """Same rule as predict_harvest: if as_of cannot be encoded we do NOT
+        quietly score the anchor's stale calendar — we take the fallback ladder
+        with the ml_failed clamp, so the two endpoints stay in step even here."""
+        def _boom(*a, **k):
+            raise RuntimeError("calendar build exploded")
+
+        _arm(monkeypatch)
+        monkeypatch.setattr(predict, "_monthly_history",
+                            lambda cid, asof, max_months=12: [])
+        monkeypatch.setattr(predict, "_whatif_rows", _boom)
+
+        t = predict.timeline("c1", _AS_OF, 12)
+        p = predict.predict_harvest("c1", _AS_OF)
+        assert t["activePredictor"] == p["activePredictor"] == "crop_mean_fallback"
+        assert t["reasonCode"] == p["reasonCode"] == "ml_failed_fallback"
+        assert t["confidence"] == p["confidence"] == "Low"
+        assert t["forecast"][0]["predictedPrice"] == p["predictedPrice"] == 120.0
+
+    def test_fallback_path_never_builds_a_whatif_row(self, monkeypatch):
+        """The fallback ladder scores no model row at all, so it must not depend on
+        the what-if construction (and must keep its own reason/confidence)."""
+        def _boom(*a, **k):
+            raise AssertionError("the fallback path must not build a what-if row")
+
+        _arm(monkeypatch, model_served=False)
+        monkeypatch.setattr(predict, "_whatif_rows", _boom)
+        r = predict.predict_harvest("c1", _AS_OF)
+        assert r["activePredictor"] == "crop_mean_fallback"
+        assert r["reasonCode"] == "not_model_served"
+        assert "topFactors" not in r
+
+    def test_whatif_failure_degrades_to_the_fallback_not_a_stale_calendar(
+            self, monkeypatch):
+        """If the requested date cannot be encoded we must NOT quietly score the
+        anchor's own (stale) calendar — that is the bug wearing a disguise. Degrade
+        through the ml_failed clamp: fallback numbers, Low confidence."""
+        def _boom(*a, **k):
+            raise RuntimeError("calendar build exploded")
+
+        _arm(monkeypatch)
+        monkeypatch.setattr(predict, "_whatif_rows", _boom)
+        r = predict.predict_harvest("c1", _AS_OF)
+        assert r["activePredictor"] == "crop_mean_fallback"
+        assert r["reasonCode"] == "ml_failed_fallback"
+        assert r["confidence"] == "Low"
+        assert r["predictedPrice"] == 120.0   # the fallback p50, not a model score
 
 
 # --------------------------------------------------------------------------- #
@@ -309,6 +518,28 @@ class TestRefusals:
         }))
         self._assert_refused(predict.harvest_window("c1", _AS_OF), "scoring_failed")
 
+    def test_whatif_build_failure_is_refused_not_raised(self, monkeypatch):
+        """The row BUILD must degrade exactly like the row SCORING. A raise out of
+        calendar_features is the same class of fault as a predict failure — and
+        /predict and /timeline both answer it with their fallback, so the sweep
+        must not be the ONE endpoint that 500s for it."""
+        def _boom(*a, **k):
+            raise ValueError("calendar maths exploded")
+
+        _arm(monkeypatch)
+        monkeypatch.setattr(predict.features, "calendar_features", _boom)
+        self._assert_refused(predict.harvest_window("c1", _AS_OF), "scoring_failed")
+
+    def test_festival_feature_failure_is_refused_not_raised(self, monkeypatch):
+        """Same for the festival half: _whatif_rows' internal guard covers the
+        calendar LOAD, not the feature computation over it."""
+        def _boom(*a, **k):
+            raise ValueError("festival features exploded")
+
+        _arm(monkeypatch)
+        monkeypatch.setattr(predict.features, "_festival_features", _boom)
+        self._assert_refused(predict.harvest_window("c1", _AS_OF), "scoring_failed")
+
     def test_missing_festival_calendar_degrades_to_seasonality_only(self, monkeypatch):
         """An unreadable calendar must not 500 the request — the seasonal signal
         alone is still a real answer, so the sweep continues festival-blind."""
@@ -320,6 +551,67 @@ class TestRefusals:
         out = predict.harvest_window("c1", _AS_OF, horizon_days=90)
         assert out["rankable"] is True
         assert len({p["predictedPrice"] for p in out["points"]}) > 50
+
+
+# --------------------------------------------------------------------------- #
+# Festival-calendar caching — one DB read per process, and never cache a failure.
+# --------------------------------------------------------------------------- #
+class TestFestivalCalendarCache:
+    _FESTIVALS = pd.DataFrame([{
+        "FestivalKey": "AVURUDU", "Date": pd.Timestamp("2026-04-13"),
+        "LeadUpDays": 14, "IsProvisional": False, "Source": "seed",
+    }])
+
+    def test_the_calendar_is_read_once_per_process(self, monkeypatch):
+        """_whatif_rows runs on EVERY /predict and /timeline call now, so an
+        uncached read would put a DB round-trip on the two hottest endpoints for a
+        ~64-row table that changes a few times a year."""
+        _arm(monkeypatch, festivals=self._FESTIVALS)
+        loader = predict.load_festivals
+        calls: list[int] = []
+        monkeypatch.setattr(predict, "load_festivals",
+                            lambda: calls.append(1) or loader())
+        monkeypatch.setattr(predict, "_monthly_history",
+                            lambda cid, asof, max_months=12: [])
+
+        predict.predict_harvest("c1", _AS_OF)
+        predict.predict_harvest("c1", _AS_OF + timedelta(days=1))
+        predict.timeline("c1", _AS_OF, 12)
+        predict.harvest_window("c1", _AS_OF, horizon_days=30)
+
+        assert len(calls) == 1, (
+            "the festival calendar is being re-read per request — the cache is not "
+            "holding")
+
+    def test_an_empty_calendar_is_not_cached(self, monkeypatch):
+        """load_festivals() swallows DB errors and returns an empty frame, so
+        'empty' is indistinguishable from 'unreachable'. Caching it would pin a
+        transient outage into festival-blind forecasts until the next restart."""
+        _arm(monkeypatch)  # empty calendar
+        loader = predict.load_festivals
+        calls: list[int] = []
+        monkeypatch.setattr(predict, "load_festivals",
+                            lambda: calls.append(1) or loader())
+
+        predict.predict_harvest("c1", _AS_OF)
+        predict.predict_harvest("c1", _AS_OF + timedelta(days=1))
+
+        assert len(calls) == 2, "an empty/unreachable calendar must not be cached"
+
+    def test_a_raising_loader_is_not_cached_either(self, monkeypatch):
+        def _boom():
+            raise RuntimeError("festival table unreachable")
+
+        _arm(monkeypatch)
+        calls: list[int] = []
+        monkeypatch.setattr(predict, "load_festivals",
+                            lambda: calls.append(1) or _boom())
+
+        out1 = predict.harvest_window("c1", _AS_OF, horizon_days=30)
+        out2 = predict.harvest_window("c1", _AS_OF, horizon_days=30)
+
+        assert out1["rankable"] is out2["rankable"] is True  # seasonality only
+        assert len(calls) == 2, "a failed calendar read must not be cached"
 
 
 class TestNoModelRegistered:
