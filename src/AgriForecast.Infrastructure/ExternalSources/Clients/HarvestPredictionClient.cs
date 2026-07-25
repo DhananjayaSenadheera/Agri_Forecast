@@ -108,6 +108,38 @@ public sealed class HarvestPredictionClient : IHarvestPredictionClient
         }
     }
 
+    public async Task<HarvestWindowDto?> GetHarvestWindowAsync(Guid cropId, DateOnly? asOf, int horizonDays, CancellationToken ct = default)
+    {
+        // GUIDs on the wire MUST be lowercase - uppercase ids silently miss the
+        // model's per-crop fallback. Guid.ToString() is already lowercase; keep it.
+        // asOf null => Python defaults to today.
+        var payload = new HarvestWindowRequest
+        {
+            CropId = cropId.ToString(),
+            AsOf = asOf?.ToString("yyyy-MM-dd"),
+            HorizonDays = horizonDays
+        };
+
+        try
+        {
+            using var resp = await _httpClient.PostAsJsonAsync("harvest-window", payload, JsonOptions, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "ML /harvest-window returned {StatusCode} for cropId={CropId}.",
+                    (int)resp.StatusCode, payload.CropId);
+                return null;
+            }
+
+            return await resp.Content.ReadFromJsonAsync<HarvestWindowDto>(JsonOptions, ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
+        {
+            _logger.LogWarning(ex, "ML /harvest-window call failed for cropId={CropId}.", payload.CropId);
+            return null;
+        }
+    }
+
     private sealed class PredictRequest
     {
         [JsonPropertyName("cropId")]
@@ -127,5 +159,17 @@ public sealed class HarvestPredictionClient : IHarvestPredictionClient
 
         [JsonPropertyName("months")]
         public int Months { get; set; }
+    }
+
+    private sealed class HarvestWindowRequest
+    {
+        [JsonPropertyName("cropId")]
+        public string CropId { get; set; } = string.Empty;
+
+        [JsonPropertyName("asOf")]
+        public string? AsOf { get; set; }
+
+        [JsonPropertyName("horizonDays")]
+        public int HorizonDays { get; set; }
     }
 }

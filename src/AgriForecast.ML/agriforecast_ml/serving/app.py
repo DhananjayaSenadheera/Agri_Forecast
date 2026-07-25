@@ -103,6 +103,15 @@ class TimelineRequest(BaseModel):
     months: int = Field(default=12, ge=1, le=24)
 
 
+class HarvestWindowRequest(BaseModel):
+    cropId: str
+    asOf: Optional[date] = None
+    # Upper bound is one seasonal cycle: past that the frozen price/weather anchor
+    # is too stale for the comparison to mean anything (predict enforces the same
+    # cap, this just rejects nonsense at the edge).
+    horizonDays: int = Field(default=90, ge=7, le=365)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -130,6 +139,37 @@ def crop_readiness_endpoint():
 @app.post("/predict")
 def predict_endpoint(req: PredictRequest):
     return predict.predict_harvest(req.cropId, req.plantDate)
+
+
+@app.post("/harvest-window")
+def harvest_window_endpoint(req: HarvestWindowRequest):
+    """Best planting/harvest window for one crop — ranks candidate planting dates.
+
+    Defensive like /timeline and /crop-readiness: the honest answer to "we could
+    not work this out" is rankable=false with a reason, NEVER a 500 and never a
+    fabricated window. predict.harvest_window already returns that shape for every
+    gate it knows about; this wrapper catches whatever it doesn't.
+    """
+    as_of = req.asOf or date.today()
+    try:
+        return predict.harvest_window(req.cropId, as_of, req.horizonDays)
+    except Exception:
+        _log.exception("harvest_window failed — returning the not-rankable shape")
+        return {
+            "cropId": str(req.cropId).lower(),
+            "cropName": None,
+            "asOf": as_of.isoformat(),
+            "growthPeriodDays": None,
+            "rankable": False,
+            "reasonCode": "unavailable",
+            "activePredictor": "unavailable",
+            "confidence": "Low",
+            "modelVersion": None,
+            "explanation": "We could not compare planting dates for this crop just now.",
+            "windowDays": None,
+            "points": [],
+            "best": None,
+        }
 
 
 @app.post("/timeline")

@@ -160,6 +160,40 @@ def _festival_features(observation_dates: pd.Series, harvest_dates: pd.Series,
     return out[FESTIVAL_FEATURE_COLS]
 
 
+# Every calendar/seasonality column that is a PURE function of a date. Public and
+# shared because the serving what-if sweep (serving/predict.harvest_window) has to
+# recompute them for FUTURE candidate planting dates: "what would I get if I planted
+# on date X" is only honest when X's calendar encoding is byte-identical to the one
+# the model was trained on. Never inline these formulas again in either caller --
+# that is exactly the train/serve skew build_x.py was created to stop.
+CALENDAR_FEATURE_COLS = [
+    "Year", "MonthNum", "WeekOfYear", "DayOfYear", "SinDoy", "CosDoy", "SeasonMaha",
+]
+
+
+def calendar_features(dates) -> pd.DataFrame:
+    """Calendar/seasonality columns for any DatetimeIndex-like sequence of dates.
+
+    Pure: a function of the dates ALONE -- no price data, no weather, no DB, no
+    now()/today(). That purity is what makes it valid on both sides of the clock:
+    on historical observation dates during the feature build, and on future
+    candidate planting dates during the serving sweep. A future date carries no
+    lookahead here because a calendar is knowable in advance -- unlike a price or
+    a rainfall total, which is why those stay frozen at their last observed value.
+    """
+    idx = pd.DatetimeIndex(dates)
+    doy = idx.dayofyear
+    return pd.DataFrame({
+        "Year": idx.year,
+        "MonthNum": idx.month,
+        "WeekOfYear": idx.isocalendar().week.astype(int).values,
+        "DayOfYear": doy,
+        "SinDoy": np.sin(2 * np.pi * doy / 365.25),
+        "CosDoy": np.cos(2 * np.pi * doy / 365.25),
+        "SeasonMaha": idx.month.isin(_MAHA_MONTHS).astype("int8"),
+    }, index=idx)[CALENDAR_FEATURE_COLS]
+
+
 def _weather_lookups(weather: pd.DataFrame):
     """period(month) -> (temp, rain), plus rainfall climatology by calendar month."""
     by_month = {row.Month: (row.AvgTemperature, row.TotalRainfall) for row in weather.itertuples()}
@@ -212,15 +246,13 @@ def build_crop_features(crop_id, group: pd.DataFrame, meta: pd.Series,
     out["PctChange30"] = price.pct_change(30, fill_method=None)
 
     # --- 3. Calendar / seasonality ---
+    # Computed by the SHARED pure helper (see calendar_features) so the serving
+    # what-if sweep encodes a candidate date exactly the way training encoded an
+    # observation date. Do not re-inline these formulas here.
     idx = out.index
-    out["Year"] = idx.year
-    out["MonthNum"] = idx.month
-    out["WeekOfYear"] = idx.isocalendar().week.astype(int).values
-    doy = idx.dayofyear
-    out["DayOfYear"] = doy
-    out["SinDoy"] = np.sin(2 * np.pi * doy / 365.25)
-    out["CosDoy"] = np.cos(2 * np.pi * doy / 365.25)
-    out["SeasonMaha"] = idx.month.isin(_MAHA_MONTHS).astype("int8")
+    cal = calendar_features(idx)
+    for col in CALENDAR_FEATURE_COLS:
+        out[col] = cal[col]
     # Festival features are attached in build_all() from the DB calendar
     # (load_festivals) -- a national point-in-time signal, not derived here from
     # hardcoded dates. The old _is_festival() month/day heuristic was deleted so
