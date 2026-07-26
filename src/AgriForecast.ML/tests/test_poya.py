@@ -31,9 +31,7 @@ from pathlib import Path
 
 import pytest
 
-# ---------------------------------------------------------------------------
 # Path setup
-# ---------------------------------------------------------------------------
 ML_ROOT = Path(__file__).resolve().parents[1]
 if str(ML_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_ROOT))
@@ -42,9 +40,7 @@ from agriforecast_ml import poya  # noqa: E402
 from agriforecast_ml.data.poya_days import POYA_DAYS  # noqa: E402
 
 
-# ===========================================================================
 # 1. Structural sanity of the static table
-# ===========================================================================
 
 class TestPoyaStructure:
     def test_covers_every_year_2015_to_2030(self):
@@ -102,9 +98,7 @@ class TestPoyaStructure:
         assert 192 <= total <= 208
 
 
-# ===========================================================================
 # 2. is_poya()
-# ===========================================================================
 
 class TestIsPoya:
     def test_known_poya_date_resolves_true(self):
@@ -135,9 +129,7 @@ class TestIsPoya:
         assert poya.is_poya(date(2035, 6, 15)) is False
 
 
-# ===========================================================================
 # 3. expected_market_closed() -- Poya only, NOT Sunday
-# ===========================================================================
 
 class TestExpectedMarketClosed:
     def test_poya_date_is_expected_closed(self):

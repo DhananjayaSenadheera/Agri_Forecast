@@ -30,9 +30,7 @@ from agriforecast_ml import features
 import agriforecast_ml.load as L
 
 
-# --------------------------------------------------------------------------- #
 # Pure-unit tests: monkeypatch the DB read so load_prices runs with no DB.
-# --------------------------------------------------------------------------- #
 _RAW_COLS = ["CropId", "CropCode", "CropName", "Source",
              "PriceDate", "MinPrice", "MaxPrice"]
 _OUT_COLS = ["CropId", "CropCode", "CropName", "PriceDate",
@@ -147,9 +145,7 @@ def test_load_prices_dedup_is_nan_safe(monkeypatch):
     assert d["MaxPrice"].iloc[0] == 130.0         # mean(120, 140)
 
 
-# --------------------------------------------------------------------------- #
 # Defense-in-depth: features.build_crop_features must survive dup PriceDates.
-# --------------------------------------------------------------------------- #
 def _meta() -> pd.Series:
     return pd.Series({
         "CropName": "Xc", "CropCode": "X", "GrowthPeriodDays": 90,
@@ -193,9 +189,7 @@ def test_build_crop_features_guard_is_noop_when_unique():
     assert out["ObservationDate"].is_unique
 
 
-# --------------------------------------------------------------------------- #
 # Live-DB pins: real load_prices output + the Passion (FRT000019) case.
-# --------------------------------------------------------------------------- #
 def _live_prices():
     """load_prices() from the live DB, or skip when the DB is unreachable."""
     try:

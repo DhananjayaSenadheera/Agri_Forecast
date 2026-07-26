@@ -1,34 +1,20 @@
-"""
-AgriForecast ML -- R2 Step 2 (CropAgronomyProfiles) coverage-gap tests.
+"""CropAgronomyProfiles coverage-gap tests.
 
-Two invariant classes pinned here (per gate 2.5 QA review):
+Two invariant classes are pinned here.
 
-  (A) Agronomy-frame invariance -- load.load_crops() must keep emitting the
-      agronomy columns with the right dtypes, reconstruct PlantingSeason from
-      the profile per the binding R2 convention (months populated => Yala/Maha;
-      all-NULL months + known GrowthPeriodDays => Year-round; all-NULL + NULL
-      gp => None), and (DB-gated) the live post-cut-over distribution must
-      match the pinned state recorded in CONTRACTS.md 2026-07-05 R2 Step 2.3
-      SHIPPED: 96 rows, 11 gp-non-null, PlantingSeason=='Year-round' for
-      exactly those 11, None for the other 85; PlantingSeasonEnc via
-      features.py gives {0: gp-known crops, -1: rest} (the training-frame
-      {-1: 33555, 0: 13930} distribution derives from this 11-vs-85 split).
+(A) Agronomy-frame invariance: load.load_crops() must keep emitting the agronomy columns
+    with the right dtypes and reconstruct PlantingSeason from the profile - months
+    populated means Yala or Maha, all-NULL months with a known GrowthPeriodDays means
+    Year-round, all-NULL with no gp means None. The DB-gated tests pin the live
+    distribution.
 
-  (B) Exclusion predicate -- pins the R2 Step 5.3 IsVerified-STRICT rule
-      (REWRITTEN 2026-07-06 from the pre-flip anchor): a crop is forecastable
-      iff its profile is IsVerified=1 AND GrowthPeriodDays IS NOT NULL. An
-      unverified profile — even with a legacy gp — is EXCLUDED (no served
-      horizon, crop-mean fallback); a NULL-gp profile is excluded regardless of
-      the verified flag. The shared gate is load.resolve_forecast_gp, applied by
-      features.build_crop_features (train) and serving/predict._crop_meta
-      (serve). The predecessor class TestExclusionPredicateAnchorPreStep5_3
-      asserted the OLD gp-only predicate and was the deliberate RED-then-rewrite
-      anchor for this flip; TestExclusionPredicateIsVerifiedStrict below encodes
-      the new contract.
+(B) Exclusion predicate: a crop is forecastable only if its profile is IsVerified=1 AND
+    GrowthPeriodDays is not NULL. An unverified profile is excluded even when it carries a
+    legacy gp. The shared gate is load.resolve_forecast_gp, applied by both the feature
+    build and serving.
 
-Structured like test_merge_asof_dtype.py / test_macro_vintage.py: hermetic
-synthetic-frame tests first (no DB, no network), then DB-gated live-pin
-invariants via a local _db_or_skip().
+Hermetic synthetic-frame tests come first, then DB-gated live pins that skip when the DB
+is unreachable.
 """
 from __future__ import annotations
 
@@ -47,10 +33,8 @@ from agriforecast_ml import features as F  # noqa: E402
 from agriforecast_ml import load as L  # noqa: E402
 
 
-# ===========================================================================
 # (A) Season-reconstruction rule -- hermetic, synthetic CropAgronomyProfiles
 #     rows fed through the SAME reconstruction logic load_crops() runs.
-# ===========================================================================
 
 def _reconstruct_season(df: pd.DataFrame) -> pd.Series:
     """Mirrors load.load_crops()'s season-reconstruction block exactly (kept as
@@ -112,10 +96,8 @@ def test_season_reconstruction_yala_wins_if_both_yala_and_maha_set():
     assert season.tolist() == ["Yala"]
 
 
-# ===========================================================================
 # (A) load_crops() output shape / dtypes -- hermetic (column contract only;
 #     does not require the DB).
-# ===========================================================================
 
 def test_load_crops_sql_selects_profile_columns():
     """Guards the SELECT list itself: if a column is dropped from the JOIN,
@@ -131,26 +113,15 @@ def test_load_crops_sql_selects_profile_columns():
     assert "LEFT JOIN" in src, "join must stay LEFT so a profile-less crop still surfaces (NULL agronomy -> excluded downstream, not silently dropped)"
 
 
-# ===========================================================================
 # (B) Exclusion predicate -- R2 Step 5.3 IsVerified-STRICT (rewritten from the
 #     pre-flip gp-only anchor, which necessarily went RED when the flip landed).
-# ===========================================================================
 
 class TestExclusionPredicateIsVerifiedStrict:
-    """R2 Step 5.3 exclusion predicate (IsVerified-STRICT): a crop is
-    forecastable iff its agronomy profile is ``IsVerified == 1`` AND has a
-    usable GrowthPeriodDays. An unverified profile — even one holding a legacy
-    GrowthPeriodDays — is EXCLUDED exactly like a NULL-gp crop; a NULL-gp
-    profile is excluded regardless of the verified flag.
+    """A crop is forecastable only if its agronomy profile is IsVerified=1 AND has a usable
+    GrowthPeriodDays.
 
-    *** REWRITTEN AT R2 STEP 5.3 from the pre-flip anchor
-    (``TestExclusionPredicateAnchorPreStep5_3``). ***
-    The old anchor asserted the pre-flip gp-only predicate (unverified-but-gp
-    crop was INCLUDED / warned). The flip nulls an unverified profile's gp in
-    the shared gate (load.resolve_forecast_gp, applied by
-    features.build_crop_features), so that anchor necessarily went RED: an
-    unverified meta now yields gp=None -> no label. This class re-expresses the
-    NEW contract rather than re-greening the old assertion.
+    An unverified profile is excluded exactly like a NULL-gp crop, even when it still carries
+    a legacy growth period.
     """
 
     def _meta_row(self, gp, is_verified):
@@ -193,12 +164,10 @@ class TestExclusionPredicateIsVerifiedStrict:
             "verified-with-known-gp crop must resolve at least one harvest label"
 
     def test_unverified_but_known_gp_is_now_excluded(self):
-        """THE FLIP: IsVerified=0 + a legacy GrowthPeriodDays is NO LONGER
-        forecastable. The unverified profile's gp is NOT honored -> no harvest
-        horizon, no label -> the crop is dropped from the trainable/servable
-        set, exactly as a NULL-gp crop is. (Under the pre-flip gp-only predicate
-        this same input WAS forecastable and merely warned -- that is the
-        behavior this rewrite deliberately inverts.)"""
+        """IsVerified=0 with a legacy GrowthPeriodDays is NOT forecastable: the gp is not honoured,
+        so there is no harvest horizon and no label, and the crop drops out of the trainable set
+        exactly as a NULL-gp crop does.
+        """
         meta = self._meta_row(gp=60, is_verified=False)
         weather_by_month, rain_clim = self._weather_lookups()
         out = F.build_crop_features("crop-unverified", self._tiny_price_group(),
@@ -237,9 +206,7 @@ class TestExclusionPredicateIsVerifiedStrict:
         assert L.resolve_forecast_gp(True, -5) is None
 
 
-# ===========================================================================
 # DB-backed invariants (skipped when the live DB is unreachable).
-# ===========================================================================
 
 def _db_or_skip() -> pd.DataFrame:
     try:
@@ -259,12 +226,7 @@ class TestLiveAgronomyProfilePin:
     CONTRACTS.md update / deliberate data change is a regression."""
 
     def test_load_crops_shape_and_dtypes(self):
-        """REPINNED 2026-07-17: 96 -> 95 crops after the R2 Step 8.2 Passion
-        duplicate merge (FRT000020 deleted, survivor FRT000019, PR #25).
-        REPINNED 2026-07-21: 95 -> 96 after migration FixGarlicAliasMapping
-        added Garlic VEG000071 (DEC ext-47 was mislabelled Big Onion; new
-        crop is IsVerified=0 / gp NULL so gp-known and season pins below
-        are unaffected, PR #39)."""
+        """Pinned at 96 crops: 95 after the Passion duplicate merge, plus Garlic VEG000071."""
         df = _db_or_skip()
         assert len(df) == 96, f"expected 96 crops post-Garlic-fix, got {len(df)}"
         for col in ("CropId", "CropCode", "CropName", "GrowthPeriodDays",
@@ -279,14 +241,9 @@ class TestLiveAgronomyProfilePin:
         assert df["IsVerified"].dtype == bool
 
     def test_live_gp_non_null_count_and_season_split(self):
-        """REPINNED 2026-07-07 (R2 Step 6.3) to the post-Step-5-Phase-2 live
-        state: migration 20260706... (RecodeAgronomyProfilesDoaVerifiedBatch2,
-        commit a9c472b) verified the remaining 81 crops, landing 84 gp-non-null
-        crops total (was 13 after Step 5 Phase 1) split Yala=54/Year-round=27/
-        Maha=3 (was: 13 gp-known crops, all 'Yala', after Phase 1).
-        REPINNED 2026-07-17: 84 -> 83 gp-non-null, Year-round 27 -> 26, after
-        the Step 8.2 Passion duplicate merge deleted FRT000020 (a gp-known
-        Year-round crop; survivor FRT000019, PR #25)."""
+        """Pinned to the live state: 83 crops with a non-NULL growth period, split Yala 54 /
+        Year-round 26 / Maha 3.
+        """
         df = _db_or_skip()
         gp_known = df["GrowthPeriodDays"].notna()
         assert int(gp_known.sum()) == 83, \
@@ -299,20 +256,11 @@ class TestLiveAgronomyProfilePin:
         assert df.loc[~gp_known, "PlantingSeason"].isna().all()
 
     def test_live_verified_set_equals_forecastable_set(self):
-        """REPINNED 2026-07-07 (R2 Step 6.3): Step 5 Phase 2 verified 94/96
-        crops total (was 13 after Phase 1), but 10 of those 94 are perennials
-        (IsPerennial=1: Ambarella, Curry Leaves, Papaya, King Coconut, Ash
-        Plantain, Coconut, Plantain Flower, Woodapple, Lime, Gooseberry) that
-        are legitimately verified WITHOUT a discrete GrowthPeriodDays (a
-        perennial has no harvest-horizon gp by agronomic definition, not a
-        data gap) — so under IsVerified-strict (load.resolve_forecast_gp:
-        BOTH is_verified AND gp not-null required), the forecastable
-        (gp-known) set is a strict SUBSET of the verified set, not equal to
-        it, exactly for those 10 perennial rows. Only 2 crops remain
-        unverified (Athugowa, Onion Leaves).
-        REPINNED 2026-07-17: 94 -> 93 verified after the Step 8.2 Passion
-        duplicate merge deleted FRT000020 (a verified crop; PR #25). The 10
-        verified-but-gp-null perennials are unchanged."""
+        """The forecastable (gp-known) set is a strict SUBSET of the verified set, not equal to it.
+
+        Ten verified crops are perennials with no discrete GrowthPeriodDays, which is agronomy
+        rather than a data gap, and two crops remain unverified.
+        """
         df = _db_or_skip()
         verified = df["IsVerified"] == True   # noqa: E712
         gp_known = df["GrowthPeriodDays"].notna()
@@ -330,15 +278,9 @@ class TestLiveAgronomyProfilePin:
             "every verified-but-gp-null row must be a perennial (agronomically expected gp=NULL)"
 
     def test_live_planting_season_enc_distribution(self):
-        """REPINNED 2026-07-07 (R2 Step 6.3): PlantingSeasonEnc (features.py)
-        now spans all three encoded values on the gp-known set (Yala=1,
-        Year-round=0, Maha=2 -- see F._PLANTING_SEASON_ENC), not exclusively
-        1 (Yala) as under Step 5 Phase 1's 13-crop, all-Yala state. The
-        gp-null set (12 rows: 10 verified perennials + 2 unverified) still
-        encodes to -1 (PlantingSeason is None for all of them).
-        REPINNED 2026-07-17: Year-round 27 -> 26 after the Step 8.2 Passion
-        duplicate merge deleted FRT000020 (Year-round; PR #25). The gp-null
-        set is unchanged at 12."""
+        """PlantingSeasonEnc spans all three encoded values on the gp-known set (Yala 1, Year-round 0,
+        Maha 2). The 12 gp-null rows encode to -1, since PlantingSeason is None for all of them.
+        """
         df = _db_or_skip()
         enc = df["PlantingSeason"].map(lambda s: F._PLANTING_SEASON_ENC.get(s, -1))
         gp_known = df["GrowthPeriodDays"].notna()

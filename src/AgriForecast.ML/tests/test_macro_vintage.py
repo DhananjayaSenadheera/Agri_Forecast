@@ -29,9 +29,7 @@ from agriforecast_ml import features as F  # noqa: E402
 from agriforecast_ml import load as L  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
 # helpers
-# ---------------------------------------------------------------------------
 
 def _obs_frame(dates, unit: str = "ns") -> pd.DataFrame:
     """Minimal features-matrix frame with ObservationDate at a given unit."""
@@ -64,9 +62,7 @@ _IMPORTS = ("FOOD_IMPORTS_YOY", "MacroFoodImportsYoY")
 _OPR = ("POLICY_RATE_OPR", "MacroPolicyRateOPR")
 
 
-# ===========================================================================
 # (a) TWO-DATE CONFUSION TRIPWIRE -- the single most important test.
-# ===========================================================================
 
 def test_two_date_confusion_reference_vs_published():
     """A value referenced weeks BEFORE it is published must NOT be visible at its
@@ -103,9 +99,7 @@ def test_reference_date_is_never_a_column_in_output():
     assert "_pub" not in out.columns  # internal join key must be dropped
 
 
-# ===========================================================================
 # (b) PUBLISH-BOUNDARY PINS + later-published outlier trap.
-# ===========================================================================
 
 def test_visible_at_publish_day_invisible_day_before():
     code, col = _OPR
@@ -130,9 +124,7 @@ def test_later_published_outlier_never_leaks_backward():
     assert out[col].tolist() == [2.8], "newer vintage leaked backward"
 
 
-# ===========================================================================
 # (c) DTYPE-MISMATCH SURVIVAL ([s] vs [us], both date columns).
-# ===========================================================================
 
 @pytest.mark.parametrize("obs_unit,ref_unit,pub_unit", [
     ("s", "us", "us"), ("us", "s", "s"), ("s", "ns", "us"),
@@ -146,9 +138,7 @@ def test_dtype_mismatch_survives(obs_unit, ref_unit, pub_unit):
     assert out[col].tolist() == [5.0]
 
 
-# ===========================================================================
 # (d) NaN-not-0 with macro=None / empty / absent series.
-# ===========================================================================
 
 @pytest.mark.parametrize("macro", [None, pd.DataFrame(columns=L._MACRO_COLS)])
 def test_missing_macro_is_nan_not_zero(macro):
@@ -175,9 +165,7 @@ def test_before_first_vintage_is_nan():
     assert out[col].isna().all()
 
 
-# ===========================================================================
 # (e) FLAT CARRY-FORWARD, no interpolation.
-# ===========================================================================
 
 def test_flat_carry_forward_no_interpolation():
     """Between two vintages the value is held FLAT at the older one -- never
@@ -194,9 +182,7 @@ def test_flat_carry_forward_no_interpolation():
     assert out[col].tolist() == [8.0, 8.0, 8.0], "value was interpolated, not held flat"
 
 
-# ===========================================================================
 # (f) STALENESS CAP boundary -- pin the EXACT operator (age > 60 -> NaN).
-# ===========================================================================
 
 def test_staleness_cap_59_days_visible_61_days_nan():
     code, col = _FOOD_INFL
@@ -219,9 +205,7 @@ def test_staleness_cap_matches_module_constant():
     assert F._MACRO_STALENESS_DAYS == 60
 
 
-# ===========================================================================
 # (g) REBASE-SEAM GUARD -- two base-year SeriesCodes are INDEPENDENT series.
-# ===========================================================================
 
 def test_rebase_seam_series_are_independent():
     """CCPI_BASE2013 and CCPI_BASE2021 are DISTINCT SeriesCodes (base year is part
@@ -244,9 +228,7 @@ def test_rebase_seam_series_are_independent():
     assert vals[1] == 2.8, "2021-based vintage should be visible after its publish date"
 
 
-# ===========================================================================
 # _build_X parity (predict.py / explain.py build dynamically off feature_cols).
-# ===========================================================================
 
 def test_build_x_parity_macro_columns_nan_and_populated():
     """The serving _build_X must reproduce the macro columns for both a populated
@@ -292,9 +274,7 @@ def test_backfilled_labels_present():
         assert c in explain._LABELS, f"missing backfilled _LABELS entry for {c}"
 
 
-# ===========================================================================
 # DB-backed invariants (skipped when the live DB is unreachable).
-# ===========================================================================
 
 def _db_macro_or_skip() -> pd.DataFrame:
     try:

@@ -128,9 +128,7 @@ class TestExplainLabelCompleteness:
         assert not missing, f"explain._LABELS missing entries: {missing}"
 
 
-# ===========================================================================
 # v13 HISTORY GATE — determinism, point-in-time honesty, single 365 definition
-# ===========================================================================
 
 def _synthetic_frame(counts: dict[str, int], base="2024-01-01") -> pd.DataFrame:
     """Build a labelled frame with `counts[crop]` rows per crop, ObservationDates

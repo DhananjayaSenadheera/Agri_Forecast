@@ -1,35 +1,12 @@
-"""
-AgriForecast ML — canonical mapping layer tests (R1.1 P1 Stage B,
-ClickUp 86cahef4z).
+"""Canonical mapping layer tests.
 
-All tests are hermetic: a mocked SQLAlchemy engine (MagicMock, matching the
-style of test_harti_multimarket.py::TestMarketNameResolution), no network,
-no live DB. Live-DB verification is done separately (see task report).
+Hermetic: a mocked SQLAlchemy engine, no network, no live DB.
 
-Coverage:
-  TestResolverPrecedence     — source-scoped alias beats a global alias for
-                                the same label; global still resolves when no
-                                source-scoped row exists.
-  TestResolverCaseHandling   — case-insensitive match on the alias text
-                                (mirrors the DB's case-insensitive collation).
-  TestResolverUnresolved     — no active alias match -> None, never a guess/
-                                fuzzy match. An IsActive=0 alias must not
-                                resolve either.
-  TestHealPriceObservationCrops
-                              — heals only CropId IS NULL rows; never
-                                touches an already-assigned row; idempotent;
-                                unresolved labels stay NULL + WARN; dry_run
-                                writes nothing.
-  TestHartiWriterUnitContract
-                              — upsert_harti_price_observations() sets
-                                UnitRaw/UnitConversionFactor/IsUnitConfirmed
-                                per the fail-closed contract, and resolves
-                                CropId via the canonical resolver (source-
-                                scoped HARTI alias), leaving CropId NULL +
-                                WARN when unresolved.
-  TestFeatureSafeMarketIds   — get_feature_safe_market_ids() excludes
-                                MarketType=3 (NationalAggregate) and
-                                MarketCode LIKE 'ECOMAP-%'.
+Covers resolver precedence (a source-scoped alias beats a global one), case-insensitive
+matching, unresolved labels returning None rather than a guess, inactive aliases not
+resolving, healing only CropId NULL rows (idempotent, dry_run writes nothing), the HARTI
+writer's unit contract, and the feature-safe market filter excluding NationalAggregate and
+ECOMAP markets.
 """
 from __future__ import annotations
 
@@ -40,9 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ---------------------------------------------------------------------------
 # Path setup
-# ---------------------------------------------------------------------------
 ML_ROOT = Path(__file__).resolve().parents[1]
 if str(ML_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_ROOT))
@@ -52,9 +27,7 @@ from agriforecast_ml.harti import loader as harti_loader  # noqa: E402
 from agriforecast_ml.harti.parser import ParsedPrice  # noqa: E402
 
 
-# ===========================================================================
 # Mock engine helpers
-# ===========================================================================
 
 def _mock_engine_returning(rows: list[tuple]) -> MagicMock:
     """Build a MagicMock engine whose `.connect().__enter__().execute(...)`
@@ -81,9 +54,7 @@ RIDGE_GOURD_CROP_ID = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000002")
 LADY_FINGERS_CROP_ID = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000003")
 
 
-# ===========================================================================
 # 1. Resolver precedence — source-scoped beats global
-# ===========================================================================
 
 class TestResolverPrecedence:
     def test_source_scoped_alias_wins_over_global_for_same_label(self):
@@ -134,9 +105,7 @@ class TestResolverPrecedence:
         assert resolver.resolve("Luffa", "HARTI") == RIDGE_GOURD_CROP_ID
 
 
-# ===========================================================================
 # 2. Case-insensitive matching (mirrors DB collation)
-# ===========================================================================
 
 class TestResolverCaseHandling:
     def test_lowercase_label_matches_titlecase_alias(self):
@@ -163,9 +132,7 @@ class TestResolverCaseHandling:
         assert resolver.resolve("  Beans  ", "HARTI") == BEANS_CROP_ID
 
 
-# ===========================================================================
 # 3. Unresolved — never guess, never fuzzy-match
-# ===========================================================================
 
 class TestResolverUnresolved:
     def test_no_matching_alias_returns_none(self):
@@ -204,9 +171,7 @@ class TestResolverUnresolved:
         assert resolver.resolve(None, "HARTI") is None
 
 
-# ===========================================================================
 # 4. heal_price_observation_crops — only NULL CropId rows, idempotent
-# ===========================================================================
 
 class TestHealPriceObservationCrops:
     def _engine_with_alias_and_null_rows(self, alias_rows, null_crop_rows):
@@ -323,9 +288,7 @@ class TestHealPriceObservationCrops:
         assert candidate_call[0][1]["source"] == "HARTI"
 
 
-# ===========================================================================
 # 5. HARTI writer sets unit fields + resolves CropId via the resolver
-# ===========================================================================
 
 class TestHartiWriterUnitContract:
     def _fake_market_map(self):
@@ -422,9 +385,7 @@ class TestHartiWriterUnitContract:
         assert canonical.HARTI_UNIT_CONVERSION_FACTOR == 1.0
 
 
-# ===========================================================================
 # 6. get_feature_safe_market_ids — the S2 (Pettah double-count) trap
-# ===========================================================================
 
 class TestFeatureSafeMarketIds:
     def test_excludes_national_aggregate_and_ecomap_by_query_filter(self):

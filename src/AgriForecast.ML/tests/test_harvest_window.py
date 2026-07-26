@@ -1,35 +1,24 @@
-"""Best harvest window — the what-if planting-date sweep (serving/predict.harvest_window).
+"""Tests for the what-if planting-date sweep (serving/predict.harvest_window).
 
-WHAT THESE TESTS PROTECT
+The feature rests on one claim: re-scoring the SAME anchor row with DIFFERENT calendar and
+festival encodings gives a genuinely different price, so the recommended window reflects
+seasonal and festival demand rather than noise. Three ways that can quietly stop being
+true are pinned here.
 
-The feature's whole value rests on one claim: re-scoring the SAME anchor row with
-DIFFERENT calendar/festival encodings produces a genuinely different price, so the
-recommended window reflects seasonal + festival demand structure rather than noise.
-Two ways that claim can quietly become false, both pinned here:
+1. The sweep stops varying the date columns, so every candidate scores identically. The
+   fake models read the date columns straight out of the built frame, so a frozen column
+   shows up as a flat curve.
+2. The calendar encoding drifts from the one training used. TestCalendarParity pins
+   features.calendar_features against the columns the feature build actually emits.
+3. The two date-answering endpoints stop agreeing. TestForecastAgreement pins that the
+   window's point for date D and predict_harvest(crop, D) return the same interval; they
+   share one what-if construction and one rounding rule. They did not always.
 
-  1. The sweep stops varying the date columns (e.g. someone "simplifies" it back to
-     re-scoring the raw anchor row). Then every candidate scores identically and the
-     window is meaningless. `test_sweep_actually_varies_by_date` and the festival
-     test fail loudly if that happens — the fake models read the date columns
-     STRAIGHT OUT of the built frame, so a frozen column shows up as a flat curve.
+Everything else is the honesty ladder: each gate that must return rankable=False rather
+than invent a window a farmer cannot un-plant.
 
-  2. The calendar encoding drifts from the one training used. `TestCalendarParity`
-     pins features.calendar_features against the columns build_crop_features
-     actually emits, which is the reason that helper is shared rather than copied.
-
-  3. The two date-answering endpoints stop agreeing. `TestForecastAgreement` pins
-     that /harvest-window's point for date D and predict_harvest(crop, D) return
-     the SAME p10/p50/p90 — they share ONE what-if construction (predict._whatif_rows)
-     and ONE rounding rule (predict._ordered_interval). They did not always: until
-     the fix, predict_harvest scored the anchor row untouched, so it returned the
-     same price for every future date and directly contradicted the window panel
-     a farmer had just picked the date from.
-
-Everything else here is the honesty ladder: each gate that must return
-rankable=False instead of inventing a window a farmer cannot un-plant.
-
-No DB, no model artifacts, no network — the DB-touching helpers are monkeypatched
-and the "models" are deterministic fakes.
+No DB, no model artifacts, no network: the DB-touching helpers are monkeypatched and the
+models are deterministic fakes.
 """
 from __future__ import annotations
 
@@ -43,9 +32,7 @@ from agriforecast_ml import features
 from agriforecast_ml.serving import predict
 
 
-# --------------------------------------------------------------------------- #
 # Calendar-feature parity: the shared helper vs what the feature build emits.
-# --------------------------------------------------------------------------- #
 class TestCalendarParity:
     """features.calendar_features is the SINGLE definition of the date columns.
     If build_crop_features ever re-inlines them, serving would encode a candidate
@@ -94,9 +81,7 @@ class TestCalendarParity:
         assert list(a["SeasonMaha"]) == [1, 0, 1]
 
 
-# --------------------------------------------------------------------------- #
 # Fakes for the sweep.
-# --------------------------------------------------------------------------- #
 class _SeasonalModel:
     """Deterministic stand-in for a promoted quantile booster.
 
@@ -184,9 +169,7 @@ def _arm(monkeypatch, payload=None, *, row=_ANCHOR, servable=True,
 _AS_OF = date(2026, 1, 1)
 
 
-# --------------------------------------------------------------------------- #
 # The load-bearing behaviour.
-# --------------------------------------------------------------------------- #
 class TestSweep:
     def test_sweep_actually_varies_by_date(self, monkeypatch):
         """The anchor row is identical for every candidate; only the calendar
@@ -286,9 +269,7 @@ class TestSweep:
         assert b["lowerBound"] <= b["predictedPrice"] <= b["upperBound"]
 
 
-# --------------------------------------------------------------------------- #
 # The two endpoints must not contradict each other.
-# --------------------------------------------------------------------------- #
 class TestForecastAgreement:
     """The window panel and the forecast screen answer the SAME question.
 
@@ -463,9 +444,7 @@ class TestForecastAgreement:
         assert r["predictedPrice"] == 120.0   # the fallback p50, not a model score
 
 
-# --------------------------------------------------------------------------- #
 # The honesty ladder — every path that must refuse to name a window.
-# --------------------------------------------------------------------------- #
 class TestRefusals:
     @staticmethod
     def _assert_refused(out, code):
@@ -553,9 +532,7 @@ class TestRefusals:
         assert len({p["predictedPrice"] for p in out["points"]}) > 50
 
 
-# --------------------------------------------------------------------------- #
 # Festival-calendar caching — one DB read per process, and never cache a failure.
-# --------------------------------------------------------------------------- #
 class TestFestivalCalendarCache:
     _FESTIVALS = pd.DataFrame([{
         "FestivalKey": "AVURUDU", "Date": pd.Timestamp("2026-04-13"),
@@ -621,9 +598,7 @@ class TestNoModelRegistered:
             predict.harvest_window("c1", _AS_OF)
 
 
-# --------------------------------------------------------------------------- #
 # The HTTP contract the .NET layer consumes.
-# --------------------------------------------------------------------------- #
 class TestEndpoint:
     @staticmethod
     def _client():

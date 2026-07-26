@@ -31,9 +31,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-# ---------------------------------------------------------------------------
 # Path setup
-# ---------------------------------------------------------------------------
 ML_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ML_ROOT))
 
@@ -41,9 +39,7 @@ sys.path.insert(0, str(ML_ROOT))
 HARTI_CACHE = ML_ROOT / "harti_cache"
 SAMPLE_PDF = HARTI_CACHE / "harti_2019-01-01.pdf"
 
-# ---------------------------------------------------------------------------
 # Reusable constants (mirror loader.py -- verified against live code)
-# ---------------------------------------------------------------------------
 DEC_SOURCE = "DAMBULLA_DEC"
 HARTI_SOURCE = "HARTI"
 
@@ -66,9 +62,7 @@ HARTI_TO_DB_NAME = {
 ZERO_DATA_CROPS = {"Winged Bean", "Ginger", "Cooking Melon", "Watermelon"}
 
 
-# ---------------------------------------------------------------------------
 # Test helpers / fixtures
-# ---------------------------------------------------------------------------
 
 def _make_price_df(rows):
     df = pd.DataFrame(rows)
@@ -103,9 +97,7 @@ def _make_fake_crop_map(harti_labels=None):
     return result
 
 
-# ===========================================================================
 # 1. NO CROSS-SOURCE DUPLICATION
-# ===========================================================================
 
 class TestNoCrossSourceDuplication:
     """After load_prices() SQL filter, no (CropId, Date) must appear in both
@@ -247,9 +239,7 @@ class TestNoCrossSourceDuplication:
         )
 
 
-# ===========================================================================
 # 2. DEC WINDOW EXCLUSION CORRECTNESS
-# ===========================================================================
 
 class TestDECWindowExclusion:
     """DEC Ridge Gourd/Beans rows inside [2025-05-05, 2025-06-30] must be
@@ -336,9 +326,7 @@ class TestDECWindowExclusion:
         )
 
 
-# ===========================================================================
 # 3. NAME-ALIAS MAPPING
-# ===========================================================================
 
 class TestNameAliasMapping:
     """Ridge Gourd<->'Luffa' and other aliases resolve to correct CropId;
@@ -480,9 +468,7 @@ class TestNameAliasMapping:
         assert result["skipped_no_crop"] == 0
 
 
-# ===========================================================================
 # 4. PARSER CORRECTNESS ON CACHED PDF
-# ===========================================================================
 
 @pytest.mark.skipif(
     not SAMPLE_PDF.exists(),
@@ -746,9 +732,7 @@ class TestParserOnCachedPDF:
         )
 
 
-# ===========================================================================
 # 4b. DAMBULLA MARKET ID RESOLUTION (R2 Step 3 -- EconomicCenterId fix)
-# ===========================================================================
 
 class TestDambullaMarketIdResolution:
     """_dambulla_market_id() must resolve Markets.Id BY CODE (never a
@@ -838,9 +822,7 @@ class TestDambullaMarketIdResolution:
         assert result["inserted"] == 3
 
 
-# ===========================================================================
 # 5. IDEMPOTENCY
-# ===========================================================================
 
 class TestIdempotency:
     """Loading the same parsed rows twice must produce no new rows."""
@@ -966,9 +948,7 @@ class TestIdempotency:
         assert result["inserted"] == 0
 
 
-# ===========================================================================
 # 6. NO LEAKAGE INTO CROPFEATUREDAILY
-# ===========================================================================
 
 class TestNoLeakageIntoCropFeature:
     """Lag/rolling features must remain past-only after the splice."""

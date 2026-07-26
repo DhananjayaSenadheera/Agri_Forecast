@@ -26,9 +26,7 @@ import pytest
 from agriforecast_ml.train import model as M
 
 
-# ---------------------------------------------------------------------------
 # 1 + 2 — weighting math and point-in-time age
-# ---------------------------------------------------------------------------
 class TestRecencyWeightsMath:
     def _dates(self, n, start="2024-01-01"):
         s = pd.Timestamp(start)
@@ -94,9 +92,7 @@ class TestRecencyWeightsMath:
         assert w_from_slice.max() == pytest.approx(1.0)
 
 
-# ---------------------------------------------------------------------------
 # 3 — unweighted-control equivalence
-# ---------------------------------------------------------------------------
 class TestUnweightedControl:
     def test_none_halflife_is_all_ones(self):
         d = pd.Series([pd.Timestamp("2024-01-01") + pd.Timedelta(days=i)
@@ -123,9 +119,7 @@ class TestUnweightedControl:
         assert w.tolist() == [1.0] * 20
 
 
-# ---------------------------------------------------------------------------
 # 4 — tuning never sees the test block (structural) + grid shape
-# ---------------------------------------------------------------------------
 def _synthetic_gated_frame(n=800, base="2023-01-01", n_crops=3):
     """A single-crop-pooled frame long enough for a real inner split. Prices
     trend upward so recency weighting has a direction to learn."""
@@ -205,9 +199,7 @@ class TestTuneHalflifeLeakageSafe:
         assert best is None and scores == {}
 
 
-# ---------------------------------------------------------------------------
 # 5 — incumbent gate: brick-safe no-op + honest promotion story (reviewer F3)
-# ---------------------------------------------------------------------------
 class TestIncumbentGate:
     def test_no_promoted_model_is_a_noop_never_bricks(self, monkeypatch):
         """No promoted model (or an old payload without cv.hybrid_MAE) must make

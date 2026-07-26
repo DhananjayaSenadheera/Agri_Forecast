@@ -1,46 +1,15 @@
-"""
-AgriForecast ML -- Security regression tests for F-10: HARTI PDF download
-size cap (memory/disk exhaustion via oversized or lying responses).
+"""Regression tests for the HARTI PDF download size cap.
 
-What F-10 fixed
-----------------
-`download_pdfs()` used to do a plain, unbounded ``session.get(url).content``
-read: a malicious or misconfigured server response of any size (or a
-Content-Length lie) would be read fully into memory and written to disk with
-no ceiling. The fix introduces ``_download_capped()``:
+_download_capped() streams the response in 64 KB chunks, rejects early when the declared
+Content-Length exceeds the 25 MB cap, and also enforces the cap against the actual
+streamed bytes, since Content-Length can be absent, wrong or hostile. Exceeding it raises
+PdfTooLargeError, which the download loop treats like any other per-URL failure.
 
-  - Streams the response (``stream=True``) in 64 KB chunks instead of loading
-    the whole body at once.
-  - Rejects early (without reading the body) if the server declares a
-    Content-Length header above the 25 MB cap.
-  - ALSO enforces the cap against the actual number of streamed bytes, since
-    Content-Length is attacker-controllable and may be absent or wrong.
-  - A malformed (non-numeric) Content-Length header is ignored -- the
-    streamed-byte guard is the source of truth.
-  - Raises ``PdfTooLargeError`` (a plain Exception subclass) when the cap is
-    exceeded either way.
+Covered: a normal PDF, an oversized declared length (body never read), an oversized stream
+with no header, a lying header, a garbage header, the exact boundary either side, empty
+keep-alive chunks, and loop resilience.
 
-The download loop in ``download_pdfs()`` treats ``PdfTooLargeError`` like any
-other per-URL failure: log a warning, increment ``n_fail``, continue to the
-next link. No exception escapes the loop.
-
-Coverage
---------
-1. Normal small PDF -> full bytes returned unchanged.
-2. Content-Length header > cap -> PdfTooLargeError, body never read
-   (iter_content not consumed).
-3. Content-Length absent, streamed body > cap -> PdfTooLargeError.
-4. Content-Length lies (small header, large actual stream) -> PdfTooLargeError.
-5. Garbage (non-numeric) Content-Length -> ignored; normal download succeeds.
-6. Exact boundary: body == cap bytes -> allowed; cap + 1 byte -> rejected.
-7. Empty keep-alive chunks (``b""``) are skipped without error or being
-   counted toward the size.
-8. Loop resilience: an oversize PDF is logged as a failure (n_fail) and the
-   loop continues to download the next URL; no exception escapes
-   ``download_pdfs()``.
-
-All tests are network-free: ``requests.Session`` and its ``Response`` are
-mocked with ``unittest.mock``. No real HTTP calls are made.
+Network-free: the session and its response are mocked.
 """
 from __future__ import annotations
 
@@ -51,9 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ---------------------------------------------------------------------------
 # Path setup -- allow `import agriforecast_ml` from the ML project root.
-# ---------------------------------------------------------------------------
 ML_ROOT = Path(__file__).resolve().parents[1]
 if str(ML_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_ROOT))
@@ -81,9 +48,7 @@ def _no_dns(monkeypatch):
     monkeypatch.setattr(netguard, "_resolve_ips", lambda host: ["8.8.8.8"])
 
 
-# ===========================================================================
 # Test helpers
-# ===========================================================================
 
 def _chunks_from_bytes(data: bytes, chunk_size: int = _STREAM_CHUNK_BYTES):
     """Split ``data`` into a list of chunks the way requests' iter_content would."""
@@ -122,9 +87,7 @@ def _make_session(mock_response):
     return session
 
 
-# ===========================================================================
 # 1. Normal small PDF -- unchanged behaviour
-# ===========================================================================
 
 class TestNormalDownload:
     def test_small_pdf_returns_full_bytes_unchanged(self):
@@ -159,9 +122,7 @@ class TestNormalDownload:
         resp.raise_for_status.assert_called_once()
 
 
-# ===========================================================================
 # 2. Content-Length header exceeds cap -- reject WITHOUT reading body
-# ===========================================================================
 
 class TestContentLengthPreCheck:
     def test_oversized_content_length_raises_without_consuming_body(self):
@@ -186,9 +147,7 @@ class TestContentLengthPreCheck:
             _download_capped(session, "https://www.harti.gov.lk/eng/huge.pdf")
 
 
-# ===========================================================================
 # 3. Content-Length absent, streamed body exceeds cap
-# ===========================================================================
 
 class TestStreamedGuardNoHeader:
     def test_no_content_length_large_stream_raises(self):
@@ -208,9 +167,7 @@ class TestStreamedGuardNoHeader:
         assert result == body
 
 
-# ===========================================================================
 # 4. Content-Length LIES (small header, oversized actual stream)
-# ===========================================================================
 
 class TestContentLengthLies:
     def test_small_header_large_actual_stream_raises(self):
@@ -233,9 +190,7 @@ class TestContentLengthLies:
             _download_capped(session, "https://www.harti.gov.lk/eng/zero-header.pdf")
 
 
-# ===========================================================================
 # 5. Garbage Content-Length header -- ignored, falls through to stream guard
-# ===========================================================================
 
 class TestGarbageContentLength:
     def test_non_numeric_header_ignored_normal_download_succeeds(self):
@@ -268,9 +223,7 @@ class TestGarbageContentLength:
         assert result == body
 
 
-# ===========================================================================
 # 6. Exact boundary behaviour
-# ===========================================================================
 
 class TestBoundary:
     def test_body_exactly_at_cap_is_allowed(self):
@@ -302,9 +255,7 @@ class TestBoundary:
         assert result == body
 
 
-# ===========================================================================
 # 7. Empty keep-alive chunks skipped without error
-# ===========================================================================
 
 class TestEmptyChunks:
     def test_empty_chunks_interleaved_are_skipped(self):
@@ -339,9 +290,7 @@ class TestEmptyChunks:
         assert len(result) == _MAX_PDF_BYTES
 
 
-# ===========================================================================
 # 8. Loop resilience -- oversize PDF is a logged failure, crawl continues
-# ===========================================================================
 
 class TestDownloadLoopResilience:
     """Exercise download_pdfs() end-to-end (with a fake session) to prove

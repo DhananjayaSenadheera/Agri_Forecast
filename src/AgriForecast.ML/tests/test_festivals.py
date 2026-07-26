@@ -40,9 +40,7 @@ from agriforecast_ml import load as L  # noqa: E402
 from agriforecast_ml.serving import explain  # noqa: E402
 
 
-# ===========================================================================
 # Shared fixtures / builders (pure, hermetic)
-# ===========================================================================
 
 def _calendar_2019() -> pd.DataFrame:
     """Minimal load_festivals()-shaped frame: the Avurudu Apr-13/14 pair
@@ -63,9 +61,7 @@ def _features_for(obs, harv, calendar) -> pd.DataFrame:
     return F._festival_features(obs, harv, events, windows)
 
 
-# ===========================================================================
 # GENERIC REUSABLE INVARIANT HELPERS (P6 QA will reuse these)
-# ===========================================================================
 
 def assert_calendar_covers_years(covered_years: set[int], required_years: set[int],
                                  what: str = "calendar") -> None:
@@ -125,9 +121,7 @@ def assert_as_of_parity(fn, *args, **kwargs):
     assert_no_wall_clock(fn, *args, **kwargs)
 
 
-# ===========================================================================
 # 1. Boundary pins for the Avurudu lead-up (the spec's exact pins)
-# ===========================================================================
 
 class TestAvuruduBoundaryPins:
     def test_days_to_next_festival_pins(self):
@@ -166,9 +160,7 @@ class TestAvuruduBoundaryPins:
         assert f["InLeadupAvurudu"].iloc[0] == 0
 
 
-# ===========================================================================
 # 2. Harvest-anchored features (the load-bearing ones)
-# ===========================================================================
 
 class TestHarvestAnchored:
     def test_harvest_in_leadup_true_when_harvest_in_window(self):
@@ -198,9 +190,7 @@ class TestHarvestAnchored:
         assert not np.isnan(f["DaysFromHarvestToNextFestival"].iloc[0])
 
 
-# ===========================================================================
 # 3. Empty-calendar degrade + clip semantics
-# ===========================================================================
 
 class TestEmptyCalendarDegrade:
     def test_attach_festivals_empty_calendar_zero_fills(self):
@@ -227,9 +217,7 @@ class TestEmptyCalendarDegrade:
             assert col in out.columns
 
 
-# ===========================================================================
 # 4. Prophet-readiness
-# ===========================================================================
 
 class TestProphetHolidays:
     def test_reshape_columns_and_windows(self):
@@ -247,9 +235,7 @@ class TestProphetHolidays:
         assert h.empty
 
 
-# ===========================================================================
 # 5. Purity: no wall-clock, historical-vs-as-of parity
-# ===========================================================================
 
 class TestPurity:
     def test_no_wall_clock_in_feature_build(self):
@@ -272,9 +258,7 @@ class TestPurity:
         assert not hasattr(F, "_is_festival")
 
 
-# ===========================================================================
 # 6. explain._LABELS coverage (farmer-facing SHAP names)
-# ===========================================================================
 
 class TestExplainLabels:
     def test_every_festival_column_has_a_label(self):
@@ -291,9 +275,7 @@ class TestExplainLabels:
         assert "IsFestival" in explain._LABELS  # legacy served-model compat
 
 
-# ===========================================================================
 # 7. DB-backed invariants (skipped when the live DB is unreachable)
-# ===========================================================================
 
 def _db_or_skip():
     try:

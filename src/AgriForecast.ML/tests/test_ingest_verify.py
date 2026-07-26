@@ -1,52 +1,15 @@
-"""Post-ingestion data verification tests (R2 ingestion-log plan PR 2).
+"""Post-ingestion data verification tests.
 
-All tests are hermetic: a mocked SQLAlchemy engine (MagicMock, matching the
-style of test_dec_mirror.py's ``_mock_engine`` sequenced-payload pattern),
-no network, no live DB. Live-DB verification is done separately (see task
-report).
+Hermetic: a mocked SQLAlchemy engine with sequenced payloads, no network, no live DB.
 
-Coverage:
-  TestDecRowCount               -- WARN/FAIL boundaries (78/96/20/115) plus
-                                    the dedicated "0 rows" FAIL message.
-  TestDecUnmapped                -- 0 -> PASS, >0 -> FAIL.
-  TestNonPositivePricesScoping   -- the since_utc parameter is threaded
-                                    verbatim into the SQL params, i.e. the
-                                    "new rows only" 24h scoping is enforced
-                                    by the query itself, not a Python-side
-                                    date filter that could drift.
-  TestMinGtMax / TestExtremeOutlier
-                                  -- FAIL vs WARN severities respectively.
-  TestAliasRegression             -- Garlic FAIL (wrong code / Big-Onion
-                                    name), Passion WARN (drift), both-hold
-                                    PASS.
-  TestNaturalKeyDups              -- 0 groups -> PASS, any group -> FAIL.
-  TestHartiConvention             -- violation -> FAIL, clean -> PASS.
-  TestHartiFreshness              -- PASS<=2, WARN 3-5, FAIL>5, no rows -> FAIL.
-  TestMirrorCurrency              -- match -> PASS; mismatch + no prior row
-                                    -> WARN; mismatch + prior row also
-                                    mismatched -> FAIL; malformed prior
-                                    ChecksJson treated as not-previously-
-                                    mismatched (fail-open to WARN).
-  TestMirrorIdempotency           -- would_insert 0 -> PASS, >0 -> FAIL.
-  TestMirrorFidelity              -- 0 mismatches -> PASS; fraction<=1% ->
-                                    WARN; fraction>1% -> FAIL; empty sample
-                                    -> PASS.
-  TestCrossSourceDups             -- AssertionError -> FAIL, clean -> PASS.
-  TestGapTiers                    -- ERROR-tier entries in window -> WARN
-                                    (never FAIL); outside window -> PASS.
-  TestSeverityAggregation         -- run_all_verifications' overall = worst
-                                    of the 14 checks; n_pass/n_warn/n_fail
-                                    counts; pipeline_date/duration_ms shape.
-  TestChecksJsonRoundTrip         -- json.dumps(checks) round-trips via
-                                    json.loads to the identical structure.
-  TestSummarySanitization         -- Summary never contains a check's full
-                                    message text (path-safe by construction).
-  TestPersistVerdict              -- INSERT SQL/params shape, OverallStatus
-                                    int mapping, BatchId nullable.
-  TestCliExitCodes                 -- 0 PASS/WARN, 1 FAIL, 2 infra error
-                                    (run failure OR persist failure), 2 on
-                                    bad --pipeline-date, --dry-run skips
-                                    persistence.
+Each of the 14 checks has its own class covering the PASS/WARN/FAIL boundaries. The less
+obvious ones: non-positive-price scoping asserts since_utc is threaded into the SQL params,
+so the 'new rows only' window is enforced by the query itself; mirror_currency separates a
+one-off lag (WARN) from a persistent one (FAIL) and treats malformed prior JSON as
+not-previously-mismatched; gap_tiers never FAILs.
+
+Also covers severity aggregation, ChecksJson round-tripping, Summary sanitisation, the
+persist SQL shape, and the CLI exit codes (0 PASS/WARN, 1 FAIL, 2 infrastructure error).
 """
 from __future__ import annotations
 
@@ -69,9 +32,7 @@ from agriforecast_ml import data_quality as dq  # noqa: E402
 import verify_ingestion  # noqa: E402
 
 
-# ===========================================================================
 # Mock engine helper (mirrors test_dec_mirror.py::_mock_engine)
-# ===========================================================================
 
 def _mock_engine(connect_payloads: list) -> "tuple[MagicMock, MagicMock]":
     """`connect_payloads` is a list of dicts, one per successive
@@ -101,9 +62,7 @@ def _mock_engine(connect_payloads: list) -> "tuple[MagicMock, MagicMock]":
     return engine, conn
 
 
-# ===========================================================================
 # 1. dec_row_count
-# ===========================================================================
 
 class TestDecRowCount:
     PD = date(2026, 7, 21)
@@ -131,9 +90,7 @@ class TestDecRowCount:
         assert "has not run yet" in result.message or "feed" in result.message.lower()
 
 
-# ===========================================================================
 # 2. dec_unmapped
-# ===========================================================================
 
 class TestDecUnmapped:
     def test_zero_unmapped_passes(self):
@@ -148,9 +105,7 @@ class TestDecUnmapped:
         assert result.counts["unmapped_count"] == 3
 
 
-# ===========================================================================
 # 3. non_positive_prices -- "new rows only" scoping
-# ===========================================================================
 
 class TestNonPositivePricesScoping:
     def test_since_utc_threaded_into_both_queries(self):
@@ -201,9 +156,7 @@ class TestNonPositivePricesScoping:
         assert timedelta(hours=23, minutes=59) < delta < timedelta(hours=24, minutes=1)
 
 
-# ===========================================================================
 # 4/5. min_gt_max / extreme_outlier
-# ===========================================================================
 
 class TestMinGtMax:
     def test_fails_on_any(self):
@@ -229,9 +182,7 @@ class TestExtremeOutlier:
         assert result.severity == "PASS"
 
 
-# ===========================================================================
 # 6. alias_regression
-# ===========================================================================
 
 class TestAliasRegression:
     def _rows(self, garlic, passion):
@@ -292,9 +243,7 @@ class TestAliasRegression:
         assert result.severity == "WARN"
 
 
-# ===========================================================================
 # 7. natural_key_dups
-# ===========================================================================
 
 class TestNaturalKeyDups:
     def test_all_zero_passes(self):
@@ -309,9 +258,7 @@ class TestNaturalKeyDups:
         assert result.counts["po_name_keyed_dup_groups"] == 2
 
 
-# ===========================================================================
 # 8. harti_convention
-# ===========================================================================
 
 class TestHartiConvention:
     def test_violation_fails(self):
@@ -330,9 +277,7 @@ class TestHartiConvention:
         assert result.severity == "PASS"
 
 
-# ===========================================================================
 # 9. harti_freshness
-# ===========================================================================
 
 class TestHartiFreshness:
     PD = date(2026, 7, 21)
@@ -357,9 +302,7 @@ class TestHartiFreshness:
         assert result.severity == "FAIL"
 
 
-# ===========================================================================
 # 10. mirror_currency
-# ===========================================================================
 
 class TestMirrorCurrency:
     def test_matching_dates_pass(self):
@@ -412,9 +355,7 @@ class TestMirrorCurrency:
         assert result.severity == "WARN"
 
 
-# ===========================================================================
 # 11. mirror_idempotency
-# ===========================================================================
 
 class TestMirrorIdempotency:
     def test_zero_would_insert_passes(self, monkeypatch):
@@ -429,9 +370,7 @@ class TestMirrorIdempotency:
         assert result.counts["would_insert"] == 12
 
 
-# ===========================================================================
 # 12. mirror_fidelity
-# ===========================================================================
 
 class TestMirrorFidelity:
     def _row(self, po_min, po_max, po_crop, mp_min, mp_max, mp_crop):
@@ -484,9 +423,7 @@ class TestMirrorFidelity:
         assert result.counts["mismatches"] == 1
 
 
-# ===========================================================================
 # 13. cross_source_dups
-# ===========================================================================
 
 class TestCrossSourceDups:
     def test_clean_passes(self, monkeypatch):
@@ -504,9 +441,7 @@ class TestCrossSourceDups:
         assert "SOURCE DUPLICATION" in result.message
 
 
-# ===========================================================================
 # 14. gap_tiers
-# ===========================================================================
 
 class TestGapTiers:
     PD = date(2026, 7, 21)
@@ -546,9 +481,7 @@ class TestGapTiers:
         assert result.severity == "PASS"
 
 
-# ===========================================================================
 # Orchestration: severity aggregation, shape, ChecksJson round-trip, Summary
-# ===========================================================================
 
 _ALL_CHECK_FN_NAMES = [
     "_check_dec_row_count", "_check_dec_unmapped", "_check_non_positive_prices",
@@ -698,9 +631,7 @@ class TestSummarySanitization:
         assert "13 pass" in summary and "1 warn" in summary and "0 fail" in summary
 
 
-# ===========================================================================
 # persist_verdict()
-# ===========================================================================
 
 class TestPersistVerdict:
     def _result(self, overall="PASS", n_pass=14, n_warn=0, n_fail=0):
@@ -745,9 +676,7 @@ class TestPersistVerdict:
             iv.persist_verdict(engine, None)
 
 
-# ===========================================================================
 # CLI exit codes
-# ===========================================================================
 
 class TestCliExitCodes:
     def _patch_common(self, monkeypatch, *, run_result=None, run_raises=None,
@@ -862,9 +791,7 @@ class TestCliExitCodes:
         assert "Password" not in captured.out
 
 
-# ===========================================================================
 # S2 review fix: stderr (logging) redaction of connection-string fragments
-# ===========================================================================
 
 class TestRedactSensitive:
     def test_password_and_server_redacted(self):

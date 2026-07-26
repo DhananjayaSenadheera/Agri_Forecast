@@ -1,42 +1,17 @@
-"""
-AgriForecast ML -- Security regression tests for F-03:
-insecure pickle/joblib deserialization + unsanitised version path.
+"""Security regression tests for the model registry's integrity and path guards.
 
-What F-03 fixed
----------------
-Two trust-boundary hardenings in agriforecast_ml/registry/registry.py:
+save_model always writes model_sha256, plus model_hmac when AGRI_MODEL_HMAC_KEY is set.
+load_promoted re-derives both over the on-disk bytes and fails CLOSED before joblib.load
+runs, so a tampered pkl is never unpickled. _safe_version_dir rejects any version string
+that is not 'v' followed by digits and checks the resolved directory stays inside the
+models dir, so a crafted promoted.json cannot traverse out.
 
-1. Safe deserialization.
-   ``save_model`` now writes ``model_sha256`` (always) and ``model_hmac``
-   (when AGRI_MODEL_HMAC_KEY is set) into metadata.json. ``load_promoted``
-   re-derives both over the on-disk bytes and enforces a match, fail-CLOSED,
-   BEFORE joblib.load executes.  A tampered pkl is never unpickled.
+Covers the happy path, a tampered pkl, a legacy model with no hash (refused by default,
+allowed with the explicit env opt-in), the HMAC path including a wrong key, path traversal,
+and re-signing a legacy model.
 
-2. Path traversal.
-   ``_safe_version_dir`` rejects any version string that does not match
-   ``^v\\d+$`` and asserts the resolved directory stays inside _MODELS_DIR.
-   A crafted ``promoted.json`` like ``{"version":"../../etc"}`` raises before
-   any filesystem access.
-
-Coverage (7 scenarios, 14 test methods)
-----------------------------------------
-1.  Happy path          -- save + load round-trip; sha256 written.
-2.  Tampered pkl        -- load after byte flip raises (sha256 mismatch);
-                          error does NOT expose raw hash/bytes.
-3.  Missing hash        -- legacy model (no model_sha256) refused by default.
-4.  Legacy + escape     -- AGRI_ALLOW_UNVERIFIED_MODEL=1 bypasses and warns.
-5.  HMAC strong path    -- save with key writes hmac; loads OK; tampering
-                          raises; wrong key raises.
-6.  Path traversal      -- bad version strings in promoted.json -> ValueError.
-7.  sign_version round-trip -- resign migrates a legacy model to verified.
-
-Isolation
----------
-A ``models_dir`` fixture monkeypatches ``registry._MODELS_DIR`` to a
-``tmp_path`` sub-directory so the real models/ tree is NEVER touched.
-A ``clean_env`` fixture removes AGRI_MODEL_HMAC_KEY and
-AGRI_ALLOW_UNVERIFIED_MODEL from the environment before each test so tests
-cannot bleed env state into each other.
+Isolation: fixtures point _MODELS_DIR at tmp_path and clear both env vars, so the real
+models tree is never touched and env state cannot bleed between tests.
 """
 from __future__ import annotations
 
@@ -47,27 +22,21 @@ from pathlib import Path
 
 import pytest
 
-# ---------------------------------------------------------------------------
 # Path setup: allow `import agriforecast_ml` from the ML project root.
-# ---------------------------------------------------------------------------
 ML_ROOT = Path(__file__).resolve().parents[1]
 if str(ML_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_ROOT))
 
 from agriforecast_ml.registry import registry  # noqa: E402
 
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
 HMAC_ENV = "AGRI_MODEL_HMAC_KEY"
 ALLOW_ENV = "AGRI_ALLOW_UNVERIFIED_MODEL"
 DUMMY_PAYLOAD = {"crop": "tomato", "weights": [1.0, 2.5, 0.7]}
 DUMMY_META = {"algo": "xgboost", "cv_mae": 12.3}
 
 
-# ===========================================================================
 # Shared fixtures
-# ===========================================================================
 
 
 @pytest.fixture(autouse=True)
@@ -96,17 +65,13 @@ def models_dir(tmp_path, monkeypatch):
     return fake
 
 
-# ===========================================================================
 # TestF03RegistryIntegrity
-# ===========================================================================
 
 
 class TestF03RegistryIntegrity:
     """Standing security regression suite for F-03."""
 
-    # -----------------------------------------------------------------------
     # 1. Happy path: save -> load returns the payload; sha256 written
-    # -----------------------------------------------------------------------
 
     def test_happy_path_load_returns_payload(self, models_dir):
         """save_model + load_promoted round-trip returns the original payload."""
@@ -141,9 +106,7 @@ class TestF03RegistryIntegrity:
             f"promoted.json must point to {version!r}, got {data!r}"
         )
 
-    # -----------------------------------------------------------------------
     # 2. Tampered pkl -> refused
-    # -----------------------------------------------------------------------
 
     def test_tampered_pkl_raises(self, models_dir):
         """Flipping a byte in model.pkl after save must cause load_promoted to raise."""
@@ -181,9 +144,7 @@ class TestF03RegistryIntegrity:
             f"Error message should describe the integrity failure clearly: {msg!r}"
         )
 
-    # -----------------------------------------------------------------------
     # 3. Missing hash (legacy) -> refused by default
-    # -----------------------------------------------------------------------
 
     def test_missing_hash_refused_by_default(self, models_dir):
         """A model without model_sha256 in metadata must be refused (fail-closed)."""
@@ -216,9 +177,7 @@ class TestF03RegistryIntegrity:
             f"Error should direct operator to sign the model. Got: {msg!r}"
         )
 
-    # -----------------------------------------------------------------------
     # 4. Legacy + escape hatch (AGRI_ALLOW_UNVERIFIED_MODEL=1)
-    # -----------------------------------------------------------------------
 
     def test_legacy_escape_hatch_allows_load(self, models_dir, monkeypatch):
         """With AGRI_ALLOW_UNVERIFIED_MODEL=1 and no hash, load_promoted must succeed."""
@@ -273,9 +232,7 @@ class TestF03RegistryIntegrity:
             payload, _ = registry.load_promoted()
             assert payload == DUMMY_PAYLOAD, f"Escape hatch failed for value {truthy_val!r}"
 
-    # -----------------------------------------------------------------------
     # 5. HMAC strong path
-    # -----------------------------------------------------------------------
 
     def test_hmac_save_writes_model_hmac(self, models_dir, monkeypatch):
         """save_model with AGRI_MODEL_HMAC_KEY set must write model_hmac into metadata."""
@@ -325,9 +282,7 @@ class TestF03RegistryIntegrity:
         with pytest.raises((RuntimeError, ValueError)):
             registry.load_promoted()
 
-    # -----------------------------------------------------------------------
     # 6. Path traversal: bad versions in promoted.json -> ValueError
-    # -----------------------------------------------------------------------
 
     def _poison_promoted(self, models_dir: Path, bad_version: str) -> None:
         """Write a promoted.json pointing at an attacker-controlled version string."""
@@ -386,9 +341,7 @@ class TestF03RegistryIntegrity:
             vdir = registry._safe_version_dir(v)
             assert vdir.name == v
 
-    # -----------------------------------------------------------------------
     # 7. sign_version round-trip (resign migration path)
-    # -----------------------------------------------------------------------
 
     def test_sign_version_adds_sha256_to_legacy_model(self, models_dir):
         """sign_version must add model_sha256 to a pre-F03 model that lacks it."""

@@ -1,47 +1,14 @@
-"""
-AgriForecast ML — HARTI multi-market parser/loader tests (R1.1 P1,
-ClickUp 86cahef3e; extended R1.1 P2, ClickUp 86cahef44 for
-Thambuttegama/Keppetipola).
+"""HARTI multi-market parser and loader tests.
 
-All tests are hermetic: synthetic in-memory table fixtures (list-of-lists,
-matching pdfplumber's extract_tables() shape), no network, no DB. Mirrors
-the style of test_downloader_cap.py (pure unit tests with mocked
-collaborators) and test_harti_splice.py (dataclass-driven loader tests).
+Hermetic: synthetic in-memory table fixtures shaped like pdfplumber's extract_tables()
+output, no network and no DB.
 
-Coverage:
-  TestLocateMarketColumn        — header-located columns map to the right
-                                   market; missing header -> None, not a
-                                   positional guess.
-  TestColumnOrderShuffle        — R1 regression: a column-order-shuffled
-                                   table still maps each market correctly
-                                   (extended to all 5 target markets).
-  TestLocateArrivalsColumn      — arrivals column found when header present;
-                                   None (not an error) when absent.
-  TestParsePdfMultiMarket       — parse_pdf()-level integration using a
-                                   monkeypatched _find_english_veg_page, i.e.
-                                   no real PDF I/O: multi-market rows emitted,
-                                   partial-market skip warns but continues,
-                                   total-column-loss skips the whole PDF.
-  TestMarketNameResolution      — loader market_name -> DB Market: happy
-                                   path resolves by name (no hardcoded GUID),
-                                   a miss WARN-skips rows without inventing
-                                   a market.
-  TestAsOfUtc                   — PDF /CreationDate parses to the correct
-                                   UTC instant (including delimiter-less
-                                   "+0530"-style offsets); missing/garbage
-                                   falls back to a conservative-LATE vintage
-                                   (ObservedDate+1 06:00 Sri Lanka time),
-                                   never same-day end-of-day and never
-                                   earlier than ObservedDate -- leakage guard.
-  TestDambullaBackCompat        — upsert_harti_prices() filters to
-                                   Dambulla-only, preserving the legacy
-                                   MarketPrices contract untouched.
-  TestThambuttegamaKeppetipola  — R1.1 P2: new-market header aliases
-                                   (real spelling variants observed across
-                                   the corpus, incl. cell-bleed artifacts),
-                                   substring-safety, missing-column WARN
-                                   behaviour, and loader market-name
-                                   resolution for both new markets.
+Covers header-located market columns (a missing header gives None, never a positional
+guess), column-order shuffles, the optional arrivals column, parse_pdf() integration with
+a monkeypatched page finder, loader market resolution by name (a miss WARN-skips rather
+than inventing a market), AsOfUtc parsing plus its conservative-late fallback,
+Dambulla-only back-compat on the legacy path, and the Thambuttegama/Keppetipola header
+aliases including cell-bleed variants and substring safety.
 """
 from __future__ import annotations
 
@@ -53,9 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ---------------------------------------------------------------------------
 # Path setup
-# ---------------------------------------------------------------------------
 ML_ROOT = Path(__file__).resolve().parents[1]
 if str(ML_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_ROOT))
@@ -65,9 +30,7 @@ from agriforecast_ml.harti import loader as harti_loader  # noqa: E402
 from agriforecast_ml.harti.parser import ParsedPrice  # noqa: E402
 
 
-# ===========================================================================
 # Synthetic table fixtures (shape mirrors pdfplumber's extract_tables()[0])
-# ===========================================================================
 
 def _standard_table(*, include_narahenpita=False, include_arrivals=False):
     """A 2019-format-like table: header rows + crop rows.
@@ -147,9 +110,7 @@ def _table_no_target_markets():
     return rows
 
 
-# ===========================================================================
 # 1. _locate_market_column — header-located columns map to the right market
-# ===========================================================================
 
 class TestLocateMarketColumn:
     def test_dambulla_located_by_header(self):
@@ -214,9 +175,7 @@ class TestLocateMarketColumn:
         assert col == 1
 
 
-# ===========================================================================
 # 2. COLUMN-ORDER SHUFFLE — R1 regression test
-# ===========================================================================
 
 class TestColumnOrderShuffle:
     """The R1 risk: a column-order-shuffled table must still map each market
@@ -333,9 +292,7 @@ class TestColumnOrderShuffle:
         assert len(set(prices.values())) == 5
 
 
-# ===========================================================================
 # 3. _locate_arrivals_column — detect-don't-hardcode, absent != error
-# ===========================================================================
 
 class TestLocateArrivalsColumn:
     def test_arrivals_column_found_when_present(self):
@@ -366,10 +323,8 @@ class TestLocateArrivalsColumn:
         assert harti_parser._parse_arrivals_cell(None) is None
 
 
-# ===========================================================================
 # 4. parse_pdf() multi-market integration (monkeypatched page detection,
 #    no real PDF I/O)
-# ===========================================================================
 
 class TestParsePdfMultiMarket:
     """Exercise parse_pdf() end-to-end against synthetic tables by
@@ -486,9 +441,7 @@ class TestParsePdfMultiMarket:
         assert dambulla_without == dambulla_with
 
 
-# ===========================================================================
 # 5. MARKET-NAME RESOLUTION (loader)
-# ===========================================================================
 
 class TestMarketNameResolution:
     """upsert_harti_price_observations() resolves parser market_name -> DB
@@ -599,9 +552,7 @@ class TestMarketNameResolution:
         assert result["inserted"] == 0
 
 
-# ===========================================================================
 # 6. AsOfUtc resolution (point-in-time contract)
-# ===========================================================================
 
 class TestAsOfUtc:
     def test_pdf_creation_date_parses_to_correct_utc_instant(self):
@@ -707,9 +658,7 @@ class TestAsOfUtc:
         assert result["inserted"] == 1
 
 
-# ===========================================================================
 # 7. Dambulla back-compat (upsert_harti_prices unaffected by multi-market)
-# ===========================================================================
 
 class TestDambullaBackCompat:
     """upsert_harti_prices() (legacy MarketPrices path) must filter to
@@ -769,9 +718,7 @@ class TestDambullaBackCompat:
         assert pr.arrivals_kg is None
 
 
-# ===========================================================================
 # 8. Thambuttegama / Keppetipola (R1.1 P2, ClickUp 86cahef44)
-# ===========================================================================
 
 class TestThambuttegamaKeppetipola:
     """New-market header aliases for Thambuttegama and Keppetipola, verified
@@ -1112,10 +1059,8 @@ class TestThambuttegamaKeppetipola:
         assert "Keppetipola" in harti_parser._TARGET_MARKETS
 
 
-# ===========================================================================
 # 9. R2 Step 6.1 (ClickUp D-DF6) -- the remaining 6 markets: Kandy, Meegoda,
 #    Norochchole, Nuwara Eliya, Bandarawela, Veyangoda
-# ===========================================================================
 
 class TestSixNewMarketsStep6_1:
     """Full 4 -> 10 market widen. Header evidence sourced from the cached

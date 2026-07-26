@@ -74,9 +74,7 @@ def _one(engine) -> dict:
     return rows[0]
 
 
-# ===========================================================================
 # start_run
-# ===========================================================================
 
 class TestStartRun:
     def test_inserts_running_row(self, engine):
@@ -105,9 +103,7 @@ class TestStartRun:
         assert started.tzinfo is None
 
 
-# ===========================================================================
 # mark_succeeded
-# ===========================================================================
 
 class TestMarkSucceeded:
     def test_finalizes_same_row_succeeded(self, engine):
@@ -141,9 +137,7 @@ class TestMarkSucceeded:
         assert len(_rows(engine)) == 1
 
 
-# ===========================================================================
 # mark_failed
-# ===========================================================================
 
 class TestMarkFailed:
     def test_finalizes_same_row_failed(self, engine):
@@ -170,9 +164,7 @@ class TestMarkFailed:
         assert len(_rows(engine)) == 1
 
 
-# ===========================================================================
 # Naive-UTC normalization (the pymssql / datetime2 trap)
-# ===========================================================================
 
 class TestNaiveUtc:
     def test_to_naive_utc_strips_tzinfo(self):

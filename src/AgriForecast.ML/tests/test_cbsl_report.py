@@ -22,9 +22,7 @@ TUESDAY_PDF = FIXTURES / "price_report_20260721_e.pdf"
 MONDAY_PDF = FIXTURES / "price_report_20240722_e.pdf"
 
 
-# ===========================================================================
 # 1. Number-token merging (the kerning artifact)
-# ===========================================================================
 
 def _w(text: str, x0: float, x1: float) -> parser._Word:
     return parser._Word(text=text, x0=x0, x1=x1, top=100.0)
@@ -53,9 +51,7 @@ class TestMergeValues:
         assert vals[0][1] == pytest.approx((10 + 40) / 2)
 
 
-# ===========================================================================
 # 2. Parser against the two REAL header variants
-# ===========================================================================
 
 @pytest.fixture(scope="module")
 def tuesday_rows():
@@ -121,9 +117,7 @@ class TestParserRealPdfs:
         assert all(r.pdf_creation_date_raw for r in tuesday_rows)
 
 
-# ===========================================================================
 # 3. Downloader date candidates (capture-only contract)
-# ===========================================================================
 
 class TestCandidateDates:
     def test_empty_watermark_defaults_to_last_seven_days(self):
@@ -149,9 +143,7 @@ class TestCandidateDates:
         assert out == []
 
 
-# ===========================================================================
 # 4. Loader (hermetic): column split + placeholder-market skip
-# ===========================================================================
 
 def _row(market_name: str, label: str = "Beans", price: float = 250.0) -> parser.ParsedCbslPrice:
     return parser.ParsedCbslPrice(
@@ -237,9 +229,7 @@ class TestLoaderHermetic:
         assert "NULL, NULL" in insert_sql
 
 
-# ===========================================================================
 # 5. Service pass (no-op path)
-# ===========================================================================
 
 class TestServiceNoOp:
     def test_empty_cache_no_download_is_a_noop_success(self, tmp_path):

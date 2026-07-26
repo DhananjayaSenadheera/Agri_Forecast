@@ -45,10 +45,8 @@ if str(ML_ROOT) not in sys.path:
 from agriforecast_ml import training_log as tl  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
 # In-memory SQLite table mirroring the frozen ModelTrainingRuns contract.
 # CreatedUtc has a DB default (never set by the writer); Version is UNIQUE.
-# ---------------------------------------------------------------------------
 _CREATE_TABLE = """
 CREATE TABLE ModelTrainingRuns (
     Id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,9 +99,7 @@ def _base_kwargs(**over):
     return kw
 
 
-# ===========================================================================
 # Value coercion
-# ===========================================================================
 
 class TestValueCoercion:
     def test_round2_none_safe(self):
@@ -138,9 +134,7 @@ class TestValueCoercion:
         assert tl._to_datetime("not-a-date") == "not-a-date"
 
 
-# ===========================================================================
 # values_from_metadata
-# ===========================================================================
 
 class TestValuesFromMetadata:
     def test_extracts_gate_keys(self):
@@ -174,9 +168,7 @@ class TestValuesFromMetadata:
         assert v["best_baseline_mae"] is None
 
 
-# ===========================================================================
 # upsert_training_run
-# ===========================================================================
 
 class TestUpsert:
     def test_insert_then_update_same_version_no_duplicate(self, engine):
@@ -235,9 +227,7 @@ class TestUpsert:
         assert row["BestMlMae"] is None and row["DecisionPromoted"] is None
 
 
-# ===========================================================================
 # sync_promoted_flags
-# ===========================================================================
 
 class TestSyncPromotedFlags:
     def _seed(self, engine, versions):
@@ -285,9 +275,7 @@ class TestSyncPromotedFlags:
         assert rows["v16"]["DecisionPromoted"] == 1
 
 
-# ===========================================================================
 # Fail-open (registry.save_model hook)
-# ===========================================================================
 
 class TestFailOpen:
     def test_record_training_run_swallows_broken_engine(self, monkeypatch, caplog):
@@ -324,9 +312,7 @@ class TestFailOpen:
         assert (tmp_path / "models" / "promoted.json").exists()
 
 
-# ===========================================================================
 # Redaction
-# ===========================================================================
 
 class TestRedaction:
     def test_dsn_and_path_redacted(self):

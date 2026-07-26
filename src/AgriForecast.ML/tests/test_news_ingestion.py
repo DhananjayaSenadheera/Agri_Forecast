@@ -19,18 +19,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# ---------------------------------------------------------------------------
 # Path setup
-# ---------------------------------------------------------------------------
 ML_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ML_ROOT))
 
 FIXTURE_FEED = Path(__file__).parent / "fixtures" / "sample_feed.xml"
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 def _parsed_feed():
     """Return feedparser result from the local fixture (no network)."""
@@ -40,9 +36,7 @@ def _parsed_feed():
     return feedparser.parse(content)
 
 
-# ===========================================================================
 # TestFeedSpec
-# ===========================================================================
 
 class TestFeedSpec:
     """feeds.FEEDS is non-empty and each entry has required keys."""
@@ -71,9 +65,7 @@ class TestFeedSpec:
             )
 
 
-# ===========================================================================
 # TestParsing
-# ===========================================================================
 
 class TestParsing:
     """feedparser correctly parses the local fixture RSS."""
@@ -103,9 +95,7 @@ class TestParsing:
         assert dt.year == 2025
 
 
-# ===========================================================================
 # TestLanguageFilter
-# ===========================================================================
 
 class TestLanguageFilter:
     """Only English entries pass the language gate."""
@@ -143,9 +133,7 @@ class TestLanguageFilter:
         assert len(articles) == 4, f"Expected 4 English articles, got {len(articles)}"
 
 
-# ===========================================================================
 # TestSummaryTruncation
-# ===========================================================================
 
 class TestSummaryTruncation:
     """Summary is truncated to SUMMARY_MAX_CHARS; HTML is stripped first."""
@@ -188,9 +176,7 @@ class TestSummaryTruncation:
         assert len(story5["summary"]) <= fetcher.SUMMARY_MAX_CHARS
 
 
-# ===========================================================================
 # TestDedup
-# ===========================================================================
 
 class TestDedup:
     """Idempotent reload: second run inserts 0 new rows."""
@@ -247,9 +233,7 @@ class TestDedup:
         assert counters["dup_skipped"] == 2
 
 
-# ===========================================================================
 # TestUpsertCounting
-# ===========================================================================
 
 class TestUpsertCounting:
     """inserted + dup_skipped == total, always."""
@@ -291,9 +275,7 @@ class TestUpsertCounting:
         assert counters == {"inserted": 0, "dup_skipped": 0, "total": 0}
 
 
-# ===========================================================================
 # TestEnsureTable
-# ===========================================================================
 
 class TestEnsureTable:
     """ensure_table executes the DDL against the engine without errors."""
