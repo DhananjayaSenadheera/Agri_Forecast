@@ -43,20 +43,25 @@ public class AdminLogsController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // GET /api/admin/logs/user-activity?page=1&pageSize=20&type= — paged account-event history,
-    // newest first, optional event-type filter. Bad page/pageSize/type -> 400
+    // GET /api/admin/logs/user-activity?page=1&pageSize=20&type=&types= — paged account-event and
+    // admin-content-event history, newest first.
+    //   type=<wire>              single event type (unchanged)
+    //   types=<wire>,<wire>,...  comma-separated set, OR-combined; EVERY token must be known
+    // When both are given, types WINS. Bad page/pageSize/type/types -> 400
     // (GetUserActivityValidator). Empty page -> 200 with empty items.
     [HttpGet("user-activity")]
     public async Task<IActionResult> GetUserActivity(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
-        [FromQuery] string? type = null)
+        [FromQuery] string? type = null,
+        [FromQuery] string? types = null)
     {
         var result = await mediator.Send(new GetUserActivityQuery
         {
             Page = page,
             PageSize = pageSize,
-            Type = type
+            Type = type,
+            Types = types
         });
         if (result.IsSuccess)
             return Ok(result.Data);

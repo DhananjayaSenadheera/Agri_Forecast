@@ -23,7 +23,13 @@ public class AdminLogsHandlerTests
         public List<TrainingRunRow> Training = new();
         public List<(UserActivityRow Row, long Id)> Activity = new();
         public List<SystemErrorRow> Errors = new();
-        public UserActivityEventType? CapturedType;
+        // What the handler actually asked the store to filter by (null = unfiltered). The single
+        // ?type= and the multi ?types= both collapse into this one set.
+        public IReadOnlyCollection<UserActivityEventType>? CapturedTypes;
+
+        // Convenience view for the single-type assertions: the lone member, or null when unfiltered.
+        public UserActivityEventType? CapturedType =>
+            CapturedTypes is { Count: 1 } ? CapturedTypes.Single() : null;
 
         public Task<TrainingRunsPage> GetTrainingRunsPageAsync(int page, int pageSize, CancellationToken ct = default)
         {
@@ -36,11 +42,12 @@ public class AdminLogsHandlerTests
         }
 
         public Task<UserActivityPage> GetUserActivityPageAsync(
-            int page, int pageSize, UserActivityEventType? type, CancellationToken ct = default)
+            int page, int pageSize, IReadOnlyCollection<UserActivityEventType>? types,
+            CancellationToken ct = default)
         {
-            CapturedType = type;
+            CapturedTypes = types;
             var filtered = Activity
-                .Where(a => type == null || a.Row.EventType == type)
+                .Where(a => types is not { Count: > 0 } || types.Contains(a.Row.EventType))
                 .OrderByDescending(a => a.Row.OccurredUtc).ThenByDescending(a => a.Id)
                 .Select(a => a.Row)
                 .ToList();
