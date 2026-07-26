@@ -4,6 +4,9 @@ namespace AgriForecast.Domain.Constants;
 /// The source keys written to IngestionRuns.Source and IngestionWatermark.Source, and the values
 /// the admin ?source= filter accepts. Exact strings — the casing here is the stored casing, though
 /// membership is compared case-insensitively. Adding a source is an entry here plus a Worker call site.
+/// The ?source= filter deliberately accepts this FULL run-source set, not just the watermark-backed
+/// subset (HARTI/CBSL/CBSL_MACRO) — narrowing the validator would wrongly 400 valid filters like
+/// DAMBULLA_DEC or WEATHER, whose only health signal is their run rows.
 /// </summary>
 public static class IngestionSources
 {
