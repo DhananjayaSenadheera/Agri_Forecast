@@ -5,6 +5,7 @@ using AgriForecast.Application.Requests.NewsEvents.Commands.Update;
 using AgriForecast.Application.Requests.NewsEvents.DTOs;
 using AgriForecast.Application.Requests.NewsEvents.Quaries.GetAll;
 using AgriForecast.Application.Requests.NewsEvents.Validators;
+using AgriForecast.Application.Services;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
@@ -25,6 +26,10 @@ namespace AgriForecast.Tests;
 /// </summary>
 public class NewsEventTests
 {
+    // The acting admin the controller would stamp from the JWT; fixed so audit assertions can
+    // name the exact actor rather than matching any Guid.
+    private static readonly Guid ActingAdmin = Guid.Parse("11111111-2222-3333-4444-555555555555");
+
     // A repo whose existence checks pass, for validator/handler happy paths.
     private static Mock<INewsEventRepository> PermissiveRepo()
     {
@@ -270,7 +275,7 @@ public class NewsEventTests
         var repo = PermissiveRepo();
         var uow = Uow();
         var handler = new NewsEventCreateCommandHandler(
-            repo.Object, Mock.Of<ILogger<NewsEventCreateCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<NewsEventCreateCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
         var result = await handler.Handle(ValidCreate(), default);
 
@@ -287,7 +292,7 @@ public class NewsEventTests
         repo.Setup(r => r.GetByIdAsync(It.IsAny<Guid>())).ReturnsAsync((NewsEvent?)null);
         var uow = Uow();
         var handler = new NewsEventUpdateCommandHandler(
-            repo.Object, Mock.Of<ILogger<NewsEventUpdateCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<NewsEventUpdateCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
         var result = await handler.Handle(ValidUpdate(), default);
 
@@ -320,7 +325,7 @@ public class NewsEventTests
         cmd.NewsEventUpdateDto.Title = "new title";
 
         var handler = new NewsEventUpdateCommandHandler(
-            repo.Object, Mock.Of<ILogger<NewsEventUpdateCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<NewsEventUpdateCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
         var result = await handler.Handle(cmd, default);
 
@@ -339,9 +344,9 @@ public class NewsEventTests
         var repo = PermissiveRepo();
         var uow = Uow();
         var handler = new NewsEventDeleteCommandHandler(
-            repo.Object, Mock.Of<ILogger<NewsEventDeleteCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<NewsEventDeleteCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
-        var result = await handler.Handle(new NewsEventDeleteCommand(Guid.Empty), default);
+        var result = await handler.Handle(new NewsEventDeleteCommand(Guid.Empty, ActingAdmin), default);
 
         result.IsSuccess.Should().BeFalse();
         repo.Verify(r => r.GetByIdAsync(It.IsAny<Guid>()), Times.Never);
@@ -356,9 +361,9 @@ public class NewsEventTests
         repo.Setup(r => r.GetByIdAsync(existing.Id)).ReturnsAsync(existing);
         var uow = Uow();
         var handler = new NewsEventDeleteCommandHandler(
-            repo.Object, Mock.Of<ILogger<NewsEventDeleteCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<NewsEventDeleteCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
-        var result = await handler.Handle(new NewsEventDeleteCommand(existing.Id), default);
+        var result = await handler.Handle(new NewsEventDeleteCommand(existing.Id, ActingAdmin), default);
 
         result.IsSuccess.Should().BeTrue();
         result.Data.Should().Be(existing.Id);

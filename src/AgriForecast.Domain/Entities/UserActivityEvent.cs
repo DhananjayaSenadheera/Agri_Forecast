@@ -138,12 +138,18 @@ public class UserActivityEvent
 
     // Private so a content row can only be built through one of the five intent-named factories above
     // (a caller can never pass an account event type here and forge a user-shaped row).
+    //
+    // An EMPTY actor id becomes NULL, never a stored all-zeros GUID: Guid.Empty means "this mutation
+    // reached the handler without a JWT-stamped acting admin" (no HTTP caller can do that — the
+    // controllers 401 first — but a future non-HTTP caller could). Recording the change with an
+    // honestly-unattributed actor beats both dropping the audit row and fabricating a fake user id
+    // that the Logs page would render as a real account.
     private static UserActivityEvent ContentChanged(
         UserActivityEventType type, Guid actorUserId, string? details, DateTime occurredUtc) => new()
     {
         EventType = type,
         OccurredUtc = occurredUtc,
-        ActorUserId = actorUserId,
+        ActorUserId = actorUserId == Guid.Empty ? null : actorUserId,
         Details = Cap(details, DetailsMaxLength)
     };
 

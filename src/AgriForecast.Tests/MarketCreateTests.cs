@@ -2,13 +2,14 @@ using AgriForecast.Application.common;
 using AgriForecast.Application.Requests.Market.Commands.Create;
 using AgriForecast.Application.Requests.Market.DTOs;
 using AgriForecast.Application.Requests.Market.Validators;
+using AgriForecast.Application.Services;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
 using FluentAssertions;
+using MarketEntity = AgriForecast.Domain.Entities.Market;
 using Microsoft.Extensions.Logging;
 using Moq;
-using MarketEntity = AgriForecast.Domain.Entities.Market;
 
 namespace AgriForecast.Tests;
 
@@ -20,6 +21,10 @@ namespace AgriForecast.Tests;
 /// </summary>
 public class MarketCreateTests
 {
+    // The acting admin the controller would stamp from the JWT; fixed so audit assertions can
+    // name the exact actor rather than matching any Guid.
+    private static readonly Guid ActingAdmin = Guid.Parse("11111111-2222-3333-4444-555555555555");
+
     // ──────────────────────────────────────────────────────────────────────────────
     // MarketCreateValidator
     // ──────────────────────────────────────────────────────────────────────────────
@@ -112,7 +117,7 @@ public class MarketCreateTests
 
         var handler = new MarketCreateCommandHandler(
             codeSettings, repo.Object, uow.Object,
-            Mock.Of<ILogger<MarketCreateCommandHandler>>());
+            Mock.Of<ILogger<MarketCreateCommandHandler>>(), Mock.Of<IUserActivityAudit>());
 
         return (handler, repo, uow, captured);
     }

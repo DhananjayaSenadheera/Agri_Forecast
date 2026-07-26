@@ -1,4 +1,6 @@
 using AgriForecast.Application.common;
+using AgriForecast.Application.Services;
+using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
 using MediatR;
 using Microsoft.Extensions.Logging;
@@ -10,15 +12,18 @@ public class NewsEventDeleteCommandHandler : IRequestHandler<NewsEventDeleteComm
     private readonly INewsEventRepository _newsEventRepository;
     private readonly ILogger<NewsEventDeleteCommandHandler> _logger;
     private readonly IUnitofWorkRepository _unitofWorkRepository;
+    private readonly IUserActivityAudit _activityAudit;
 
     public NewsEventDeleteCommandHandler(
         INewsEventRepository newsEventRepository,
         ILogger<NewsEventDeleteCommandHandler> logger,
-        IUnitofWorkRepository unitofWorkRepository)
+        IUnitofWorkRepository unitofWorkRepository,
+        IUserActivityAudit activityAudit)
     {
         _newsEventRepository = newsEventRepository;
         _logger = logger;
         _unitofWorkRepository = unitofWorkRepository;
+        _activityAudit = activityAudit;
     }
 
     public async Task<Result<Guid>> Handle(NewsEventDeleteCommand request, CancellationToken cancellationToken)
@@ -41,6 +46,11 @@ public class NewsEventDeleteCommandHandler : IRequestHandler<NewsEventDeleteComm
         await _unitofWorkRepository.CommitAsync();
 
         _logger.LogInformation("News event {Id} deleted.", existing.Id);
+        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
+        // write can never turn a committed delete into an error).
+        await _activityAudit.RecordNewsEventChangedAsync(
+            request.ActingUserId, ContentChangeAction.Deleted, existing.Title, cancellationToken);
+
         return Result<Guid>.Success(existing.Id);
     }
 }

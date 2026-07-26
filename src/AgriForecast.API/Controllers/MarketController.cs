@@ -1,3 +1,4 @@
+using AgriForecast.API.Extensions;
 using AgriForecast.Application.Requests.Market.Commands.Create;
 using AgriForecast.Application.Requests.Market.Quaries.GetAll;
 using AgriForecast.Domain.Constants;
@@ -29,6 +30,13 @@ public class MarketController(IMediator mediator) : ControllerBase
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Create([FromBody] MarketCreateCommand command)
     {
+        // Stamp the acting admin from the JWT (never the body): the audit row must name who really
+        // made the change, and a body-supplied ActingUserId is discarded here.
+        var actingId = this.GetActingUserId();
+        if (actingId is null)
+            return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
+        command.ActingUserId = actingId.Value;
+
         var result = await mediator.Send(command);
         if (result.IsSuccess)
             return Ok(result.Data);

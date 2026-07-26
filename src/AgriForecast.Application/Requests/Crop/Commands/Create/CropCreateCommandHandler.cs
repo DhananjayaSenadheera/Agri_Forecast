@@ -1,6 +1,8 @@
 using AgriForecast.Application.common;
 using AgriForecast.Application.Mapper;
+using AgriForecast.Application.Services;
 using AgriForecast.Domain.Entities;
+using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
 using MediatR;
 using Microsoft.Extensions.Logging;
@@ -14,16 +16,19 @@ public class CropCreateCommandHandler : IRequestHandler<CropCreateCommand, Resul
     private readonly IUnitofWorkRepository _unitOfWork;
     private readonly ICropRepository _cropRepository;
     private readonly IGenericRepository<CropAgronomyProfile> _agronomyProfileRepository;
+    private readonly IUserActivityAudit _activityAudit;
 
     public CropCreateCommandHandler( CodeSettings codeSetting,
         IUnitofWorkRepository unitOfWork, ILogger<CropCreateCommandHandler> logger, ICropRepository cropRepository,
-        IGenericRepository<CropAgronomyProfile> agronomyProfileRepository)
+        IGenericRepository<CropAgronomyProfile> agronomyProfileRepository,
+        IUserActivityAudit activityAudit)
     {
         _codeSetting = codeSetting;
         _unitOfWork = unitOfWork;
         _logger = logger;
         _cropRepository = cropRepository;
         _agronomyProfileRepository = agronomyProfileRepository;
+        _activityAudit = activityAudit;
     }
     public async Task<Result<bool>> Handle(CropCreateCommand request, CancellationToken cancellationToken)
     {
@@ -55,6 +60,11 @@ public class CropCreateCommandHandler : IRequestHandler<CropCreateCommand, Resul
 
         await _unitOfWork.CommitAsync();
         _logger.LogInformation("Crop created successfully with Crop Code: {CropCode} (pending agronomy profile staged).", crop.CropCode);
+        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
+        // write can never turn a committed create into an error).
+        await _activityAudit.RecordCropChangedAsync(
+            request.ActingUserId, ContentChangeAction.Created, crop.CropCode, cancellationToken);
+
         return Result<bool>.Success(true);
     }
 }

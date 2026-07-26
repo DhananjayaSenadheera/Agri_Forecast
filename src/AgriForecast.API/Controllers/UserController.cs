@@ -1,4 +1,4 @@
-using System.Security.Claims;
+using AgriForecast.API.Extensions;
 using AgriForecast.Application.Requests.Users.Commands.Create;
 using AgriForecast.Application.Requests.Users.Commands.Delete;
 using AgriForecast.Application.Requests.Users.Commands.UpdateRole;
@@ -29,15 +29,10 @@ public class UserController(IMediator mediator) : ControllerBase
         }
     };
 
-    // Resolves the authenticated admin's immutable user id from the JWT subject. Default inbound
-    // claim mapping turns "sub" into ClaimTypes.NameIdentifier; the token generator also sets
-    // NameIdentifier explicitly, so this is stable. Returns null if the claim is missing/malformed.
-    private Guid? GetActingUserId()
-    {
-        var sub = User.FindFirstValue(ClaimTypes.NameIdentifier)
-                  ?? User.FindFirstValue("sub");
-        return Guid.TryParse(sub, out var id) ? id : null;
-    }
+    // The acting admin's immutable user id comes from the JWT subject via the shared
+    // ActingUserExtensions.GetActingUserId() (was a private copy here until the admin CONTENT
+    // controllers needed identical behaviour — one reader, so the five call sites cannot drift onto
+    // the wrong claim). Returns null if the claim is missing/malformed.
 
     // GET /api/users/get/all?page=&pageSize=
     // Paging is optional; defaults return every user in one generous page so the frontend admin
@@ -59,7 +54,7 @@ public class UserController(IMediator mediator) : ControllerBase
     [HttpPost("create")]
     public async Task<IActionResult> Create([FromBody] CreateUserDto body)
     {
-        var actingId = GetActingUserId();
+        var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
 
@@ -83,7 +78,7 @@ public class UserController(IMediator mediator) : ControllerBase
     [HttpPut("update-role")]
     public async Task<IActionResult> UpdateRole([FromBody] UpdateUserRoleDto body)
     {
-        var actingId = GetActingUserId();
+        var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
 
@@ -106,7 +101,7 @@ public class UserController(IMediator mediator) : ControllerBase
     [HttpDelete("delete/{id}")]
     public async Task<IActionResult> Delete(Guid id)
     {
-        var actingId = GetActingUserId();
+        var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
 

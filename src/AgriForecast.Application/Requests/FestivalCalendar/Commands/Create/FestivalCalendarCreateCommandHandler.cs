@@ -1,5 +1,7 @@
 using AgriForecast.Application.common;
 using AgriForecast.Application.Mapper;
+using AgriForecast.Application.Services;
+using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
 using MediatR;
 using Microsoft.Extensions.Logging;
@@ -11,15 +13,18 @@ public class FestivalCalendarCreateCommandHandler : IRequestHandler<FestivalCale
     private readonly IFestivalCalendarRepository _festivalCalendarRepository;
     private readonly ILogger<FestivalCalendarCreateCommandHandler> _logger;
     private readonly IUnitofWorkRepository _unitofWorkRepository;
+    private readonly IUserActivityAudit _activityAudit;
 
     public FestivalCalendarCreateCommandHandler(
         IFestivalCalendarRepository festivalCalendarRepository,
         ILogger<FestivalCalendarCreateCommandHandler> logger,
-        IUnitofWorkRepository unitofWorkRepository)
+        IUnitofWorkRepository unitofWorkRepository,
+        IUserActivityAudit activityAudit)
     {
         _festivalCalendarRepository = festivalCalendarRepository;
         _logger = logger;
         _unitofWorkRepository = unitofWorkRepository;
+        _activityAudit = activityAudit;
     }
 
     public async Task<Result<bool>> Handle(FestivalCalendarCreateCommand request, CancellationToken cancellationToken)
@@ -45,6 +50,12 @@ public class FestivalCalendarCreateCommandHandler : IRequestHandler<FestivalCale
         await _unitofWorkRepository.CommitAsync();
         _logger.LogInformation("Festival created. Key: {Key}, Date: {Date:yyyy-MM-dd}",
             entry.FestivalKey, entry.Date);
+        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
+        // write can never turn a committed create into an error).
+        await _activityAudit.RecordFestivalChangedAsync(
+            request.ActingUserId, ContentChangeAction.Created, FestivalAuditIdentifier.For(entry.FestivalKey, entry.Date),
+            cancellationToken);
+
         return Result<bool>.Success(true);
     }
 }

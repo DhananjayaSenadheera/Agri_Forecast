@@ -1,10 +1,11 @@
-using AgriForecast.Application.Requests.FestivalCalendar;
 using AgriForecast.Application.Requests.FestivalCalendar.Commands.Create;
 using AgriForecast.Application.Requests.FestivalCalendar.Commands.Delete;
 using AgriForecast.Application.Requests.FestivalCalendar.Commands.Update;
 using AgriForecast.Application.Requests.FestivalCalendar.DTOs;
 using AgriForecast.Application.Requests.FestivalCalendar.Quaries.GetAll;
 using AgriForecast.Application.Requests.FestivalCalendar.Validators;
+using AgriForecast.Application.Requests.FestivalCalendar;
+using AgriForecast.Application.Services;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Interfaces;
 using FluentAssertions;
@@ -26,6 +27,10 @@ namespace AgriForecast.Tests;
 /// </summary>
 public class FestivalCalendarTests
 {
+    // The acting admin the controller would stamp from the JWT; fixed so audit assertions can
+    // name the exact actor rather than matching any Guid.
+    private static readonly Guid ActingAdmin = Guid.Parse("11111111-2222-3333-4444-555555555555");
+
     // ──────────────────────────────────────────────────────────────────────────────
     // Create validator
     // ──────────────────────────────────────────────────────────────────────────────
@@ -255,7 +260,7 @@ public class FestivalCalendarTests
         repo.Setup(r => r.ExistsAsync(It.IsAny<string>(), It.IsAny<DateTime>(), null)).ReturnsAsync(false);
 
         var handler = new FestivalCalendarCreateCommandHandler(
-            repo.Object, Mock.Of<ILogger<FestivalCalendarCreateCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<FestivalCalendarCreateCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
         var result = await handler.Handle(ValidCreate(), default);
 
@@ -272,7 +277,7 @@ public class FestivalCalendarTests
         repo.Setup(r => r.ExistsAsync(It.IsAny<string>(), It.IsAny<DateTime>(), null)).ReturnsAsync(true);
 
         var handler = new FestivalCalendarCreateCommandHandler(
-            repo.Object, Mock.Of<ILogger<FestivalCalendarCreateCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<FestivalCalendarCreateCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
         var result = await handler.Handle(ValidCreate(), default);
 
@@ -303,7 +308,7 @@ public class FestivalCalendarTests
         repo.Setup(r => r.GetByIdAsync(It.IsAny<Guid>())).ReturnsAsync((FestivalCalendarEntry?)null);
 
         var handler = new FestivalCalendarUpdateCommandHandler(
-            repo.Object, Mock.Of<ILogger<FestivalCalendarUpdateCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<FestivalCalendarUpdateCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
         var result = await handler.Handle(ValidUpdate(), default);
 
@@ -324,7 +329,7 @@ public class FestivalCalendarTests
         cmd.FestivalCalendarUpdateDto.Date = new DateTime(2030, 12, 25);
 
         var handler = new FestivalCalendarUpdateCommandHandler(
-            repo.Object, Mock.Of<ILogger<FestivalCalendarUpdateCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<FestivalCalendarUpdateCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
         var result = await handler.Handle(cmd, default);
 
@@ -346,7 +351,7 @@ public class FestivalCalendarTests
         cmd.FestivalCalendarUpdateDto.Date = new DateTime(2030, 12, 25); // moving out of the past
 
         var handler = new FestivalCalendarUpdateCommandHandler(
-            repo.Object, Mock.Of<ILogger<FestivalCalendarUpdateCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<FestivalCalendarUpdateCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
         var result = await handler.Handle(cmd, default);
 
@@ -364,7 +369,7 @@ public class FestivalCalendarTests
             .ReturnsAsync(true);
 
         var handler = new FestivalCalendarUpdateCommandHandler(
-            repo.Object, Mock.Of<ILogger<FestivalCalendarUpdateCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<FestivalCalendarUpdateCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
         var result = await handler.Handle(ValidUpdate(), default);
 
@@ -381,9 +386,9 @@ public class FestivalCalendarTests
     {
         var (repo, uow) = Mocks();
         var handler = new FestivalCalendarDeleteCommandHandler(
-            repo.Object, Mock.Of<ILogger<FestivalCalendarDeleteCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<FestivalCalendarDeleteCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
-        var result = await handler.Handle(new FestivalCalendarDeleteCommand(Guid.Empty), default);
+        var result = await handler.Handle(new FestivalCalendarDeleteCommand(Guid.Empty, ActingAdmin), default);
 
         result.IsSuccess.Should().BeFalse();
         repo.Verify(r => r.GetByIdAsync(It.IsAny<Guid>()), Times.Never);
@@ -396,9 +401,9 @@ public class FestivalCalendarTests
         repo.Setup(r => r.GetByIdAsync(It.IsAny<Guid>())).ReturnsAsync((FestivalCalendarEntry?)null);
 
         var handler = new FestivalCalendarDeleteCommandHandler(
-            repo.Object, Mock.Of<ILogger<FestivalCalendarDeleteCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<FestivalCalendarDeleteCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
-        var result = await handler.Handle(new FestivalCalendarDeleteCommand(Guid.NewGuid()), default);
+        var result = await handler.Handle(new FestivalCalendarDeleteCommand(Guid.NewGuid(), ActingAdmin), default);
 
         result.IsSuccess.Should().BeFalse();
         uow.Verify(u => u.CommitAsync(), Times.Never);
@@ -412,9 +417,9 @@ public class FestivalCalendarTests
         repo.Setup(r => r.GetByIdAsync(It.IsAny<Guid>())).ReturnsAsync(existing);
 
         var handler = new FestivalCalendarDeleteCommandHandler(
-            repo.Object, Mock.Of<ILogger<FestivalCalendarDeleteCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<FestivalCalendarDeleteCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
-        var result = await handler.Handle(new FestivalCalendarDeleteCommand(existing.Id), default);
+        var result = await handler.Handle(new FestivalCalendarDeleteCommand(existing.Id, ActingAdmin), default);
 
         result.IsSuccess.Should().BeTrue();
         result.Data.Id.Should().Be(existing.Id);
@@ -431,9 +436,9 @@ public class FestivalCalendarTests
         repo.Setup(r => r.GetByIdAsync(It.IsAny<Guid>())).ReturnsAsync(existing);
 
         var handler = new FestivalCalendarDeleteCommandHandler(
-            repo.Object, Mock.Of<ILogger<FestivalCalendarDeleteCommandHandler>>(), uow.Object);
+            repo.Object, Mock.Of<ILogger<FestivalCalendarDeleteCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
-        var result = await handler.Handle(new FestivalCalendarDeleteCommand(existing.Id), default);
+        var result = await handler.Handle(new FestivalCalendarDeleteCommand(existing.Id, ActingAdmin), default);
 
         result.IsSuccess.Should().BeTrue();
         result.Data.TrainingDataWarning.Should().BeNull();
