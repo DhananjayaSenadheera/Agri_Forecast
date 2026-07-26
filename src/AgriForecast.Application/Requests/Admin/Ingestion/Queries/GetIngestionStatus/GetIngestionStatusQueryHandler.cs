@@ -2,6 +2,7 @@ using System.Globalization;
 using AgriForecast.Application.common;
 using AgriForecast.Application.Requests.Admin.Ingestion.Common;
 using AgriForecast.Application.Services;
+using AgriForecast.Domain.Constants;
 using AgriForecast.Domain.Enums;
 using MediatR;
 
@@ -12,12 +13,30 @@ namespace AgriForecast.Application.Requests.Admin.Ingestion.Queries.GetIngestion
 // unit-testable with canned rows.
 //
 // STATE derivation (fail-safe — never a fake "running"):
-//   * empty runs table                                  -> "unknown"
+//   * no qualifying runs                                 -> "unknown"
 //   * a fresh unfinished run (StartedUtc within window)  -> "running"
 //   * otherwise (a stale unfinished row = crashed, or all runs finished) -> "stopped"
 // The staleness window is settings.RunningStalenessMinutes (default 120). "now" is DateTime.UtcNow
 // (house style — the same convention the validators use); tests drive freshness via the run's
 // StartedUtc relative to real now.
+//
+// SOURCE SCOPE — every one of state / lastRunAtUtc / lastRunStatus is derived from ingestion runs
+// ONLY, excluding IngestionSources.ExcludedFromServiceState (today: FEATURE_BUILD, the Python
+// feature-build step that reuses the IngestionRuns table). This card answers "is the ingestion
+// service healthy?", and the feature build is not that service.
+//
+// It is not cosmetic. The feature build runs LAST each day as a solo one-row batch, so unfiltered:
+//   * lastRunStatus would roll up that solo batch and sit at "succeeded" permanently, so the FE's
+//     red-dot alarm (lastRunStatus === 'failed') could NEVER fire for DAMBULLA_DEC / WEATHER /
+//     ECONOMIC / NEWS — the four sources with no watermark row, visible only through this card;
+//   * lastRunAtUtc would report the feature build's clock, not the ingestion pass's.
+// GetLatestUnfinishedStartedUtcAsync is EXCLUDED TOO (a deliberate choice, not an oversight): a hung
+// feature-build row would otherwise make the card read "Ingestion service is Running" while no
+// ingestion is running at all, and state must describe the same thing lastRunAtUtc describes.
+//
+// The "sources" list is NOT affected — it is built from IngestionWatermarks, a different table that
+// the feature build does not write. GET /runs is not affected either: FEATURE_BUILD rows are real
+// run rows and stay listed (and filterable via ?source=FEATURE_BUILD).
 public class GetIngestionStatusQueryHandler
     : IRequestHandler<GetIngestionStatusQuery, Result<IngestionStatus_GetDto>>
 {
@@ -36,7 +55,10 @@ public class GetIngestionStatusQueryHandler
         var serviceAddress = _settings.ServiceAddress;
         var stalenessMinutes = _settings.RunningStalenessMinutes;
 
-        var runCount = await _store.GetRunCountAsync(cancellationToken);
+        // The one place the exclusion policy is chosen; the store just applies it.
+        var excluded = IngestionSources.ExcludedFromServiceState;
+
+        var runCount = await _store.GetRunCountAsync(excluded, cancellationToken);
 
         string state;
         DateTime? lastRunAtUtc = null;
@@ -48,17 +70,18 @@ public class GetIngestionStatusQueryHandler
         }
         else
         {
-            var latestUnfinished = await _store.GetLatestUnfinishedStartedUtcAsync(cancellationToken);
+            var latestUnfinished = await _store.GetLatestUnfinishedStartedUtcAsync(excluded, cancellationToken);
             var freshThreshold = DateTime.UtcNow.AddMinutes(-stalenessMinutes);
             state = latestUnfinished.HasValue && latestUnfinished.Value >= freshThreshold
                 ? "running"
                 : "stopped";
 
-            var latestRun = await _store.GetLatestRunAsync(cancellationToken);
+            var latestRun = await _store.GetLatestRunAsync(excluded, cancellationToken);
             if (latestRun is not null)
             {
                 lastRunAtUtc = latestRun.StartedUtc;
-                var statuses = await _store.GetRunStatusesForBatchAsync(latestRun.BatchId, cancellationToken);
+                var statuses = await _store.GetRunStatusesForBatchAsync(
+                    latestRun.BatchId, excluded, cancellationToken);
                 lastRunStatus = AggregateBatchStatus(statuses);
             }
         }

@@ -30,10 +30,40 @@ public static class IngestionSources
     public const string Cbsl = "CBSL";
     public const string CbslMacro = "CBSL_MACRO";
 
-    /// <summary>Every source key the Worker can emit into <c>IngestionRuns.Source</c>.</summary>
+    /// <summary>
+    /// The Python feature-build step's run row. NOT an ingestion source: nothing is fetched from an
+    /// external provider — it records that <c>build_features</c> ran, reusing the IngestionRuns table
+    /// rather than adding a near-identical one. It IS a legitimate run row (listed by GET /runs and
+    /// filterable by <c>?source=FEATURE_BUILD</c>, which is why it belongs in
+    /// <see cref="KnownKeys"/>), but it is EXCLUDED from the ingestion-service state derivation — see
+    /// <see cref="ExcludedFromServiceState"/>.
+    /// </summary>
+    public const string FeatureBuild = "FEATURE_BUILD";
+
+    /// <summary>Every source key that can appear in <c>IngestionRuns.Source</c>.</summary>
     public static readonly IReadOnlyCollection<string> KnownKeys = new[]
     {
-        DambullaDec, Weather, Economic, News, Harti, Cbsl, CbslMacro
+        DambullaDec, Weather, Economic, News, Harti, Cbsl, CbslMacro, FeatureBuild
+    };
+
+    /// <summary>
+    /// Run sources that must NOT influence the admin ingestion-status card's <c>state</c>,
+    /// <c>lastRunAtUtc</c> or <c>lastRunStatus</c>, because they do not describe the ingestion
+    /// service. Today: FEATURE_BUILD.
+    /// <para>
+    /// Why it is load-bearing: the feature build runs LAST every day as a solo one-row batch, so
+    /// without this exclusion the "latest run" is permanently the feature build, its batch rolls up
+    /// to "succeeded" forever, and the FE red-dot alarm (<c>lastRunStatus === 'failed'</c>) could
+    /// never fire for DAMBULLA_DEC / WEATHER / ECONOMIC / NEWS — precisely the four sources that have
+    /// no watermark row and are therefore visible ONLY through that card. A hung feature build would
+    /// likewise report the ingestion service as "running".
+    /// </para>
+    /// The POLICY lives here and is passed in by GetIngestionStatusQueryHandler; the read store only
+    /// applies the exclusion it is handed, so there is one place to change and it is unit-testable.
+    /// </summary>
+    public static readonly IReadOnlyCollection<string> ExcludedFromServiceState = new[]
+    {
+        FeatureBuild
     };
 
     /// <summary>True if <paramref name="source"/> is a known ingestion source (case-insensitive).</summary>

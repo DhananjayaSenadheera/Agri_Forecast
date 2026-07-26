@@ -33,18 +33,70 @@ public class AdminIngestionHandlerTests
         public string? CapturedSource;
         public List<Guid>? CapturedBatchIds;
 
-        public Task<int> GetRunCountAsync(CancellationToken ct = default) => Task.FromResult(RunCount);
+        // The source-exclusion set the handler asked for on the LAST status read (null = it asked for
+        // none). Lets a test prove the handler actually passes the policy down, not just that the
+        // numbers happen to work out.
+        public IReadOnlyCollection<string>? CapturedExcluded;
 
-        public Task<DateTime?> GetLatestUnfinishedStartedUtcAsync(CancellationToken ct = default)
-            => Task.FromResult(LatestUnfinishedStartedUtc);
+        // RAW run rows. When this list is non-empty the four status reads are computed from it,
+        // honestly applying excludeSources exactly as the SQL store does — that is what makes the
+        // handler's state / lastRun derivation testable end-to-end. When it is EMPTY the canned
+        // scalar fields above are returned instead, so the pre-existing tests are untouched.
+        public List<FakeRun> Runs = new();
 
-        public Task<IngestionRunHeadRow?> GetLatestRunAsync(CancellationToken ct = default)
-            => Task.FromResult(LatestRun);
+        public sealed record FakeRun(
+            string Source, Guid BatchId, DateTime StartedUtc, DateTime? FinishedUtc,
+            IngestionRunStatus Status, Guid Id);
+
+        private bool UseRawRows => Runs.Count > 0;
+
+        private IEnumerable<FakeRun> Visible(IReadOnlyCollection<string>? excludeSources)
+        {
+            CapturedExcluded = excludeSources;
+            return excludeSources is { Count: > 0 }
+                ? Runs.Where(r => !excludeSources.Contains(r.Source))
+                : Runs;
+        }
+
+        public Task<int> GetRunCountAsync(
+            IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default)
+            => Task.FromResult(UseRawRows ? Visible(excludeSources).Count() : Capture(excludeSources, RunCount));
+
+        public Task<DateTime?> GetLatestUnfinishedStartedUtcAsync(
+            IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default)
+        {
+            if (!UseRawRows) return Task.FromResult(Capture(excludeSources, LatestUnfinishedStartedUtc));
+            var unfinished = Visible(excludeSources).Where(r => r.FinishedUtc == null).ToList();
+            return Task.FromResult(unfinished.Count == 0 ? null : (DateTime?)unfinished.Max(r => r.StartedUtc));
+        }
+
+        public Task<IngestionRunHeadRow?> GetLatestRunAsync(
+            IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default)
+        {
+            if (!UseRawRows) return Task.FromResult(Capture(excludeSources, LatestRun));
+            var latest = Visible(excludeSources)
+                .OrderByDescending(r => r.StartedUtc).ThenByDescending(r => r.Id)
+                .FirstOrDefault();
+            return Task.FromResult(latest is null ? null : new IngestionRunHeadRow(latest.BatchId, latest.StartedUtc));
+        }
 
         public Task<IReadOnlyList<IngestionRunStatus>> GetRunStatusesForBatchAsync(
-            Guid batchId, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<IngestionRunStatus>>(
-                BatchStatuses.TryGetValue(batchId, out var s) ? s : new List<IngestionRunStatus>());
+            Guid batchId, IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default)
+        {
+            if (!UseRawRows)
+                return Task.FromResult<IReadOnlyList<IngestionRunStatus>>(
+                    Capture(excludeSources, BatchStatuses.TryGetValue(batchId, out var s) ? s : new List<IngestionRunStatus>()));
+
+            return Task.FromResult<IReadOnlyList<IngestionRunStatus>>(
+                Visible(excludeSources).Where(r => r.BatchId == batchId).Select(r => r.Status).ToList());
+        }
+
+        // Records what the handler asked to exclude even on the canned-scalar path.
+        private T Capture<T>(IReadOnlyCollection<string>? excludeSources, T value)
+        {
+            CapturedExcluded = excludeSources;
+            return value;
+        }
 
         public Task<IngestionVerificationRow?> GetLatestVerificationAsync(CancellationToken ct = default)
             => Task.FromResult(LatestVerification);
