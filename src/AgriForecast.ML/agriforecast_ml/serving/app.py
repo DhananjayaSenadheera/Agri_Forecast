@@ -1,9 +1,8 @@
 """FastAPI service exposing harvest-price predictions.
 
-Internal service (called by the .NET API). Public endpoints (/health,
-/model-info, /predict, /timeline) are unauthenticated by design; all /admin/*
-routes require an ``X-API-Key`` header matching the ``ML_ADMIN_API_KEY``
-environment variable (see ``require_api_key`` / the ``admin_router`` below).
+Internal service called by the .NET API. /health, /model-info, /predict and /timeline
+are unauthenticated by design; every /admin/* route requires an X-API-Key header
+matching the ML_ADMIN_API_KEY environment variable.
 """
 from __future__ import annotations
 
@@ -19,9 +18,8 @@ from pydantic import BaseModel, Field
 
 from ..envfile import load_env_file
 
-# Load secrets from the gitignored .env BEFORE anything reads the environment,
-# so the service works regardless of how uvicorn was launched (run_ml.sh, IDE
-# run config, or a bare `python -m uvicorn`). Real env vars take precedence.
+# Load the gitignored .env before anything reads the environment, so the service works
+# however uvicorn was launched. Real environment variables still take precedence.
 load_env_file()
 
 from . import predict  # noqa: E402  (env must be loaded first)
@@ -35,26 +33,15 @@ _ADMIN_API_KEY_ENV = "ML_ADMIN_API_KEY"
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Global backstop for any UNHANDLED exception in any route (P3, item 12).
+    """Global backstop for any unhandled exception in any route.
 
-    Every route already wraps its work in try/except and raises HTTPException
-    with a fixed generic ``detail`` (never interpolating the exception). This
-    handler is the safety net for anything those guards miss — a bug in a new
-    route, or an error raised outside a route's try block. Without it an
-    unhandled exception falls through to Starlette's default 500, which in a
-    debug/dev configuration can leak a traceback / internal file paths.
+    Routes already catch their own errors; this catches whatever they miss, so a debug
+    configuration can never leak a traceback. The full exception is logged server-side
+    only - never request bodies or headers, which can carry the admin X-API-Key - and the
+    client always gets a fixed generic 500.
 
-    Contract:
-    - Full exception (with traceback) is logged server-side only, tagged with
-      the request method + path for triage. Request bodies and headers are
-      NEVER logged — they can carry the admin ``X-API-Key``.
-    - The client always receives a fixed generic 500 body. The exception, its
-      type, and any path/URL are NEVER echoed to the caller.
-
-    NOTE: FastAPI/Starlette route ``HTTPException`` through their own handler
-    earlier in the stack, so this ``except Exception``-style handler does NOT
-    intercept HTTPException — 401/502/503 raised in routes keep their intended
-    status + detail. (Proven in the serving auth/error-leak test suite.)
+    HTTPException is handled earlier in the stack, so 401/502/503 raised in routes keep
+    their intended status and detail.
     """
     _log.exception(
         "Unhandled exception serving %s %s", request.method, request.url.path
@@ -65,13 +52,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
     """Auth dependency for /admin/* routes.
 
-    Reads the expected key from the ``ML_ADMIN_API_KEY`` env var (never
-    hardcoded/committed) and compares it to the caller's ``X-API-Key`` header
-    in constant time. Fails loudly and safely:
-
-    - Server misconfiguration (env var unset/empty) -> 500, NEVER allow-all.
-      A missing server-side key must never mean "no auth required".
-    - Missing or mismatched ``X-API-Key`` header -> 401.
+    Compares the caller's X-API-Key header to the ML_ADMIN_API_KEY env var in constant
+    time. An unset or empty server key returns 500, never allow-all; a missing or
+    mismatched header returns 401.
     """
     expected = os.getenv(_ADMIN_API_KEY_ENV, "")
     if not expected:
@@ -87,8 +70,7 @@ def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing API key.")
 
 
-# All /admin/* routes inherit require_api_key, so any future admin route is
-# protected automatically.
+# All /admin/* routes inherit require_api_key, so a future admin route is protected too.
 admin_router = APIRouter(prefix="/admin", dependencies=[Depends(require_api_key)])
 
 
@@ -106,9 +88,8 @@ class TimelineRequest(BaseModel):
 class HarvestWindowRequest(BaseModel):
     cropId: str
     asOf: Optional[date] = None
-    # Upper bound is one seasonal cycle: past that the frozen price/weather anchor
-    # is too stale for the comparison to mean anything (predict enforces the same
-    # cap, this just rejects nonsense at the edge).
+    # Upper bound is one seasonal cycle: past that the frozen price/weather anchor is too
+    # stale for the comparison to mean anything.
     horizonDays: int = Field(default=90, ge=7, le=365)
 
 
@@ -124,10 +105,9 @@ def model_info():
 
 @app.get("/crop-readiness")
 def crop_readiness_endpoint():
-    """Per-crop readiness map for the app's crop-status colouring (UI 2026-07-22).
+    """Per-crop readiness map for the app's crop-status colouring.
 
-    Defensive like /timeline: any unexpected failure returns the honest empty
-    shape (modelActive=false, no crops -> the UI shows no tint), never a 500.
+    Any unexpected failure returns the honest empty shape (modelActive=false), never a 500.
     """
     try:
         return predict.crop_readiness()
@@ -143,12 +123,10 @@ def predict_endpoint(req: PredictRequest):
 
 @app.post("/harvest-window")
 def harvest_window_endpoint(req: HarvestWindowRequest):
-    """Best planting/harvest window for one crop — ranks candidate planting dates.
+    """Best planting window for one crop, ranking candidate planting dates.
 
-    Defensive like /timeline and /crop-readiness: the honest answer to "we could
-    not work this out" is rankable=false with a reason, NEVER a 500 and never a
-    fabricated window. predict.harvest_window already returns that shape for every
-    gate it knows about; this wrapper catches whatever it doesn't.
+    The honest answer to 'we could not work this out' is rankable=false with a reason,
+    never a 500 and never a fabricated window.
     """
     as_of = req.asOf or date.today()
     try:
@@ -174,13 +152,10 @@ def harvest_window_endpoint(req: HarvestWindowRequest):
 
 @app.post("/timeline")
 def timeline_endpoint(req: TimelineRequest):
-    """Monthly price history + multi-horizon forecast for one crop.
+    """Monthly price history plus a multi-horizon forecast for one crop.
 
-    `predict.timeline` already degrades gracefully for crops with no history
-    (empty history list + global fallback + Low confidence). We still wrap it
-    defensively so a crop with zero data can never surface as a 500 to the app:
-    on any unexpected failure we return a safe empty-history / low-confidence
-    shape instead.
+    predict.timeline already degrades for crops with no history; this wrapper also catches
+    anything unexpected, so a crop with no data can never surface as a 500.
     """
     as_of = req.asOf or date.today()
     try:
@@ -205,13 +180,11 @@ def timeline_endpoint(req: TimelineRequest):
 class IngestNewsRequest(BaseModel):
     """Orchestration knobs for the daily news pass.
 
-    Defaults run the full live pipeline (fetch + write + QA, then score +
-    write daily). The .NET Worker calls this with defaults once per pass.
+    Defaults run the full live pipeline: fetch, write, QA, then score and write daily.
     """
     dryRun: bool = False
     skipQa: bool = False
-    # Per-article SentimentScore + Topics writeback is the default: the admin
-    # News feed (.NET /api/news-articles) surfaces those columns per article.
+    # The admin News feed shows SentimentScore and Topics per article, so write them back.
     writebackScores: bool = True
 
 
@@ -219,15 +192,10 @@ class IngestNewsRequest(BaseModel):
 def ingest_news_endpoint(req: IngestNewsRequest):
     """Run the daily news pipeline: ingest RSS, then score sentiment.
 
-    Internal admin endpoint orchestrated by the .NET Ingestion Worker (4th
-    step of each daily pass), consistent with how the Worker already drives
-    market/weather/economic ingestion. The two stages are run in order and
-    each failure surfaces as a structured 502 so the Worker can log it and
-    continue, rather than the call leaking an unhandled 500.
-
-    The news scripts live at the ML repo root (ingest_news.py / score_news.py),
-    imported lazily so any news-module breakage can never block serving startup
-    or the /predict path.
+    Called by the .NET Ingestion Worker once per daily pass. The two stages run in order and
+    each failure surfaces as a structured 502 so the Worker can log it and continue. The
+    news scripts are imported lazily, so a breakage there cannot block serving startup or
+    the /predict path.
     """
     # Lazy import: keep serving startup independent of the news modules.
     try:
@@ -270,21 +238,15 @@ def ingest_news_endpoint(req: IngestNewsRequest):
 class IngestHartiRequest(BaseModel):
     """Orchestration knobs for the multi-market HARTI daily pass.
 
-    The .NET Worker sends its resume watermark (minus a late-arrival look-back
-    window, default 7 days) as ``sinceDate`` (ISO 'YYYY-MM-DD'); only bulletins
-    strictly AFTER it are fetched/parsed, so the daily pass does not re-scrape
-    the whole corpus while still re-scanning ~the last week to catch a bulletin
-    published late for an already-passed date (the upsert is idempotent, so the
-    re-scan is free). ``sinceDate`` null => full backfill. ``noDownload``/
-    ``dryRun`` are for offline reruns and tests.
+    The Worker sends its resume watermark minus a look-back window (default 7 days) as
+    sinceDate (ISO 'YYYY-MM-DD'); only later bulletins are fetched, so the daily pass
+    re-scans about a week to catch late-published bulletins without re-scraping the whole
+    corpus. The upsert is idempotent, so the re-scan is free. sinceDate null means a full
+    backfill, and noDownload / dryRun are for offline reruns and tests.
 
-    FIRST-RUN BOOTSTRAP: a null ``sinceDate`` triggers a full ~3000-PDF backfill
-    that can run for many minutes and may exceed the Worker's HTTP timeout
-    (MlService:HartiIngestTimeoutSeconds, default 1800s), so the cold first run
-    may never complete over HTTP. The sanctioned first-time seed is to run the
-    CLI ``python ingest_harti.py`` once (it has NO HTTP timeout); after that this
-    endpoint only ever gets incremental, look-back-bounded ``sinceDate`` calls
-    from the Worker, which are fast.
+    A null sinceDate triggers a ~3000-PDF backfill that can exceed the Worker's HTTP
+    timeout, so the first-time seed is the CLI 'python ingest_harti.py', which has none.
+    After that the Worker only sends fast incremental calls.
     """
     sinceDate: Optional[str] = None
     noDownload: bool = False
@@ -295,18 +257,11 @@ class IngestHartiRequest(BaseModel):
 def ingest_harti_endpoint(req: IngestHartiRequest):
     """Run the multi-market HARTI ingestion pass in-process.
 
-    Internal admin endpoint orchestrated by the .NET Ingestion Worker (R1.1 P1
-    Step 6), consistent with /admin/ingest-news. Runs the same steps as
-    ingest_harti.py for the PriceObservations path (download-bounded-by-sinceDate
-    -> parse -> upsert), plus the data-quality hooks:
-      * assert_no_source_duplicates -> HARD FAIL: surfaced as a 502 so the Worker
-        logs it and does NOT advance its watermark.
-      * heal_price_observation_crops + flag_price_outliers + gap_report ->
-        post-pass summaries returned in the response (report-only; they never
-        gate the pass).
-
-    The heavy work module is imported lazily so any HARTI-module breakage can
-    never block serving startup or the /predict path.
+    Called by the .NET Ingestion Worker. Runs the same steps as ingest_harti.py for the
+    PriceObservations path (download bounded by sinceDate, parse, upsert) plus the
+    data-quality hooks: a cross-source duplicate is a HARD FAIL surfaced as a 502 so the
+    Worker does not advance its watermark, while healing, outlier flags and the gap report
+    are report-only. The heavy module is imported lazily.
     """
     try:
         import ingest_harti_service
@@ -324,8 +279,8 @@ def ingest_harti_endpoint(req: IngestHartiRequest):
             dry_run=req.dryRun,
         )
     except AssertionError:
-        # Cross-source duplicate check failed — a data-integrity hard fail. Do NOT
-        # let the Worker advance its watermark; surface a structured 502.
+        # The cross-source duplicate check failed: a data-integrity hard fail. Do not let the
+        # Worker advance its watermark - surface a structured 502.
         _log.exception("HARTI ingestion: cross-source duplicate check FAILED")
         raise HTTPException(
             status_code=502,
@@ -342,11 +297,9 @@ def ingest_harti_endpoint(req: IngestHartiRequest):
 class IngestCbslRequest(BaseModel):
     """Orchestration knobs for the CBSL Daily Price Report pass.
 
-    Mirrors IngestHartiRequest. ``sinceDate`` is the .NET watermark's resume
-    lower bound (exclusive); ABSENT/None => the downloader's own last-7-days
-    default (capture-only contract, 2026-07-22: an empty watermark must never
-    trigger a silent full backfill — deliberate backfills go through the
-    ingest_cbsl.py CLI with an explicit --since / --max-dates).
+    Mirrors IngestHartiRequest. sinceDate is the .NET watermark's exclusive lower bound;
+    absent means the downloader's own last-7-days default, so an empty watermark can never
+    trigger a silent full backfill. Deliberate backfills go through the ingest_cbsl.py CLI.
     """
     sinceDate: Optional[str] = None
     noDownload: bool = False
@@ -357,13 +310,9 @@ class IngestCbslRequest(BaseModel):
 def ingest_cbsl_endpoint(req: IngestCbslRequest):
     """Run the CBSL Daily Price Report ingestion pass in-process.
 
-    Internal admin endpoint orchestrated by the .NET Ingestion Worker
-    (CbslPriceReportIngestionService), consistent with /admin/ingest-harti:
-    download (deterministic per-date URL; 404 = no report published = normal
-    gap) -> parse -> upsert into PriceObservations, then
-    assert_no_source_duplicates as a HARD FAIL surfaced as a 502 so the Worker
-    logs it and does NOT advance its watermark. Lazy import so any CBSL-module
-    breakage can never block serving startup or /predict.
+    Called by the .NET Ingestion Worker: download (a 404 just means no report was published
+    that day), parse, upsert into PriceObservations, then the duplicate check as a HARD FAIL
+    surfaced as a 502 so the Worker does not advance its watermark. Lazy import.
     """
     try:
         import ingest_cbsl_service
@@ -397,12 +346,9 @@ def ingest_cbsl_endpoint(req: IngestCbslRequest):
 class IngestCbslMacroRequest(BaseModel):
     """Orchestration knobs for the monthly CBSL macro pass.
 
-    Mirrors IngestHartiRequest's shape. ``noDownload``/``dryRun`` are for
-    offline reruns and tests. There is no ``sinceDate`` knob: both CBSL
-    listings (CCPI press releases, MEI packs) are small, bounded corpora
-    (tens of PDFs total) rather than HARTI's ~3000-PDF daily-bulletin corpus,
-    so a full re-scrape + idempotent re-upsert every pass is cheap and simple
-    — no incremental watermark plumbing needed here.
+    noDownload and dryRun are for offline reruns and tests. There is no sinceDate knob:
+    both CBSL listings are small corpora, so a full re-scrape with an idempotent upsert
+    every pass is cheaper than watermark plumbing.
     """
     noDownload: bool = False
     dryRun: bool = False
@@ -412,15 +358,10 @@ class IngestCbslMacroRequest(BaseModel):
 def ingest_cbsl_macro_endpoint(req: IngestCbslMacroRequest):
     """Run the CBSL macro ingestion pass in-process.
 
-    Internal admin endpoint (P3, ClickUp 86cahefbh), consistent with
-    /admin/ingest-harti and /admin/ingest-news. Runs download -> parse ->
-    upsert for both CBSL sources (CCPI press releases + MEI packs) and
-    returns a structured summary (artifacts fetched/skipped, rows
-    inserted/updated, per-series coverage). "No new bulletin since watermark"
-    is a SUCCESS with zero rows, never an error.
-
-    The heavy work module is imported lazily so any CBSL-module breakage can
-    never block serving startup or the /predict path.
+    Download, parse and upsert for both CBSL sources (CCPI press releases and MEI packs),
+    returning a structured summary of artifacts, rows and per-series coverage. 'No new
+    bulletin since the watermark' is a success with zero rows, never an error. The heavy
+    module is imported lazily.
     """
     try:
         import ingest_cbsl_macro

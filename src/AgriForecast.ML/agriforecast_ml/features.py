@@ -1,8 +1,8 @@
-"""Leakage-safe feature engineering: builds CropFeatureDaily.
+"""Leakage-safe feature engineering: builds the CropFeatureDaily table.
 
-CARDINAL RULE: every feature for an observation on date D uses ONLY data
-known on or before D. The label (harvest price at D + GrowthPeriodDays) is the
-only field allowed to look into the future, and exists for training only.
+Every feature for an observation on date D uses only data known on or before D.
+The harvest-price label is the only field that looks ahead; it exists for training
+only.
 """
 from __future__ import annotations
 
@@ -13,12 +13,7 @@ import pandas as pd
 
 from .load import resolve_forecast_gp
 
-# Canonical datetime resolution for merge_asof join keys. pandas 3.0 requires
-# both as-of keys to share the SAME datetime64 unit (read_sql may yield [s]/[us]
-# and pd.to_datetime preserves it). The load layer (load._as_canon_dt) already
-# normalizes every column to [ns]; pinning the keys here too makes the as-of
-# merges self-defending against any future dtype drift. Pure dtype normalization
-# -- same wall-clock dates, no direction/tolerance/logic change.
+# merge_asof needs both join keys in the same datetime64 unit (pandas 3.0).
 _MERGE_DT = "datetime64[ns]"
 
 
@@ -26,34 +21,22 @@ def _canon_key(s: pd.Series) -> pd.Series:
     return pd.to_datetime(s).astype(_MERGE_DT)
 
 
-# Sri Lanka cultivation seasons (rough): Maha = Oct-Mar (NE monsoon), Yala = Apr-Sep.
+# Sri Lanka cultivation seasons: Maha = Oct-Mar, Yala = Apr-Sep.
 _MAHA_MONTHS = {10, 11, 12, 1, 2, 3}
 _PLANTING_SEASON_ENC = {"Year-round": 0, "Yala": 1, "Maha": 2}
 _FFILL_LIMIT = 5  # carry a known price across at most 5 non-trading days
 
-# Days-to-next-festival clip cap. Raw unclipped countdown is a slow ramp over the
-# whole inter-festival gap (~months), which would dominate tree splits with a
-# signal that is mostly "how far into the gap are we", not "is a festival near".
-# Clipping to [0, cap] makes the feature ~flat outside the demand-relevant window
-# and monotone inside it (trees are invariant to monotone encodings, so a clipped
-# linear countdown is the right XGBoost encoding -- no buckets/decay needed). Cap
-# is a fixed DOMAIN PRIOR (~a month), deliberately NOT tuned (1-2 events per CV
-# fold => tuning the window boundary is itself leakage; P4 makes it a learned HP).
+# Clip the countdown: past about a month the exact distance stops mattering.
+# Fixed domain prior - tuning the window on price data would itself be leakage.
 _FESTIVAL_CLIP_DAYS = 30
 
-# The per-festival lead-up WINDOW length is NOT a Python constant: it is read
-# per-row from FestivalCalendarEntries.LeadUpDays (the .NET seed is the single
-# source of truth). This preserves the Avurudu convention -- the Apr 13 row
-# carries LeadUpDays=14 and anchors the window; the Apr 14 row carries
-# LeadUpDays=0 so the demand window is not double-counted. _FESTIVAL_CLIP_DAYS
-# above governs only the observation/harvest COUNTDOWN clip, a separate concern.
+# Lead-up window lengths are read per row from FestivalCalendarEntries.LeadUpDays,
+# not hardcoded here (the Apr 14 Avurudu row has 0 so the window is not counted twice).
 
-# Per-festival lead-up booleans we surface (merged "any" is the primary signal;
-# these two are the highest-volume festivals worth an individual column).
+# Festivals big enough to get their own lead-up boolean column.
 _LEADUP_FESTIVALS = {"AVURUDU": "InLeadupAvurudu", "CHRISTMAS": "InLeadupChristmas"}
 
-# Every festival feature column this module emits (asserted zero-filled when the
-# calendar is empty, and used by tests as the canonical name list).
+# Every festival column this module emits.
 FESTIVAL_FEATURE_COLS = [
     "HarvestInFestivalLeadup",
     "DaysFromHarvestToNextFestival",
@@ -64,16 +47,11 @@ FESTIVAL_FEATURE_COLS = [
 
 
 def _festival_windows(festivals: pd.DataFrame | None):
-    """Precompute, from load_festivals() output, the arrays a pure date->feature
-    lookup needs. Returns (event_dates_sorted, leadup_intervals) where:
-      event_dates_sorted : np.ndarray[datetime64[D]] of every festival Date (for
-                           "days to NEXT festival" -- the event itself, not its
-                           lead-up).
-      leadup_intervals   : dict[str|None, list[(start, end)]] closed windows
-                           [Date - LeadUpDays, Date]; key None = merged "any"
-                           festival, key = FestivalKey for per-festival booleans.
-                           Rows with LeadUpDays<=0 contribute no window (Apr 14).
-    A pure function of the calendar only -- no price data, no wall-clock.
+    """Turn the festival calendar into lookup arrays.
+
+    Returns the sorted event dates and the lead-up windows [Date - LeadUpDays, Date].
+    Window key None is the merged 'any festival' window, other keys are per-festival.
+    Rows with LeadUpDays <= 0 add no window.
     """
     events: list = []
     windows: dict = {None: []}
@@ -103,9 +81,7 @@ def _in_any_window(dates_d: np.ndarray, intervals: list) -> np.ndarray:
 
 def _days_to_next_event(dates_d: np.ndarray, events_arr: np.ndarray,
                         clip: int) -> np.ndarray:
-    """For each date, whole days until the next festival Date >= it, clipped to
-    [0, clip]. NaN (encoded as clip) when no future event exists in the calendar
-    for that date. Pure: uses only the supplied dates + calendar."""
+    """Whole days from each date to the next festival on or after it, clipped to [0, clip]."""
     n = dates_d.shape[0]
     if events_arr.size == 0:
         return np.full(n, float(clip), dtype="float64")
@@ -121,18 +97,12 @@ def _days_to_next_event(dates_d: np.ndarray, events_arr: np.ndarray,
 
 def _festival_features(observation_dates: pd.Series, harvest_dates: pd.Series,
                        events_arr: np.ndarray, windows: dict) -> pd.DataFrame:
-    """Build all festival feature columns for aligned observation/harvest dates.
+    """Build the festival columns for aligned observation and harvest dates.
 
-    HARVEST-ANCHORED (load-bearing -- the label is harvest-time price):
-      HarvestInFestivalLeadup       : HarvestDate inside ANY festival lead-up window
-      DaysFromHarvestToNextFestival : clipped countdown from HarvestDate to next event
-    OBSERVATION-ANCHORED (secondary):
-      DaysToNextFestivalAny         : clipped countdown from ObservationDate
-      InLeadupAvurudu / InLeadupChristmas : ObservationDate inside that festival's window
-
-    Pure calendar function: no price aggregates, no now()/today(). NaT harvest
-    dates (crops with no GrowthPeriodDays) get 0 / clip so the columns stay numeric
-    and never NaN-poison the pooled model.
+    Harvest-anchored (the label is a harvest-time price): HarvestInFestivalLeadup,
+    DaysFromHarvestToNextFestival. Observation-anchored: DaysToNextFestivalAny,
+    InLeadupAvurudu, InLeadupChristmas. A NaT harvest date gets 0 / clip so the
+    columns stay numeric.
     """
     obs_d = pd.to_datetime(observation_dates).values.astype("datetime64[D]")
     harv = pd.to_datetime(harvest_dates)
@@ -160,26 +130,18 @@ def _festival_features(observation_dates: pd.Series, harvest_dates: pd.Series,
     return out[FESTIVAL_FEATURE_COLS]
 
 
-# Every calendar/seasonality column that is a PURE function of a date. Public and
-# shared because the serving what-if sweep (serving/predict.harvest_window) has to
-# recompute them for FUTURE candidate planting dates: "what would I get if I planted
-# on date X" is only honest when X's calendar encoding is byte-identical to the one
-# the model was trained on. Never inline these formulas again in either caller --
-# that is exactly the train/serve skew build_x.py was created to stop.
+# Calendar columns that depend only on a date. Shared with the serving what-if sweep
+# so a candidate planting date is encoded exactly like a training date.
 CALENDAR_FEATURE_COLS = [
     "Year", "MonthNum", "WeekOfYear", "DayOfYear", "SinDoy", "CosDoy", "SeasonMaha",
 ]
 
 
 def calendar_features(dates) -> pd.DataFrame:
-    """Calendar/seasonality columns for any DatetimeIndex-like sequence of dates.
+    """Calendar and seasonality columns for a sequence of dates.
 
-    Pure: a function of the dates ALONE -- no price data, no weather, no DB, no
-    now()/today(). That purity is what makes it valid on both sides of the clock:
-    on historical observation dates during the feature build, and on future
-    candidate planting dates during the serving sweep. A future date carries no
-    lookahead here because a calendar is knowable in advance -- unlike a price or
-    a rainfall total, which is why those stay frozen at their last observed value.
+    Depends on the dates alone, so it is valid both for historical observation dates
+    and for future candidate planting dates in the serving sweep.
     """
     idx = pd.DatetimeIndex(dates)
     doy = idx.dayofyear
@@ -204,19 +166,11 @@ def _weather_lookups(weather: pd.DataFrame):
 
 def build_crop_features(crop_id, group: pd.DataFrame, meta: pd.Series,
                         weather_by_month: dict, rain_clim: dict) -> pd.DataFrame:
-    # --- 1. Continuous daily grid (calendar-consistent windows) ---
+    # Continuous daily grid, so rolling windows are calendar-consistent.
     g = group.sort_values("PriceDate").set_index("PriceDate")
     if g.index.has_duplicates:
-        # Defense-in-depth (the loader is the primary fix): load_prices() already
-        # collapses duplicate (crop, source, date) rows to their mean, and the
-        # HARTI/DEC splice guarantees a single source per (crop, date). If dup
-        # PriceDates still reach here, collapse the numeric price columns by mean
-        # so reindex() below cannot raise "cannot reindex on an axis with
-        # duplicate labels". Deterministic, NaN-safe, and only touched when
-        # duplicates actually exist (a strict no-op for unique input). Runs BEFORE
-        # is_trading is captured so the trading-day mask is unique too.
-        # mean(AvgPrice) == (mean(Min)+mean(Max))/2 since Avg=(Min+Max)/2 per row,
-        # so collapsing Avg directly equals recomputing it from collapsed Min/Max.
+        # Defence in depth: load_prices() already averages duplicate (crop, source, date) rows.
+        # Collapsing again here stops reindex() below hitting duplicate labels.
         g = g[["MinPrice", "MaxPrice", "AvgPrice"]].groupby(level=0).mean()
     full = pd.date_range(g.index.min(), g.index.max(), freq="D")
     is_trading = g.index  # original trading days
@@ -227,7 +181,7 @@ def build_crop_features(crop_id, group: pd.DataFrame, meta: pd.Series,
 
     price = daily["AvgPrice"]
 
-    # --- 2. Price features (all backward-looking; window ending at D inclusive) ---
+    # Price features: all backward-looking, window ends at D inclusive.
     out = pd.DataFrame(index=daily.index)
     out["AvgPrice"] = price
     out["MinPrice"] = daily["MinPrice"]
@@ -245,20 +199,14 @@ def build_crop_features(crop_id, group: pd.DataFrame, meta: pd.Series,
     out["Lag90"] = price.shift(90)
     out["PctChange30"] = price.pct_change(30, fill_method=None)
 
-    # --- 3. Calendar / seasonality ---
-    # Computed by the SHARED pure helper (see calendar_features) so the serving
-    # what-if sweep encodes a candidate date exactly the way training encoded an
-    # observation date. Do not re-inline these formulas here.
+    # Shared with serving through calendar_features() - do not re-inline these formulas.
     idx = out.index
     cal = calendar_features(idx)
     for col in CALENDAR_FEATURE_COLS:
         out[col] = cal[col]
-    # Festival features are attached in build_all() from the DB calendar
-    # (load_festivals) -- a national point-in-time signal, not derived here from
-    # hardcoded dates. The old _is_festival() month/day heuristic was deleted so
-    # there is only ONE festival definition (the seed table).
+    # Festival features are attached in build_all() from the DB calendar.
 
-    # --- 4. Weather (point-in-time: use the LAST COMPLETE month, i.e. M-1) ---
+    # Weather is point-in-time: use the last COMPLETE month (M-1), never the current one.
     obs_period = idx.to_period("M")
     def wx(p, which):
         v = weather_by_month.get(p)
@@ -275,19 +223,14 @@ def build_crop_features(crop_id, group: pd.DataFrame, meta: pd.Series,
         for p in cur
     ]
 
-    # --- 5. Crop metadata ---
-    # R2 Step 5.3 exclusion predicate (IsVerified-STRICT): the crop earns a
-    # harvest horizon ONLY IF its profile is owner-verified AND has a usable
-    # GrowthPeriodDays. An unverified profile's legacy gp is NOT honored (gp=None
-    # here) -> no label below -> the crop is dropped from the trainable set,
-    # exactly like a NULL-gp crop. Routes through the shared load.resolve_forecast_gp
-    # so train (here) and serve (predict._crop_meta) apply one identical gate.
+    # A crop only gets a harvest horizon if its agronomy profile is verified and has a
+    # GrowthPeriodDays; otherwise there is no label and the crop drops out of training.
     gp = resolve_forecast_gp(meta.get("IsVerified"), meta["GrowthPeriodDays"])
     out["GrowthPeriodDays"] = gp if gp is not None else np.nan
     out["PlantingSeasonEnc"] = _PLANTING_SEASON_ENC.get(meta["PlantingSeason"], -1)
     out["HarvestWindowDays"] = meta["HarvestWindowDays"] if pd.notna(meta["HarvestWindowDays"]) else np.nan
 
-    # --- 6. Label: harvest price = price gp calendar days AHEAD (future; train only) ---
+    # Label: the price gp calendar days ahead. The only forward-looking field, training only.
     if gp is not None:
         out["HarvestDate"] = out.index + pd.Timedelta(days=gp)
         out["LabelHarvestPrice"] = price.shift(-gp)
@@ -297,7 +240,7 @@ def build_crop_features(crop_id, group: pd.DataFrame, meta: pd.Series,
         out["LabelHarvestPrice"] = np.nan
         out["LabelAvailable"] = np.int8(0)
 
-    # --- 7. Keep only real trading days; attach keys ---
+    # Keep only real trading days; attach keys.
     out = out.loc[is_trading].copy()
     out.insert(0, "ObservationDate", out.index)
     out.insert(0, "CropName", meta["CropName"])
@@ -307,11 +250,10 @@ def build_crop_features(crop_id, group: pd.DataFrame, meta: pd.Series,
 
 
 def _attach_fx(result: pd.DataFrame, fx: pd.DataFrame | None) -> pd.DataFrame:
-    """National FxUsdLkr column via point-in-time (as-of, backward) merge.
+    """National FxUsdLkr via a backward as-of merge.
 
-    For each ObservationDate D, take the most recent FX with date <= D (NaN if
-    none). Same value across all crops for a given date — this is a national
-    indicator, not crop-specific. CARDINAL RULE: never an FX date AFTER D.
+    Takes the latest FX with date <= D, or NaN. Never an FX date after D. Same value
+    for every crop on a given date.
     """
     if fx is None or fx.empty:
         result["FxUsdLkr"] = np.nan
@@ -331,13 +273,10 @@ def _attach_fx(result: pd.DataFrame, fx: pd.DataFrame | None) -> pd.DataFrame:
     return merged
 
 
-# National news-sentiment columns attached at observation time. Kept lean: the
-# overall mood plus the topic ratios most relevant to a price go/no-go decision.
+# Sentiment columns attached at observation time: overall mood plus topic ratios.
 _SENTIMENT_FEATURES = ["MeanSentiment", "DroughtRatio", "FloodRatio", "PolicyRatio"]
 
-# PolicyType enum (mirror of AgriForecast.Domain.Enums.PolicyType). Only the
-# few types whose active state is decision-relevant for price are exposed as
-# per-type booleans.
+# Mirrors the PolicyType enum in AgriForecast.Domain.Enums.
 _POLICY_IMPORT_BAN = 1
 _POLICY_PRICE_CEILING = 3
 _POLICY_FERTILISER_SUBSIDY = 5
@@ -347,14 +286,10 @@ _POLICY_FEATURES = ["ActivePolicyNetDirection", "ActivePolicyCount",
 
 
 def _attach_sentiment(result: pd.DataFrame, sentiment: pd.DataFrame | None) -> pd.DataFrame:
-    """National news-sentiment columns via point-in-time (as-of, backward) merge.
+    """National news-sentiment columns via a backward as-of merge.
 
-    Mirrors _attach_fx exactly: for each ObservationDate D take the most recent
-    sentiment row with Date <= D (NaN if none / no news yet). Same value across
-    all crops for a given date -- national signal. No-article days are absent in
-    NewsSentimentDaily, so the backward join simply carries the last known
-    reading forward; it NEVER reads a Date AFTER D. Empty/missing sentiment ->
-    all feature columns are NaN.
+    Carries the last reading with Date <= D forward and never reads a date after D.
+    Missing sentiment leaves the columns NaN.
     """
     if sentiment is None or sentiment.empty:
         for col in _SENTIMENT_FEATURES:
@@ -376,22 +311,12 @@ def _attach_sentiment(result: pd.DataFrame, sentiment: pd.DataFrame | None) -> p
 
 
 def _attach_policy(result: pd.DataFrame, policy: pd.DataFrame | None) -> pd.DataFrame:
-    """Active-government-policy signal at observation time.
+    """Which government policies are active at observation time.
 
-    NOT an as-of merge: policy flags are date RANGES, not a point series. A flag
-    is active on date D iff EffectiveFrom <= D AND (EffectiveTo IS NULL OR
-    D <= EffectiveTo). Knowledge date = EffectiveFrom, so this is leakage-safe.
-    National signal -> identical across crops for a given D.
-
-    Attaches:
-      ActivePolicyNetDirection    sum of Direction over flags active on D
-      ActivePolicyCount           number of flags active on D
-      PolicyImportBanActive       1 if an ImportBan(1) flag is active on D
-      PolicyPriceCeilingActive    1 if a PriceCeiling(3) flag is active on D
-      PolicyFertiliserSubsidyActive 1 if a FertiliserSubsidy(5) flag active on D
-
-    Empty/missing policy -> net direction 0, count 0, booleans 0 (there is
-    genuinely no active policy, so zero is the correct value, not NaN).
+    A flag is active on D when EffectiveFrom <= D and (EffectiveTo is NULL or
+    D <= EffectiveTo), so the knowledge date is EffectiveFrom and this is leakage-safe.
+    Adds ActivePolicyNetDirection, ActivePolicyCount and the ImportBan / PriceCeiling /
+    FertiliserSubsidy booleans. No active policy means 0, not NaN.
     """
     out = result.copy()
     n = len(out)
@@ -409,18 +334,14 @@ def _attach_policy(result: pd.DataFrame, policy: pd.DataFrame | None) -> pd.Data
     direction = policy["Direction"].to_numpy(dtype="float64")
     ptype = policy["PolicyType"].to_numpy()
 
-    # Vectorised per-(date, flag) overlap. ~6 flags so the outer product is tiny.
     # active[i, j] = flag j is active on observation date i.
     started = D[:, None] >= eff_from[None, :]
-    # EffectiveTo is NaT -> open-ended -> always within range; NaT comparison is
-    # False, so OR it in explicitly.
+    # A NaT EffectiveTo means open-ended; NaT comparisons are False, so OR it in.
     open_ended = np.isnat(eff_to)
     not_ended = (D[:, None] <= eff_to[None, :]) | open_ended[None, :]
     active = started & not_ended  # (n_dates, n_flags) bool
 
-    # Net direction = sum of Direction over active flags. We avoid matmul (which
-    # raised spurious divide-by-zero/overflow RuntimeWarnings on this BLAS build)
-    # and instead mask-and-sum: zero-out inactive flags' directions, sum per row.
+    # Mask-and-sum rather than matmul, which raised spurious warnings on this BLAS build.
     out["ActivePolicyNetDirection"] = \
         np.where(active, direction[None, :], 0.0).sum(axis=1)
     out["ActivePolicyCount"] = active.sum(axis=1).astype("int64")
@@ -433,16 +354,8 @@ def _attach_policy(result: pd.DataFrame, policy: pd.DataFrame | None) -> pd.Data
     return out
 
 
-# CBSL macro-series vintage features (P3). Each maps a MacroSeriesPoints
-# SeriesCode -> the feature column name attached at observation time. National
-# signal -> identical across crops for a given ObservationDate (no cross-
-# sectional lift expected; added on leakage-safety + domain prior, not CV proof).
-#
-# CCPI_HEADLINE_YOY_BASE2021 is deliberately EXCLUDED: the spec lists three
-# columns and headline YoY carries no cross-sectional signal beyond food YoY on
-# this thin corpus -- not worth a 4th column. CCPI_BASE2021 (the raw index level)
-# is base-year-dependent (2013=100 vs 2021=100 rebasing splices silently) and is
-# NOT a feature -- YoY series are base-invariant, so we consume those instead.
+# CBSL SeriesCode -> feature column. National signal, identical across crops.
+# YoY series only: raw index levels change meaning when CBSL rebases.
 _MACRO_SERIES = {
     "CCPI_FOOD_YOY_BASE2021": "MacroFoodInflationYoY",
     "FOOD_IMPORTS_YOY": "MacroFoodImportsYoY",
@@ -450,38 +363,18 @@ _MACRO_SERIES = {
 }
 _MACRO_FEATURES = list(_MACRO_SERIES.values())
 
-# Staleness cap (user decision, 2026-07-04): a carried-forward monthly vintage
-# is only trusted for ~60 days. If the most recent vintage whose PublishedAt <=
-# ObservationDate is itself OLDER than this many days at the observation date,
-# the feature is set to NaN rather than carried forward indefinitely. Monthly
-# series carried forward uncapped would assert a stale reading is still current;
-# NaN ("not knowable / too stale") is the honest value. FX/sentiment carry
-# forward uncapped -- fine for ~daily series, wrong for these monthly ones.
+# A monthly vintage older than this at the observation date becomes NaN instead of
+# being carried forward. FX and sentiment are near-daily and carry forward uncapped.
 _MACRO_STALENESS_DAYS = 60
 
 
 def _attach_macro(result: pd.DataFrame, macro: pd.DataFrame | None) -> pd.DataFrame:
-    """CBSL macro-series columns via point-in-time (as-of, backward) merge on the
-    VINTAGE date (PublishedAt), per SeriesCode.
+    """CBSL macro columns via a backward as-of merge on the vintage date, per SeriesCode.
 
-    Mirrors _attach_fx, with three deliberate differences dictated by the P3
-    vintage spec:
-
-      1. JOIN KEY = PublishedAt, NEVER ReferenceDate. ReferenceDate is the period
-         the value describes; PublishedAt is when the world could know it. A
-         backward as-of on PublishedAt (ObservationDate >= PublishedAt) is the
-         leakage gate. ReferenceDate is audit-only and dropped before the frame.
-
-      2. STALENESS CAP: after the as-of match, if PublishedAt is more than
-         _MACRO_STALENESS_DAYS before ObservationDate the value is NaNed. Monthly
-         series must not be carried forward forever (contrast FX/sentiment).
-
-      3. MISSING / ABSENT -> NaN, NEVER 0. A macro NaN means "not knowable at D"
-         (before the first vintage, or too stale, or the series is absent),
-         deliberately UNLIKE _attach_policy where 0 means "no active policy".
-
-    National signal -> identical across crops for a given ObservationDate.
-    Empty/missing macro frame -> all macro columns NaN.
+    Joins on PublishedAt, never ReferenceDate: PublishedAt is when the value could be
+    known, ReferenceDate is only the period it describes. A vintage older than
+    _MACRO_STALENESS_DAYS at the observation date becomes NaN, and anything not
+    knowable is NaN rather than 0 (unlike _attach_policy).
     """
     out = result.copy()
     out["ObservationDate"] = _canon_key(out["ObservationDate"])
@@ -490,15 +383,12 @@ def _attach_macro(result: pd.DataFrame, macro: pd.DataFrame | None) -> pd.DataFr
             out[col] = np.nan
         return out
 
-    # as-of requires a sorted LEFT key, so the frame is re-sorted by
-    # ObservationDate and returned in that order (same behaviour as
-    # _attach_fx/_attach_sentiment; downstream keys on (CropId, ObservationDate)).
+    # merge_asof needs a sorted left key, so the frame comes back sorted by ObservationDate.
     out = out.sort_values("ObservationDate").reset_index(drop=True)
 
     for series_code, feat_col in _MACRO_SERIES.items():
         sub = macro[macro["SeriesCode"] == series_code]
-        # ReferenceDate is NEVER a join key -- carried only for tests/audit, not
-        # merged in. We select PublishedAt (the vintage/knowledge date) + Value.
+        # ReferenceDate is never a join key; only PublishedAt, the date the value was knowable.
         sub = (sub[["PublishedAt", "Value"]]
                .dropna(subset=["PublishedAt"])
                .sort_values("PublishedAt"))
@@ -520,8 +410,7 @@ def _attach_macro(result: pd.DataFrame, macro: pd.DataFrame | None) -> pd.DataFr
         pub = merged["_pub"].to_numpy(dtype="datetime64[ns]")
         obs = out["ObservationDate"].to_numpy(dtype="datetime64[ns]")
         age_days = (obs - pub) / np.timedelta64(1, "D")
-        # No match at all (NaT pub) or too stale -> NaN. Operator is STRICT ">":
-        # exactly 60 days old is still visible; older than 60 is NaN.
+        # No match or too stale -> NaN. Strict '>': exactly at the cap is still usable.
         too_stale = np.isnat(pub) | (age_days > _MACRO_STALENESS_DAYS)
         vals = np.where(too_stale, np.nan, vals)
         out[feat_col] = vals
@@ -529,45 +418,18 @@ def _attach_macro(result: pd.DataFrame, macro: pd.DataFrame | None) -> pd.DataFr
     return out
 
 
-# --- Cross-market spread features (P4 step 2, ClickUp 86caheffr) --------------
-#
-# Per-market point-in-time price context onto the per-(crop, date) frame. These
-# are cross-market FEATURES, not a market-as-label reshape (that is P5). The
-# whole thing is computed OFFLINE into CropFeatureDaily; serving keeps reading
-# ONE row per (crop, date) -- there is NO per-request market fan-out.
-#
-# Column naming: per-market columns are Mkt<Slug>AvgPrice / Mkt<Slug>Lag7 for
-# each feature-safe market slug (Dambulla, Keppetipola, Thambuttegama, Pettah,
-# Narahenpita). A market with no data for a (crop, date) -- Poya/gap, or
-# Narahenpita which has zero rows today -- gets NaN (never 0): explicit
-# missingness. Only the 4 model crops with PriceObservations coverage
-# (Capsicum, Bitter Gourd, Ridge Gourd, Lady's Fingers) get non-NaN values; the
-# other 7 model crops are NaN by construction (no cross-market observations).
-#
-# "National" = UNWEIGHTED mean over the per-market AvgPrice columns that report
-# on that (crop, date) -- exactly the get_feature_safe_market_ids() set, never a
-# raw AVG over PriceObservations (Pettah/ECOMAP double-count trap). NaN (not 0)
-# when fewer than 2 markets report -> spread/rank features are NaN too.
-#
-# Reference market for the crop-vs-national spread = DAMBULLA, the primary
-# Dedicated Economic Centre whose price effectively anchors the harvest-price
-# label. spread_vs_national / market_rank_pct describe Dambulla's position among
-# the reporting feature-safe markets. (There is deliberately no "self market"
-# axis here -- that arrives with the market-as-label reshape in P5.)
+# Cross-market spread features: per-market point-in-time prices attached to the
+# per-(crop, date) frame, computed offline so serving still reads one row per crop
+# and date. A market that did not report gives NaN, never 0. National = unweighted
+# mean over the feature-safe markets that reported, and NaN when fewer than 2 do.
+# Dambulla is the reference market for the spread and rank columns.
 _SPREAD_REFERENCE_SLUG = "Dambulla"
 
-# Staleness cap for a carried-forward per-market price (days). Measured from the
-# live PriceObservations reporting-gap distribution over the 4 covered model
-# crops (34,138 consecutive-day gaps): p99.5 = 7d, p99.9 = 29d, 99.79% of gaps
-# <= 14d. A daily market series that has not reported a crop for >14 days has
-# effectively STOPPED reporting it (not a normal weekend/Poya gap), so carrying
-# its last price forward past 14 days would assert a stale price is still
-# current. Beyond the cap -> NaN ("not knowable"), never carried forever. This
-# is the daily-series analogue of _attach_macro's 60d cap for monthly vintages.
+# A per-market price carried forward past this many days becomes NaN: 99.8% of real
+# reporting gaps are <= 14 days, so a longer gap means the market stopped reporting.
 _SPREAD_STALENESS_DAYS = 14
 
-# Non-per-market spread columns (fixed names; the per-market Mkt<Slug>* columns
-# are generated from the feature-safe slug list).
+# Spread columns that are not per-market (the Mkt<Slug>* ones are generated).
 _SPREAD_DERIVED_COLS = [
     "SpreadVsNational",
     "MarketRankPct",
@@ -578,20 +440,15 @@ _SPREAD_DERIVED_COLS = [
 
 def _asof_market_price(result: pd.DataFrame, sub: pd.DataFrame,
                        left_date_col: str, out_col: str) -> pd.Series:
-    """Per-(crop) backward as-of merge of one market's daily AvgPrice onto result.
+    """Backward as-of merge of one market's daily AvgPrice onto result, per crop.
 
-    For each result row take the most recent AvgPrice of this market for the SAME
-    CropId with ObservedDate <= result[left_date_col]. Applies the staleness cap:
-    if the matched observation is more than _SPREAD_STALENESS_DAYS before the
-    left date, the value is NaN. Pure point-in-time: never an ObservedDate AFTER
-    the left date. Returns a Series aligned to result's (already sorted) index.
+    Takes the latest AvgPrice with ObservedDate <= the left date, or NaN when that
+    observation is more than _SPREAD_STALENESS_DAYS old.
     """
     n = len(result)
     if sub.empty:
         return pd.Series(np.full(n, np.nan), index=result.index)
-    # Carry result's own index as a column so the as-of output can be realigned
-    # to the caller's row order (merge_asof requires a globally sorted left key
-    # and resets the index).
+    # merge_asof resets the index, so carry the original one along to realign afterwards.
     left = result[["CropId", left_date_col]].copy()
     left["_orig_idx"] = result.index
     left[left_date_col] = _canon_key(left[left_date_col])
@@ -616,18 +473,11 @@ def _asof_market_price(result: pd.DataFrame, sub: pd.DataFrame,
 def _attach_market_spread(result: pd.DataFrame,
                           price_obs: pd.DataFrame | None,
                           market_slugs: list | None) -> pd.DataFrame:
-    """Cross-market spread features via per-market point-in-time as-of merges.
+    """Cross-market spread features, one backward as-of merge per market.
 
-    Mirrors _attach_fx/_attach_macro's point-in-time discipline, extended to a
-    SET of markets. For each feature-safe market slug we as-of-merge (backward,
-    per CropId, staleness-capped) that market's daily AvgPrice at the observation
-    date (and 7 days earlier for the Lag7 leg). All derived columns
-    (spread/rank/leader/count) come from these already-as-of'd per-market columns
-    ONLY -- never from a fresh query -- so they inherit the same leakage gate.
-
-    Empty/missing PriceObservations (or no feature-safe markets) -> every spread
-    column NaN (per-market and derived). NaN, never 0: a missing market price is
-    "not knowable", not "zero rupees".
+    Every derived column (spread / rank / leader / count) is built from the already
+    as-of'd per-market columns, so it inherits the same point-in-time gate. A market
+    with no price gives NaN, never 0.
     """
     out = result.copy()
     out["ObservationDate"] = _canon_key(out["ObservationDate"])
@@ -639,8 +489,7 @@ def _attach_market_spread(result: pd.DataFrame,
     if price_obs is None:
         price_obs = pd.DataFrame(columns=["MarketSlug", "CropId", "ObservedDate", "AvgPrice"])
 
-    # Pre-compute the +7d observation date once (point-in-time: the price known
-    # 7 days before D -- backward as-of onto D-7 keeps the same leakage gate).
+    # The Lag7 leg as-ofs onto D-7, which keeps the same point-in-time gate.
     lag_date = (out["ObservationDate"] - pd.Timedelta(days=7))
     out["_lag7_date"] = lag_date
 
@@ -655,7 +504,7 @@ def _attach_market_spread(result: pd.DataFrame,
 
     out = out.drop(columns=["_lag7_date"])
 
-    # --- Derived cross-market summaries (from per-market columns ONLY) ---------
+    # Derived summaries come from the per-market columns only, never a fresh query.
     if avg_cols:
         avg_mat = out[avg_cols].to_numpy(dtype="float64")  # (n_rows, n_markets)
     else:
@@ -665,9 +514,8 @@ def _attach_market_spread(result: pd.DataFrame,
         np.zeros(len(out), dtype="int64")
     out["NMarketsReporting"] = n_reporting.astype("int64")
 
-    # National = unweighted mean over reporting markets; NaN when <2 report.
-    # nanmean of an all-NaN row (a non-covered crop) legitimately yields NaN but
-    # warns "Mean of empty slice" -- silence it, the NaN is the intended value.
+    # National = unweighted mean over reporting markets; NaN when fewer than 2 report.
+    # An all-NaN row warns 'Mean of empty slice'; the NaN is intended, so silence it.
     enough = n_reporting >= 2
     if avg_mat.shape[1]:
         with warnings.catch_warnings():
@@ -677,8 +525,7 @@ def _attach_market_spread(result: pd.DataFrame,
         national = np.full(len(out), np.nan)
     national = np.where(enough, national, np.nan)
 
-    # spread_vs_national + rank use the REFERENCE market (Dambulla). Both are NaN
-    # when the reference market did not report, or when <2 markets report.
+    # Spread and rank are relative to Dambulla; NaN if it or fewer than 2 markets report.
     ref_col = f"Mkt{_SPREAD_REFERENCE_SLUG}AvgPrice"
     ref = out[ref_col].to_numpy(dtype="float64") if ref_col in out.columns \
         else np.full(len(out), np.nan)
@@ -686,10 +533,7 @@ def _attach_market_spread(result: pd.DataFrame,
     spread = np.where(enough, ref - national, np.nan)
     out["SpreadVsNational"] = spread
 
-    # market_rank_pct: fraction of reporting markets with AvgPrice <= reference,
-    # i.e. the reference market's percentile position among reporting markets.
-    # Vectorised over rows; only rows with >=2 reporting markets AND a reporting
-    # reference get a value.
+    # market_rank_pct: share of reporting markets priced at or below the reference market.
     if avg_mat.shape[1]:
         le = np.where(np.isnan(avg_mat), np.nan, (avg_mat <= ref[:, None]).astype("float64"))
         n_le = np.nansum(le, axis=1)
@@ -701,9 +545,7 @@ def _attach_market_spread(result: pd.DataFrame,
         rank_pct = np.full(len(out), np.nan)
     out["MarketRankPct"] = rank_pct
 
-    # leader_market_lag7: the 7-day-lagged AvgPrice of whichever market has the
-    # HIGHEST current AvgPrice on this (crop, date). Point-in-time (both legs are
-    # as-of'd). NaN when <2 markets report or the leader has no Lag7.
+    # leader_market_lag7: the Lag7 price of the market with the highest current AvgPrice.
     if avg_cols:
         lag_mat = out[lag_cols].to_numpy(dtype="float64")  # aligned to avg_cols
         # argmax over current AvgPrice, ignoring NaN rows safely.
@@ -727,11 +569,8 @@ def _attach_festivals(result: pd.DataFrame,
                       festivals: pd.DataFrame | None) -> pd.DataFrame:
     """National festival features from the DB calendar (load_festivals()).
 
-    Harvest-anchored + observation-anchored columns (see _festival_features).
-    National signal -> identical across crops for a given (ObservationDate,
-    HarvestDate). Empty/missing calendar -> every festival column zero-filled
-    (there is genuinely no festival signal, so 0 is correct, not NaN). Pure
-    calendar function: no now()/today(), no price aggregates.
+    Identical across crops for a given (ObservationDate, HarvestDate). An empty
+    calendar zero-fills the columns: there is genuinely no festival signal.
     """
     events_arr, windows = _festival_windows(festivals)
     if events_arr.size == 0:
@@ -770,12 +609,9 @@ def build_all(prices: pd.DataFrame, crops: pd.DataFrame, weather: pd.DataFrame,
     result = _attach_fx(result, fx)
     result = _attach_sentiment(result, sentiment)
     result = _attach_policy(result, policy)
-    # Macro vintages attach after policy: both are national point-in-time signals,
-    # but macro is an as-of merge on the VINTAGE date (PublishedAt) with a
-    # staleness cap and NaN (never 0) for not-knowable, unlike policy's 0-fill.
+    # Macro joins on the vintage date, with a staleness cap and NaN (not 0) when unknown.
     result = _attach_macro(result, macro)
     result = _attach_festivals(result, festivals)
-    # Cross-market spread context (P4 step 2): per-market point-in-time prices +
-    # derived spread/rank/leader summaries, computed OFFLINE into the store.
+    # Cross-market spread context, computed offline into the store.
     result = _attach_market_spread(result, price_obs, market_slugs)
     return result

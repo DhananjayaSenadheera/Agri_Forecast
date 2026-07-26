@@ -1,52 +1,20 @@
-"""Feature-build run audit log (build_features.py -> ``IngestionRuns``,
-Source="FEATURE_BUILD").
+"""Feature-build run audit log: writes an IngestionRuns row with Source='FEATURE_BUILD'.
 
-Until this module existed, the feature build (the one pipeline step run
-after ingestion + verification and before training) left NO row in the
-admin Ingestion runs log -- every ingestion source got a Running/Succeeded/
-Failed breadcrumb (PR: ingestion run tracking foundation) but build_features
-was invisible. This module is the sanctioned Python writer of a
-``FEATURE_BUILD`` row into that same table, mirroring the two established
-precedents:
+Every ingestion source leaves a Running/Succeeded/Failed breadcrumb in the admin
+Ingestion runs log; this module is the sanctioned Python writer of the equivalent
+row for the feature build. The exact Source string, casing included, is part of the
+contract with the .NET side.
 
-* ``training_log.py`` -- the pymssql/tz-aware-datetime trap this module
-  follows exactly: SQL Server ``datetime2`` has no offset, so every bound
-  datetime is normalized to NAIVE UTC before it reaches the driver (see
-  ``_to_naive_utc``; a tz-aware bind does not raise, it silently no-ops in
-  production, which is why this is enforced unconditionally rather than
-  trusted to the caller).
-* ``ingest_verify.persist_verdict`` -- parameterized SQL over a SQLAlchemy
-  engine (no ORM), and the FAIL-OPEN posture lives in the CALLER
-  (build_features.py), not here: these two write primitives RAISE on a
-  genuine DB error exactly like ``training_log.upsert_training_run`` /
-  ``sync_promoted_flags`` do, so they stay unit-testable for correctness,
-  and the entrypoint wraps both calls in try/except (see
-  ``registry._record_training_run`` for the analogous outer guard).
+Every datetime is normalised to naive UTC before binding: SQL Server datetime2 has
+no offset, and a tz-aware bind does not raise, it silently no-ops in production.
 
-Column contract (IngestionRuns, schema owned by the .NET migration
-``CreateIngestionRunsAndVerifications``): Id/BatchId uniqueidentifier;
-Source nvarchar(100); StartedUtc/FinishedUtc/CreatedAtUtc datetime2;
-Status int; CoveredFromDate/CoveredToDate date (nullable);
-RowsFetched/RowsInserted/RowsSkipped/DistinctCrops int (nullable);
-ErrorSummary nvarchar(1000) (nullable). See
-``AgriForecast.Domain/Entities/IngestionRun.cs``.
+Both write primitives raise on a genuine DB error - fail-open is the CALLER's job
+(build_features.py wraps the calls), so this bookkeeping can never take down the
+real pipeline step.
 
-Status ints mirror ``AgriForecast.Domain.Enums.IngestionRunStatus``
-(src/AgriForecast.Domain/Enums/IngestionRunStatus.cs) exactly -- that enum's
-own docstring pins the numeric values (``HasConversion<int>``; a reorder
-would silently corrupt persisted rows and must go through a migration, never
-a Python-side change). This writer only ever emits Running -> Succeeded /
-Failed (Skipped is defined for schema symmetry, unused here -- a feature
-build is never a deliberate no-op the way a disabled ingestion source is).
-
-RowsFetched is intentionally always NULL for this source: build_features
-does not "fetch" rows from an external feed the way an ingestion source
-does, it PERSISTS engineered rows (``RowsInserted``) from already-ingested
-data -- RowsFetched would be a fabricated number with no honest meaning
-here, and NULL alongside real RowsInserted/DistinctCrops/coverage is exactly
-the "un-migrated / partially-reporting source" shape the schema already
-supports (see IngestionRun.cs's own comment: "All nullable so an
-un-migrated source can write a status-only row.").
+Status ints mirror AgriForecast.Domain.Enums.IngestionRunStatus. RowsFetched is
+always NULL for this source: the build persists engineered rows rather than
+fetching from a feed, and any number there would be fabricated.
 """
 from __future__ import annotations
 
@@ -58,9 +26,8 @@ import sqlalchemy as sa
 
 logger = logging.getLogger(__name__)
 
-# Mirrors AgriForecast.Domain.Enums.IngestionRunStatus 1:1 (see
-# src/AgriForecast.Domain/Enums/IngestionRunStatus.cs). NEVER reorder --
-# the C# side pins these ints by test; a change belongs in a migration.
+# Mirrors AgriForecast.Domain.Enums.IngestionRunStatus 1:1. Never reorder: these ints
+# are persisted, so any change belongs in a migration, not here.
 STATUS_RUNNING = 0
 STATUS_SUCCEEDED = 1
 STATUS_FAILED = 2
@@ -72,13 +39,11 @@ _ERROR_SUMMARY_CAP = 1000
 
 
 def _to_naive_utc(value: "datetime | None") -> "datetime | None":
-    """Tz-aware -> naive UTC for a datetime2 bind param. SQL Server's
-    datetime2 has no offset and pymssql's handling of a tz-aware bind is not
-    something a fail-open hook would ever surface if it broke (the write
-    would silently no-op in production) -- so this is applied unconditionally
-    to every datetime this module sends, exactly as
-    ``training_log._to_datetime`` does for ModelTrainingRuns.TrainedAtUtc.
-    None-safe; already-naive values pass through unchanged.
+    """Convert a tz-aware datetime to naive UTC for a datetime2 bind param.
+
+    SQL Server datetime2 has no offset and a tz-aware bind would silently no-op in
+    production, so this is applied to every datetime this module sends. None-safe, and
+    already-naive values pass through unchanged.
     """
     if value is None:
         return None
@@ -114,28 +79,15 @@ _UPDATE_SQL = sa.text(
 
 
 def start_run(engine) -> "tuple[uuid.UUID, uuid.UUID, datetime]":
-    """Insert a Running row for one feature-build pass. Returns
-    ``(run_id, batch_id, started_utc)`` -- ``run_id`` is threaded back into
-    ``mark_succeeded``/``mark_failed`` to finalize the SAME row.
+    """Insert a Running row for one feature-build pass.
 
-    BatchId is always a fresh uuid4: build_features.py runs standalone,
-    already after ingestion + verification have finished their own pass, so
-    there is no live .NET Worker BatchId to thread through (contrast
-    ``verify_ingestion.py --batch-id``, which IS threaded via a shell
-    ``BATCH_ID`` env var from run-daily.sh -- that plumbing is deliberately
-    NOT extended here; adding it would be an orchestration change this task
-    does not require, and a build's own row need not share a pass's BatchId
-    to be honest).
+    Returns (run_id, batch_id, started_utc); run_id is passed back to mark_succeeded or
+    mark_failed to finalise the SAME row. BatchId is always a fresh uuid4 because
+    build_features.py runs standalone, after ingestion and verification have finished
+    their own pass. StartedUtc is stamped Python-side so the caller gets the exact
+    start instant back, since a later statement finalises the row.
 
-    StartedUtc/CreatedAtUtc are stamped Python-side (naive UTC) rather than
-    via ``SYSUTCDATETIME()`` -- unlike ``ingest_verify.persist_verdict``'s
-    one-shot insert, this row is finalized by a LATER statement in the same
-    process, so the caller needs the exact started instant back (e.g. to log
-    duration) rather than relying on a value only the server knows.
-
-    Raises on a genuine DB error -- fail-open is the CALLER's responsibility,
-    exactly like ``training_log.upsert_training_run`` /
-    ``sync_promoted_flags``.
+    Raises on a genuine DB error - the caller fail-opens.
     """
     run_id = uuid.uuid4()
     batch_id = uuid.uuid4()
@@ -165,11 +117,10 @@ def mark_succeeded(
     covered_from: "date | None" = None,
     covered_to: "date | None" = None,
 ) -> None:
-    """Finalize ``run_id`` as Succeeded. All counts/coverage are optional and
-    None-safe -- an empty build (zero feature rows) still lands an honest
-    Succeeded row with RowsInserted=0 rather than blocking on it.
+    """Finalise run_id as Succeeded.
 
-    Raises on a genuine DB error -- caller (build_features.py) fail-opens.
+    All counts and coverage are optional, so an empty build still lands an honest row
+    with RowsInserted=0. Raises on a genuine DB error - build_features.py fail-opens.
     """
     finished_utc = _to_naive_utc(datetime.now(timezone.utc))
     with engine.begin() as conn:
@@ -193,14 +144,10 @@ def mark_succeeded(
 
 
 def mark_failed(engine, run_id: uuid.UUID, exc: Exception) -> None:
-    """Finalize ``run_id`` as Failed. ErrorSummary = ``str(exc)`` capped to
-    the 1000-char column (per the task brief -- a plain str(exc), not the
-    C# entity's "TypeName: message" convention, since the caller already
-    knows the exception type from its own except clause / logs).
+    """Finalise run_id as Failed, with str(exc) capped to the 1000-char column.
 
-    Raises on a genuine DB error -- caller fail-opens AND still re-raises
-    the ORIGINAL build exception either way (the pipeline must fail loudly
-    even if this bookkeeping write itself fails).
+    Raises on a genuine DB error. The caller fail-opens but still re-raises the
+    original build exception, so the pipeline fails loudly either way.
     """
     finished_utc = _to_naive_utc(datetime.now(timezone.utc))
     error_summary = str(exc)[:_ERROR_SUMMARY_CAP]

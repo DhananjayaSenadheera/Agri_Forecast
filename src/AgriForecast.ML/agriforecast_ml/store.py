@@ -21,10 +21,8 @@ def write_features(df: pd.DataFrame) -> int:
     engine = get_engine()
     out = df.copy()
     out["ComputedAtUtc"] = pd.Timestamp.utcnow().tz_localize(None)
-    # SQL Server caps a single parameterised statement at 2100 parameters, and
-    # method="multi" sends chunksize * n_cols parameters per batch. Derive the
-    # chunksize from the actual column count (budget 2000 for margin under 2100)
-    # so adding feature columns can never silently breach the cap.
+    # SQL Server allows 2100 parameters per statement and method='multi' sends
+    # chunksize * n_cols of them, so derive the chunksize from the real column count.
     chunksize = max(1, 2000 // out.shape[1])
     out.to_sql(TABLE, engine, if_exists="replace", index=False,
                chunksize=chunksize, method="multi", dtype=_DTYPES)
