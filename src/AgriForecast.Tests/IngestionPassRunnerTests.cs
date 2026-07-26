@@ -4,6 +4,7 @@ using AgriForecast.Domain.Constants;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
+using AgriForecast.Infrastructure.Services;
 using AgriForecast.Infrastructure.Services.CbslIngestion;
 using AgriForecast.Infrastructure.Services.CbslMacroIngestion;
 using AgriForecast.Infrastructure.Services.EconomicIngestion;
@@ -24,6 +25,11 @@ namespace AgriForecast.Tests;
 /// so what is actually pinned is the ORCHESTRATION:
 /// the source set and their order; the shared batchId; per-source fail isolation; and the between-sources
 /// cancellation check that makes the admin stop button mean something.
+/// <para>
+/// The cancellation tests also pin the honesty rule: a stopped pass leaves a Failed row carrying
+/// IngestionRunAudit.CancelledReason for the source that never started — written exactly once per stop —
+/// so a halted batch can never roll up to lastRunStatus="succeeded".
+/// </para>
 /// </summary>
 public class IngestionPassRunnerTests
 {
@@ -33,12 +39,27 @@ public class IngestionPassRunnerTests
         public string? ThrowOn;
         public CancellationToken LastToken;
 
+        // Simulates the admin pressing stop while this source is the one in flight. CancelDuring names the
+        // source; ThrowOnCancel decides whether the source then unwinds (a source that observes the token)
+        // or completes normally anyway (a source that finishes in the gap before its next ct check — the
+        // live case, where DAMBULLA_DEC landed a green row and the stop fell between sources).
+        public CancellationTokenSource? PassCts;
+        public string? CancelDuring;
+        public bool ThrowOnCancel;
+
         public void Note(string source, CancellationToken ct)
         {
             Calls.Add(source);
             LastToken = ct;
             if (ThrowOn == source)
                 throw new InvalidOperationException($"simulated {source} failure");
+
+            if (CancelDuring == source)
+            {
+                PassCts!.Cancel();
+                if (ThrowOnCancel)
+                    throw new OperationCanceledException(PassCts.Token);
+            }
         }
     }
 
@@ -111,8 +132,16 @@ public class IngestionPassRunnerTests
     {
         public readonly List<IngestionRun> Rows = new();
 
+        // The token the last insert was handed. The stopped-before-start marker is written precisely when
+        // the pass token is already cancelled, so it must arrive as CancellationToken.None.
+        public CancellationToken LastAddToken { get; private set; }
+
         public Task AddAsync(IngestionRun run, CancellationToken ct = default)
         {
+            // HONOURS ct like the real store: SqlConnection.OpenAsync throws on a cancelled token before any
+            // I/O, and a ct-blind fake cannot reproduce the write that silently never happens.
+            LastAddToken = ct;
+            ct.ThrowIfCancellationRequested();
             Rows.Add(run);
             return Task.CompletedTask;
         }
@@ -218,7 +247,81 @@ public class IngestionPassRunnerTests
         await runner.RunPassAsync(Guid.NewGuid(), cts.Token);
 
         recorder.Calls.Should().BeEmpty("cancellation before the first source means no source runs");
-        runs.Rows.Should().BeEmpty("no run row is minted for a source that never started");
+
+        // The batch is not silent about it. The admin was handed this batchId at the 202, so it must not
+        // vanish without a trace, and a batch with no rows at all is one edit away from rolling up green.
+        var row = runs.Rows.Should().ContainSingle(
+            "the halt is recorded once, on the source that was about to start").Subject;
+        row.Source.Should().Be(IngestionSources.DambullaDec);
+        row.Status.Should().Be(IngestionRunStatus.Failed, "Skipped would roll up inside \"succeeded\"");
+        row.ErrorSummary.Should().Be(IngestionRunAudit.CancelledReason);
+        row.FinishedUtc.Should().NotBeNull("a Running marker would read as a live pass for two hours");
+        runs.LastAddToken.CanBeCanceled.Should().BeFalse(
+            "the marker is written BECAUSE the pass token is cancelled, so it must use CancellationToken.None");
+    }
+
+    // S5, observed live on batch 9def4f2b: the stop landed after DAMBULLA_DEC had already committed its green
+    // row and before WEATHER started, so the batch held nothing but Succeeded rows and the status card
+    // reported lastRunStatus="succeeded" for a pass an admin had deliberately killed. The source that was
+    // about to start now carries the halt.
+    [Fact]
+    public async Task RunPass_StoppedBetweenSources_RecordsTheHaltOnTheNextSource()
+    {
+        var (runner, recorder, runs, _) = Build();
+        using var cts = new CancellationTokenSource();
+        recorder.PassCts = cts;
+        recorder.CancelDuring = IngestionSources.DambullaDec;   // stop pressed while DEC is finishing...
+        recorder.ThrowOnCancel = false;                         // ...and DEC completes anyway, green
+
+        await runner.RunPassAsync(Guid.NewGuid(), cts.Token);
+
+        recorder.Calls.Should().Equal(
+            new[] { IngestionSources.DambullaDec }, "no further source may be launched after the stop");
+
+        runs.Rows.Should().HaveCount(2, "the source that ran, plus one marker for the one that never started");
+        runs.Rows.Single(r => r.Source == IngestionSources.DambullaDec).Status
+            .Should().Be(IngestionRunStatus.Succeeded, "a source that genuinely finished keeps its real outcome");
+
+        var marker = runs.Rows.Single(r => r.Source == IngestionSources.Weather);
+        marker.Status.Should().Be(IngestionRunStatus.Failed);
+        marker.ErrorSummary.Should().Be(IngestionRunAudit.CancelledReason);
+        runs.Rows.Should().NotContain(r => r.Source == IngestionSources.Economic,
+            "only ONE marker is written, not one per un-run source");
+    }
+
+    // The other half of the same rule: when the stop is caught by the in-flight source, that source's own row
+    // already says Cancelled, so the between-sources branch must NOT write a second marker — one stop is one
+    // row, and a marker for WEATHER would invent a halt nobody was waiting on.
+    [Fact]
+    public async Task RunPass_StoppedMidSource_DoesNotRecordTheHaltTwice()
+    {
+        var (runner, recorder, runs, _) = Build();
+        using var cts = new CancellationTokenSource();
+        recorder.PassCts = cts;
+        recorder.CancelDuring = IngestionSources.DambullaDec;
+        recorder.ThrowOnCancel = true;   // DEC observes the token and unwinds
+
+        await runner.RunPassAsync(Guid.NewGuid(), cts.Token);
+
+        var row = runs.Rows.Should().ContainSingle().Subject;
+        row.Source.Should().Be(IngestionSources.DambullaDec);
+        row.Status.Should().Be(IngestionRunStatus.Failed);
+        row.ErrorSummary.Should().Be(IngestionRunAudit.CancelledReason);
+        runs.Rows.Should().NotContain(r => r.Source == IngestionSources.Weather,
+            "the halt is already on the record — no duplicate marker for the next source");
+    }
+
+    // The marker is a stop-only artefact: a pass nobody interrupted writes exactly the seven source rows.
+    [Fact]
+    public async Task RunPass_NormalCompletion_WritesNoCancellationMarker()
+    {
+        var (runner, _, runs, _) = Build();
+
+        await runner.RunPassAsync(Guid.NewGuid(), CancellationToken.None);
+
+        runs.Rows.Should().HaveCount(7);
+        runs.Rows.Should().NotContain(r => r.ErrorSummary == IngestionRunAudit.CancelledReason);
+        runs.Rows.Should().NotContain(r => r.Status == IngestionRunStatus.Failed);
     }
 
     [Fact]

@@ -5,6 +5,7 @@ using AgriForecast.Domain.Constants;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
+using AgriForecast.Infrastructure.Services;
 using AgriForecast.Infrastructure.Services.CbslIngestion;
 using AgriForecast.Infrastructure.Services.CbslMacroIngestion;
 using AgriForecast.Infrastructure.Services.EconomicIngestion;
@@ -51,6 +52,9 @@ public class IngestionStatusDuringPassTests
         // store's rows would be re-read.
         public Task AddAsync(IngestionRun run, CancellationToken ct = default)
         {
+            // Honours ct like the real store (OpenAsync throws on a cancelled token before any I/O), so the
+            // stopped-before-start marker really is proven to be written with CancellationToken.None.
+            ct.ThrowIfCancellationRequested();
             lock (_gate) _rows.Add(run);
             return Task.CompletedTask;
         }
@@ -128,6 +132,17 @@ public class IngestionStatusDuringPassTests
         }
     }
 
+    // The live S5 shape: the admin presses stop while DAMBULLA_DEC is finishing, DEC completes anyway and
+    // commits a green row, and the cancel is only seen by the between-sources check before WEATHER.
+    private sealed class StopsItselfMarketPrice(CancellationTokenSource cts) : IMarketPriceIngestionService
+    {
+        public Task<IngestionRunStats> IngestAsync(CancellationToken ct)
+        {
+            cts.Cancel();
+            return Task.FromResult(new IngestionRunStats(RowsInserted: 1));
+        }
+    }
+
     private sealed class NoOpWeather : IWeatherIngestionService
     { public Task<IngestionRunStats> IngestAsync(CancellationToken ct) => Task.FromResult(new IngestionRunStats()); }
     private sealed class NoOpEconomic : IEconomicIngestionService
@@ -140,6 +155,41 @@ public class IngestionStatusDuringPassTests
     { public Task<IngestionRunStats> IngestAsync(CancellationToken ct) => Task.FromResult(new IngestionRunStats()); }
     private sealed class NoOpCbslMacro : ICbslMacroIngestionService
     { public Task<IngestionRunStats> IngestAsync(CancellationToken ct) => Task.FromResult(new IngestionRunStats()); }
+
+    // The other half of the joined contract, and the reviewer's S5 finding: what the card says AFTER a stop.
+    // Live batch 9def4f2b was stopped in the gap between DAMBULLA_DEC and WEATHER, so every row it held was
+    // Succeeded and this handler rolled the batch up to "succeeded" — a deliberately halted pass reported as
+    // a clean night's ingestion, which is the same false-green family as the silent daily-pipeline failure.
+    // A unit test on either side alone still lets that through: the runner test only sees rows, and the
+    // handler test only sees statuses someone chose to hand it. Joined, the roll-up is read off exactly the
+    // rows a real stop leaves behind.
+    [Fact]
+    public async Task Status_DoesNotReportSucceeded_ForAPassStoppedBetweenSources()
+    {
+        var table = new SharedRunTable();
+        var hosted = new ApiHostedIngestionPasses();
+        using var cts = new CancellationTokenSource();
+        var runner = BuildRunner(table, new StopsItselfMarketPrice(cts));
+        var batchId = Guid.NewGuid();
+
+        await runner.RunPassAsync(batchId, cts.Token);
+
+        var rows = table.Snapshot();
+        rows.Should().HaveCount(2, "the one source that ran, plus the halt marker for the next one");
+        rows.Single(r => r.Source == IngestionSources.DambullaDec).Status
+            .Should().Be(IngestionRunStatus.Succeeded);
+        var marker = rows.Single(r => r.Source == IngestionSources.Weather);
+        marker.Status.Should().Be(IngestionRunStatus.Failed);
+        marker.ErrorSummary.Should().Be(IngestionRunAudit.CancelledReason);
+
+        var status = await ReadStatusAsync(table, hosted);
+        status.State.Should().Be("stopped", "no unfinished row is left behind by a stop");
+        status.LastRunStatus.Should().NotBe("succeeded",
+            "THE bug: a pass the admin killed must never report a green batch");
+        status.LastRunStatus.Should().Be("partial",
+            "one source genuinely succeeded and one was cut off, so partial is the honest roll-up — "
+            + "\"failed\" would overstate it and erase the DEC data that really did land");
+    }
 
     private static IngestionPassRunner BuildRunner(SharedRunTable table, IMarketPriceIngestionService first)
     {
