@@ -360,6 +360,70 @@ public class IngestionRunAuditTests
         run.ErrorSummary.Should().Be(IngestionRunAudit.CancelledReason);
     }
 
+    // RunTrackedAsync reports whether the halt is already on the record, so the pass can decide if it still
+    // owes a "stopped before it started" marker for the next source. Inferring it from ct instead would be
+    // wrong: a source can finish cleanly in the gap between the cancel and its next check.
+    [Fact]
+    public async Task RunTracked_ReportsCancellationRecorded_OnlyWhenTheRowCarriesTheStop()
+    {
+        var runs = new FakeIngestionRunRepository();
+        using var cts = new CancellationTokenSource();
+
+        var cancelledAndUnwound = await IngestionRunAudit.RunTrackedAsync(
+            runs, NullLogger.Instance, Guid.NewGuid(), "HARTI",
+            _ => { cts.Cancel(); throw new OperationCanceledException(cts.Token); }, cts.Token);
+
+        cancelledAndUnwound.Should().BeTrue("this source's own row now says it was cancelled");
+
+        var finishedAnyway = new FakeIngestionRunRepository();
+        using var cts2 = new CancellationTokenSource();
+
+        var reported = await IngestionRunAudit.RunTrackedAsync(
+            finishedAnyway, NullLogger.Instance, Guid.NewGuid(), "DAMBULLA_DEC",
+            _ => { cts2.Cancel(); return Task.FromResult<IngestionRunStats?>(new IngestionRunStats()); },
+            cts2.Token);
+
+        reported.Should().BeFalse(
+            "the source completed and its row is green, so the stop is NOT yet recorded anywhere — this is "
+            + "the live S5 case where the batch would otherwise roll up succeeded");
+        finishedAnyway.Single!.Status.Should().Be(IngestionRunStatus.Succeeded);
+    }
+
+    // The marker for a source the stop pre-empted: one already-terminal Failed row, no Running phase (a
+    // Running row here would read as a live pass for the whole staleness window), written with
+    // CancellationToken.None because the pass token is cancelled by definition at this point.
+    [Fact]
+    public async Task RecordCancelledBeforeStart_WritesOneTerminalFailedRow_WithTheCancelledReason()
+    {
+        var runs = new FakeIngestionRunRepository();
+        var batch = Guid.NewGuid();
+
+        await IngestionRunAudit.RecordCancelledBeforeStartAsync(
+            runs, NullLogger.Instance, batch, "WEATHER");
+
+        var run = runs.Single!;
+        run.BatchId.Should().Be(batch);
+        run.Source.Should().Be("WEATHER");
+        run.Status.Should().Be(IngestionRunStatus.Failed,
+            "Skipped rolls up inside \"succeeded\" — that is the false green this row exists to prevent");
+        run.ErrorSummary.Should().Be(IngestionRunAudit.CancelledReason);
+        run.FinishedUtc.Should().NotBeNull();
+        run.RowsInserted.Should().BeNull("the source never ran, so it fabricates no counts");
+        runs.AddCount.Should().Be(1);
+        runs.UpdateCount.Should().Be(0, "the row is minted terminal in a single commit");
+    }
+
+    [Fact]
+    public async Task RecordCancelledBeforeStart_SwallowsAStoreFailure_SoShutdownIsNeverBroken()
+    {
+        var runs = new FakeIngestionRunRepository { ThrowOnSaveIndex = 1 };
+
+        var act = () => IngestionRunAudit.RecordCancelledBeforeStartAsync(
+            runs, NullLogger.Instance, Guid.NewGuid(), "WEATHER");
+
+        await act.Should().NotThrowAsync("audit writes are best-effort and must never break the pass");
+    }
+
     // A cancellation that is NOT ours (no stop requested) is still a genuine failure — most often an
     // HttpClient timeout, which surfaces as TaskCanceledException with an untripped token.
     [Fact]

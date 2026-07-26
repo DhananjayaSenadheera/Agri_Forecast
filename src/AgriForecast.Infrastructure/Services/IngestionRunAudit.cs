@@ -41,7 +41,14 @@ public static class IngestionRunAudit
     // Runs one source under a tracked run row: insert Running (own commit), run the body, then the terminal
     // transition (own commit). The terminal state comes from the returned stats' Outcome, or Failed plus a
     // sanitized exception if the body throws. body returns null for a status-only source.
-    public static async Task RunTrackedAsync(
+    //
+    // RETURNS true when this source's own run row already carries the admin-stop cancellation (Failed +
+    // CancelledReason). The caller uses that to decide whether the halt is already on the record: if it is,
+    // the pass must NOT also mint a "cancelled before it started" marker for the next source, or one stop
+    // would be reported twice. Note that a stop arriving mid-source does not always land here — a source can
+    // finish successfully in the gap between the cancel and its next ct check — which is exactly why this is
+    // reported from the row rather than inferred from ct.IsCancellationRequested.
+    public static async Task<bool> RunTrackedAsync(
         IIngestionRunRepository runs,
         ILogger logger,
         Guid batchId,
@@ -67,6 +74,7 @@ public static class IngestionRunAudit
         }
 
         // 2. Run the source. A thrown exception is caught here (the fail-isolation belt) and maps to Failed.
+        var cancellationRecorded = false;
         try
         {
             var stats = await body(ct);
@@ -80,6 +88,9 @@ public static class IngestionRunAudit
             // differs, so the run row says what really happened.
             logger.LogInformation("{Source} ingestion was cancelled before it completed (admin stop).", source);
             ApplyTerminal(logger, run, source, r => r.MarkFailed(DateTime.UtcNow, CancelledReason));
+            // Only claim the halt is on the record if there IS a row to carry it: when the Running insert
+            // failed above, run is null and nothing was written, so the caller should still mint the marker.
+            cancellationRecorded = run is not null;
         }
         catch (Exception ex)
         {
@@ -90,6 +101,39 @@ public static class IngestionRunAudit
         // 3. Persist the terminal transition on its own isolated commit, with CancellationToken.None — see
         //    the class comment: honouring a cancelled ct here strands the row at Running forever.
         await SaveTerminalAsync(runs, logger, run, source);
+
+        return cancellationRecorded;
+    }
+
+    // Records a source that NEVER STARTED because the pass was stopped first: one already-terminal Failed row
+    // carrying CancelledReason, inserted in a single commit (no Running phase — the source never ran, and a
+    // Running breadcrumb here would read as a live pass for the whole staleness window).
+    //
+    // WHY A ROW AT ALL: a stop that lands in the gap between two sources used to write nothing, so a batch
+    // whose finished sources had all succeeded rolled up to lastRunStatus="succeeded" — a deliberately halted
+    // pass reporting green (observed live on batch 9def4f2b: stopped after DAMBULLA_DEC, before WEATHER).
+    // Failed, never Skipped: the roll-up counts Skipped inside "succeeded", so a Skipped marker would leave
+    // the false green exactly where it was.
+    //
+    // Takes NO CancellationToken, for the same reason SaveTerminalAsync does not: it is written precisely
+    // because the pass's token is cancelled, and handing that token to the store makes the write throw
+    // before any I/O.
+    public static async Task RecordCancelledBeforeStartAsync(
+        IIngestionRunRepository runs, ILogger logger, Guid batchId, string source)
+    {
+        try
+        {
+            var now = DateTime.UtcNow;
+            var run = IngestionRun.StartRunning(batchId, source, now);
+            run.MarkFailed(now, CancelledReason);
+            await runs.AddAsync(run, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            // Best-effort like every other audit write: a failed marker must not break the shutdown path.
+            logger.LogError(ex,
+                "Ingestion-run audit: failed to record the stopped-before-start row for {Source}.", source);
+        }
     }
 
     // Maps the source's returned stats to the terminal transition on the run row.
