@@ -35,12 +35,10 @@ _PROMOTION_DECISION_CAP = 2000
 _KIND_CAP = 50
 _CONTRACT_HASH_CAP = 100
 
-# ---------------------------------------------------------------------------
 # Redaction (minimal replica of verify_ingestion._redact_sensitive -- that
 # lives in a root CLI script and is awkward to import from inside the package;
 # kept intentionally small and dependency-free here so registry.save_model can
 # reuse it for its fail-open warning).
-# ---------------------------------------------------------------------------
 _CONN_STRING_KEYS = (
     "password", "pwd", "server", "uid", "user id", "database",
     "data source", "initial catalog", "app id", "app secret",
@@ -60,9 +58,7 @@ def redact_sensitive(text: str) -> str:
     return text
 
 
-# ---------------------------------------------------------------------------
 # Value coercion helpers (all None-safe)
-# ---------------------------------------------------------------------------
 
 def _truncate(val: object, cap: int) -> object:
     """Truncate a string to ``cap`` chars; pass through None / non-str."""
@@ -140,9 +136,7 @@ def values_from_metadata(metadata: dict) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # Write primitives
-# ---------------------------------------------------------------------------
 
 _UPDATE_SQL = sa.text(
     """UPDATE ModelTrainingRuns

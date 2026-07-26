@@ -35,17 +35,11 @@ from agriforecast_ml.envfile import load_env_file
 from agriforecast_ml.db import get_engine
 from agriforecast_ml import ingest_verify
 
-# --------------------------------------------------------------------------
-# S2 review fix: exception __str__ (e.g. from a SQLAlchemy/pymssql
-# connectivity failure) can embed the full DSN, including the password, or
-# a local filesystem path -- this project's house rule is "never log/print
-# .env values or connection strings" and "errors never leak ... paths",
-# with NO exception carved out for "but it's just going to a log file".
-# Every exception message this CLI logs (the only place raw exception text
-# is ever emitted -- stdout print()s below never include str(exc) at all)
-# is passed through this best-effort redaction first. Exception TYPE names
-# are never redacted (they carry no secrets and are useful for triage).
-# --------------------------------------------------------------------------
+# An exception's message (from a SQLAlchemy/pymssql connectivity failure, say) can embed
+# the full DSN including the password, or a local path. House rule: never log connection
+# strings or paths, with no exception for log files. Every exception message this CLI logs
+# goes through this redaction first; exception TYPE names are kept, since they carry no
+# secrets and help triage.
 _CONN_STRING_KEYS = (
     "password", "pwd", "server", "uid", "user id", "database",
     "data source", "initial catalog", "app id", "app secret",
@@ -98,16 +92,13 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true",
                      help="Run checks and print the report, but skip persistence")
     args = ap.parse_args()
-    # WARNING, not INFO: data_quality.gap_report() (check 14) logs one INFO
-    # line per gap entry across the WHOLE HARTI corpus (hundreds/thousands),
-    # which would otherwise flood this CLI's stdout/stderr on every run. This
-    # module's own report (_print_report) is the primary human-facing output
-    # regardless of log level.
+    # WARNING, not INFO: gap_report() (check 14) logs one line per gap across the whole HARTI
+    # corpus, which would flood this CLI's output every run. _print_report is the human-facing
+    # output regardless of log level.
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
-    # gap_report() emits its per-gap lines at WARNING/ERROR level, so the
-    # basicConfig threshold above does not stop them (1.8MB observed on a
-    # full-corpus run). Check 14 consumes gap_report's structured return
-    # value; the log stream is redundant here, so silence that logger.
+    # gap_report() emits those lines at WARNING/ERROR, so the threshold above does not stop
+    # them (1.8MB on a full-corpus run). Check 14 uses its structured return value, so the
+    # log stream is redundant here.
     logging.getLogger("agriforecast_ml.data_quality").setLevel(logging.CRITICAL)
 
     try:

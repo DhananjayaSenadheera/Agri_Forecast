@@ -112,9 +112,7 @@ def main() -> None:
     from agriforecast_ml.news import fetcher, loader, qa
     from agriforecast_ml.news.feeds import FEEDS
 
-    # ------------------------------------------------------------------ #
     # Step 1: Fetch feeds
-    # ------------------------------------------------------------------ #
     log.info("Step 1: Fetching %d RSS feeds...", len(FEEDS))
     articles, coverage = fetcher.fetch_all(FEEDS)
     log.info(
@@ -125,9 +123,7 @@ def main() -> None:
     n_feeds_with_data = sum(1 for v in coverage.values() if v > 0)
     n_feeds_empty = len(FEEDS) - n_feeds_with_data
 
-    # ------------------------------------------------------------------ #
     # Step 2: Load into DB
-    # ------------------------------------------------------------------ #
     if args.dry_run:
         log.info("--dry-run: skipping DB write")
         counters = {"inserted": 0, "dup_skipped": 0, "total": len(articles)}
@@ -136,9 +132,7 @@ def main() -> None:
         counters = loader.upsert_articles(articles)
         log.info("Step 2 complete: %s", counters)
 
-    # ------------------------------------------------------------------ #
     # Step 3: QA (skipped in dry-run)
-    # ------------------------------------------------------------------ #
     if args.skip_qa or args.dry_run:
         if args.dry_run:
             log.info("Dry run -- skipping QA (no DB writes)")
@@ -154,9 +148,7 @@ def main() -> None:
             log.error("QA FAILED: %s", exc)
             sys.exit(2)
 
-    # ------------------------------------------------------------------ #
     # Summary
-    # ------------------------------------------------------------------ #
     print("\nNews ingestion summary")
     print("  Feeds attempted     :", len(FEEDS))
     print("  Feeds with data     :", n_feeds_with_data)

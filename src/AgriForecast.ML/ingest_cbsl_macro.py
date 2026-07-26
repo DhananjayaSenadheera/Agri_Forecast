@@ -36,9 +36,8 @@ from pathlib import Path
 
 from agriforecast_ml.envfile import load_env_file
 
-# Load AGRI_DB_* from the gitignored .env so a bare `python ingest_cbsl_macro.py`
-# works without sourcing it first — same pattern build_features.py uses
-# (post-PR#16). Real env vars take precedence.
+# Load AGRI_DB_* from the gitignored .env so a bare 'python ingest_cbsl_macro.py' works
+# without sourcing it first. Real environment variables take precedence.
 load_env_file()
 
 log = logging.getLogger(__name__)
@@ -75,9 +74,7 @@ def run(
     artifacts_fetched = 0
     artifacts_skipped = 0
 
-    # ---------------------------------------------------------------- #
     # CCPI press releases
-    # ---------------------------------------------------------------- #
     if no_download:
         ccpi_cached = []
         for pdf_path in sorted(cdir.glob("cbsl_ccpi_*.pdf")):
@@ -106,9 +103,7 @@ def run(
             artifacts_skipped += 1
         all_points.extend(points)
 
-    # ---------------------------------------------------------------- #
     # MEI packs
-    # ---------------------------------------------------------------- #
     if no_download:
         mei_cached = []
         for pdf_path in sorted(cdir.glob("cbsl_mei_*.pdf")):

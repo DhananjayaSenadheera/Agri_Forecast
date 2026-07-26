@@ -88,9 +88,7 @@ def run(
 
     since: Optional[date] = date.fromisoformat(since_date) if since_date else None
 
-    # ------------------------------------------------------------------ #
     # Step 1: obtain PDFs (network-bounded by `since`, or cache-only).
-    # ------------------------------------------------------------------ #
     if no_download:
         log.info("ingest_harti_service: no_download — scanning cache at %s", cdir)
         cached_pdfs = []
@@ -124,15 +122,11 @@ def run(
         log.info("ingest_harti_service: no new PDFs after since=%s — no-op pass", since)
         return _empty_summary()
 
-    # ------------------------------------------------------------------ #
     # Step 2: parse (reuse the single-source-of-truth PDF parser).
-    # ------------------------------------------------------------------ #
     parsed_rows = harti_parser.parse_many(cached_pdfs, log_every=200)
     log.info("ingest_harti_service: parsed %d price row(s)", len(parsed_rows))
 
-    # ------------------------------------------------------------------ #
     # Step 3: upsert into PriceObservations (all markets, point-in-time).
-    # ------------------------------------------------------------------ #
     po_counters = loader.upsert_harti_price_observations(parsed_rows, dry_run=dry_run)
     log.info("ingest_harti_service: PriceObservations upsert %s", po_counters)
 
@@ -159,32 +153,24 @@ def run(
 
     eng = get_engine()
 
-    # ------------------------------------------------------------------ #
     # Step 4: cross-source duplicate check — HARD FAIL (raises).
-    # ------------------------------------------------------------------ #
     n_checked = assert_no_source_duplicates(eng)
     log.info(
         "ingest_harti_service: duplicate check PASSED (%d triples checked)", n_checked
     )
 
-    # ------------------------------------------------------------------ #
     # Step 4b: post-pass canonical self-heal (never guesses; unresolved -> NULL).
-    # ------------------------------------------------------------------ #
     heal = heal_price_observation_crops(eng, source=SOURCE)
     summary["heal"] = {
         "healed": heal.get("healed", 0),
         "unresolved": heal.get("unresolved", 0),
     }
 
-    # ------------------------------------------------------------------ #
     # Step 4c: outlier hold (report only — does not gate the pass).
-    # ------------------------------------------------------------------ #
     outliers = flag_price_outliers(eng, source=SOURCE)
     summary["outliers"] = {"nFlagged": outliers.get("n_flagged", 0)}
 
-    # ------------------------------------------------------------------ #
     # Step 4d: gap report (report only — never raises for gap findings).
-    # ------------------------------------------------------------------ #
     gaps = gap_report(eng, source=SOURCE)
     summary["gaps"] = {
         "nInfo": gaps.get("n_info", 0),

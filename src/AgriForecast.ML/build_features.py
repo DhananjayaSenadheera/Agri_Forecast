@@ -1,25 +1,17 @@
-"""Feature engineering entry point — builds the CropFeatureDaily feature store.
+"""Feature engineering entry point: builds the CropFeatureDaily feature store.
 
-Pipeline: load raw (prices/crops/weather) -> leakage-safe feature build ->
-validate -> persist (idempotent full rebuild).
+Pipeline: load raw prices, crops and weather -> leakage-safe feature build -> validate ->
+persist (an idempotent full rebuild).
 
-Every run also writes a durable breadcrumb to the admin Ingestion runs log:
-one ``IngestionRuns`` row, Source="FEATURE_BUILD" (see
-``agriforecast_ml.feature_run_log``) — this was the one pipeline step with no
-row in that log. Running is inserted before the build starts; the same row
-is finalized Succeeded (with RowsInserted/DistinctCrops/coverage) or Failed
-(with a capped ErrorSummary) at the end. The audit write is FAIL-OPEN at
-EVERY step, including the coverage/crop-count metrics derivation that runs
-AFTER ``store.write_features`` has already succeeded (``_start_audit_run`` /
-``_finish_audit_run_*`` / the metrics try/except in ``main``): a DB hiccup
-while writing the breadcrumb, or a bug computing CoveredFromDate/CoveredToDate/
-DistinctCrops from the built frame, is logged to stderr and swallowed — a
-build that actually succeeded can never be mis-recorded as Failed (or exit
-non-zero) because of a bookkeeping problem. A genuine build exception (raised
-before ``store.write_features`` returns) still re-raises after the failure
-row is (best-effort) recorded, so `docker run ... python build_features.py`
-(run-daily.sh step 6) keeps failing loudly on a real problem with zero
-orchestration changes needed.
+Every run also writes one IngestionRuns row with Source='FEATURE_BUILD' to the admin
+Ingestion runs log: Running before the build starts, then the same row finalised as
+Succeeded (with row counts and coverage) or Failed (with a capped ErrorSummary).
+
+That audit write is FAIL-OPEN at every step, including the metrics derivation that runs
+after the features are already stored: a DB hiccup, or a bug computing the coverage
+numbers, is logged to stderr and swallowed, so a build that really succeeded can never be
+recorded as Failed or exit non-zero over bookkeeping. A genuine build exception still
+re-raises after the failure row is recorded, so the daily run keeps failing loudly.
 """
 from __future__ import annotations
 
@@ -67,13 +59,11 @@ def _finish_audit_run_failed(engine, run_id, exc: Exception) -> None:
 
 
 def _report_forecastable_profiles(crops) -> None:
-    """R2 Step 5.3: the exclusion predicate is now IsVerified-STRICT — a crop is
-    forecastable ONLY IF its profile is IsVerified=1 AND has a usable
-    GrowthPeriodDays (applied in features.build_crop_features via
-    load.resolve_forecast_gp). This is no longer a WARN-through: unverified
-    profiles are a hard skip. Print the forecastable-crop count for visibility so
-    a build that produced ZERO trainable crops (e.g. before the DOA-verified
-    values migration is applied) is obvious in the log.
+    """Print how many crops are forecastable, for visibility in the build log.
+
+    A crop is forecastable only if its agronomy profile is verified AND has a usable
+    GrowthPeriodDays. Unverified profiles are a hard skip, so a build that produced zero
+    trainable crops should be obvious in the log.
     """
     if not {"IsVerified", "GrowthPeriodDays"}.issubset(crops.columns):
         return
@@ -137,10 +127,9 @@ def main() -> None:
                 covered_from = covered_to = None
                 distinct_crops = 0
         except Exception as exc:  # noqa: BLE001 -- audit bookkeeping must never block the build
-            # The build itself already succeeded (write_features returned above) --
-            # a bug in THIS metrics derivation must not turn an honest success into
-            # a false Failed row / non-zero exit. Record Succeeded without the
-            # metrics we couldn't derive rather than skipping the row entirely.
+            # The build itself already succeeded, so a bug in THIS metrics derivation must not turn
+            # an honest success into a Failed row. Record Succeeded without the metrics we could not
+            # derive, rather than skipping the row entirely.
             print(f"feature_run_log: coverage/crop-count metrics not derived "
                   f"({type(exc).__name__}: {exc}); recording Succeeded without them.",
                   file=sys.stderr)
