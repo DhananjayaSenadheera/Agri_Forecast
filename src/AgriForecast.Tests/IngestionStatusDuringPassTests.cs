@@ -129,9 +129,9 @@ public class IngestionStatusDuringPassTests
     }
 
     private sealed class NoOpWeather : IWeatherIngestionService
-    { public Task IngestAsync(CancellationToken ct) => Task.CompletedTask; }
+    { public Task<IngestionRunStats> IngestAsync(CancellationToken ct) => Task.FromResult(new IngestionRunStats()); }
     private sealed class NoOpEconomic : IEconomicIngestionService
-    { public Task IngestAsync(CancellationToken ct) => Task.CompletedTask; }
+    { public Task<IngestionRunStats> IngestAsync(CancellationToken ct) => Task.FromResult(new IngestionRunStats()); }
     private sealed class NoOpNews : INewsIngestionService
     { public Task<IngestionRunStats> IngestAsync(CancellationToken ct) => Task.FromResult(new IngestionRunStats()); }
     private sealed class NoOpHarti : IHartiBulletinIngestionService
@@ -139,7 +139,7 @@ public class IngestionStatusDuringPassTests
     private sealed class NoOpCbsl : ICbslPriceReportIngestionService
     { public Task<IngestionRunStats> IngestAsync(CancellationToken ct) => Task.FromResult(new IngestionRunStats()); }
     private sealed class NoOpCbslMacro : ICbslMacroIngestionService
-    { public Task IngestAsync(CancellationToken ct) => Task.CompletedTask; }
+    { public Task<IngestionRunStats> IngestAsync(CancellationToken ct) => Task.FromResult(new IngestionRunStats()); }
 
     private static IngestionPassRunner BuildRunner(SharedRunTable table, IMarketPriceIngestionService first)
     {

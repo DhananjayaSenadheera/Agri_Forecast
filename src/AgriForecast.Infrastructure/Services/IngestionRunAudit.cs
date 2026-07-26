@@ -17,8 +17,19 @@ namespace AgriForecast.Infrastructure.Services;
 //
 // A fail-safe source that swallows its own errors stays honest via IngestionRunStats.Outcome:
 // Outcome=Failed or Skipped maps to a Failed or Skipped run row even though the body returned normally.
+//
+// CANCELLATION IS THE SHARP EDGE HERE. The admin stop button cancels the pass's token, so by the time a
+// source unwinds, ct is already tripped. The TERMINAL write must therefore NOT observe ct: passing a
+// cancelled token to the store makes SqlConnection.OpenAsync throw before any I/O, the swallow-and-log
+// below hides it, and the row is stranded at Running/FinishedUtc=NULL. That single stranded row then reads
+// as "running" for the full staleness window — Start answers 409 already_running and Stop answers
+// not_stoppable for two hours after a stop that appeared to work. The Running INSERT may still honour ct
+// (nothing is stranded if it never happens); the terminal transition may not.
 public static class IngestionRunAudit
 {
+    // Recorded on the run row when an admin stop (or host shutdown) cut a source short. Kept distinct from
+    // a generic failure so an operator is not sent hunting for an outage that never happened.
+    public const string CancelledReason = "Cancelled by an admin stop request before the source completed.";
     // BatchId for a pass: read Ingestion:BatchId from config, or generate one if it is absent, empty or not a
     // GUID. Called once per pass by the Worker so every source row shares it.
     public static Guid ResolveBatchId(IConfiguration configuration)
@@ -61,14 +72,24 @@ public static class IngestionRunAudit
             var stats = await body(ct);
             ApplyTerminal(logger, run, source, r => Transition(r, stats));
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // An admin stop, not an outage. Terminal state is still Failed — the source did NOT succeed,
+            // and mapping it to Skipped would be worse than useless: the status roll-up counts Skipped as
+            // part of "succeeded", so a stopped pass would report a green lastRunStatus. Only the reason
+            // differs, so the run row says what really happened.
+            logger.LogInformation("{Source} ingestion was cancelled before it completed (admin stop).", source);
+            ApplyTerminal(logger, run, source, r => r.MarkFailed(DateTime.UtcNow, CancelledReason));
+        }
         catch (Exception ex)
         {
             logger.LogError(ex, "An error occurred during {Source} ingestion", source);
             ApplyTerminal(logger, run, source, r => r.MarkFailed(DateTime.UtcNow, ex));
         }
 
-        // 3. Persist the terminal transition on its own isolated commit.
-        await SaveTerminalAsync(runs, logger, run, source, ct);
+        // 3. Persist the terminal transition on its own isolated commit, with CancellationToken.None — see
+        //    the class comment: honouring a cancelled ct here strands the row at Running forever.
+        await SaveTerminalAsync(runs, logger, run, source);
     }
 
     // Maps the source's returned stats to the terminal transition on the run row.
@@ -114,13 +135,17 @@ public static class IngestionRunAudit
 
     // Persists the terminal transition on its own isolated context. Swallow and log so a failed audit write
     // never breaks the pass.
+    //
+    // Deliberately takes NO CancellationToken: this write must happen precisely in the case where the pass's
+    // token is already cancelled. It is a short, bounded UPDATE of one row, so it is safe to let it run to
+    // completion; a stranded Running row is far more damaging than a few extra milliseconds on shutdown.
     private static async Task SaveTerminalAsync(
-        IIngestionRunRepository runs, ILogger logger, IngestionRun? run, string source, CancellationToken ct)
+        IIngestionRunRepository runs, ILogger logger, IngestionRun? run, string source)
     {
         if (run is null) return;
         try
         {
-            await runs.UpdateAsync(run, ct);
+            await runs.UpdateAsync(run, CancellationToken.None);
         }
         catch (Exception ex)
         {

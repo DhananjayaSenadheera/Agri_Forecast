@@ -59,24 +59,25 @@ public class IngestionPassRunner : IIngestionPassRunner
                 return stats;
             }),
 
-            // WEATHER (status-only — signature unchanged, so the run row carries null counts).
+            // WEATHER. Fail-safe like NEWS: it swallows a provider outage, so it reports its own outcome
+            // and a swallowed fetch failure lands as a Failed row rather than a green one.
             (IngestionSources.Weather, async innerCt =>
             {
                 var weather = scope.ServiceProvider.GetRequiredService<IWeatherIngestionService>();
                 _logger.LogInformation("Weather ingestion started");
-                await weather.IngestAsync(innerCt);
+                var stats = await weather.IngestAsync(innerCt);
                 _logger.LogInformation("Weather ingestion finished");
-                return (IngestionRunStats?)null;
+                return (IngestionRunStats?)stats;
             }),
 
-            // ECONOMIC (status-only).
+            // ECONOMIC. Same shape: a provider that returns no FX rate is a Failed row, not a green one.
             (IngestionSources.Economic, async innerCt =>
             {
                 var economic = scope.ServiceProvider.GetRequiredService<IEconomicIngestionService>();
                 _logger.LogInformation("Economic ingestion started");
-                await economic.IngestAsync(innerCt);
+                var stats = await economic.IngestAsync(innerCt);
                 _logger.LogInformation("Economic ingestion finished");
-                return (IngestionRunStats?)null;
+                return (IngestionRunStats?)stats;
             }),
 
             // NEWS. The service is fail-safe (it does not throw on a transport or HTTP error) so it reports
@@ -116,14 +117,14 @@ public class IngestionPassRunner : IIngestionPassRunner
             }),
 
             // CBSL macro (CCPI/MEI vintage) ingestion, feature-flagged off by default: a Disabled gating
-            // watermark is a deliberate no-op, not a source failure. Status-only run row.
+            // watermark is a deliberate no-op reported as Skipped, not a source failure.
             (CbslMacroIngestionService.SourceKey, async innerCt =>
             {
                 var cbslMacro = scope.ServiceProvider.GetRequiredService<ICbslMacroIngestionService>();
                 _logger.LogInformation("CBSL macro ingestion started");
-                await cbslMacro.IngestAsync(innerCt);
+                var stats = await cbslMacro.IngestAsync(innerCt);
                 _logger.LogInformation("CBSL macro ingestion finished");
-                return (IngestionRunStats?)null;
+                return (IngestionRunStats?)stats;
             })
         };
 

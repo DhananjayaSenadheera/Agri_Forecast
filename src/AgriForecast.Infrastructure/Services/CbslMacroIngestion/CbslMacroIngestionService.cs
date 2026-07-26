@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using AgriForecast.Application.common;
 using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
 using Microsoft.Extensions.Configuration;
@@ -66,7 +67,7 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
         _logger = logger;
     }
 
-    public async Task IngestAsync(CancellationToken ct)
+    public async Task<IngestionRunStats> IngestAsync(CancellationToken ct)
     {
         var enabled = _configuration.GetValue<bool>(EnabledConfigKey);
 
@@ -86,7 +87,8 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
             _logger.LogInformation(
                 "CBSL macro ingestion: DISABLED (feature flag {Flag} is off) — skipping. {Reason}",
                 EnabledConfigKey, DisabledReason);
-            return;
+            // A deliberate, documented no-op — Skipped, explicitly not a source failure.
+            return Skipped();
         }
 
         // Enabled path. If ops explicitly Disabled the gating watermark out of band, honour that.
@@ -96,7 +98,7 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
             _logger.LogInformation(
                 "CBSL macro ingestion: gating watermark is DISABLED ({Reason}) — skipping (not a failure).",
                 watermark.LastMessage ?? "no reason recorded");
-            return;
+            return Skipped();
         }
 
         // Fail loud on a missing admin key: sending no header would surface as a confusing 401.
@@ -124,13 +126,20 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
 
             resp = await _httpClient.SendAsync(request, ct);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // An admin stop, not an outage — let the audit wrapper record the distinct cancelled reason.
+            throw;
+        }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
+            const string reason = "Transport failure calling /admin/ingest-cbsl-macro.";
             _logger.LogWarning(ex,
                 "CBSL macro ingestion: ML /admin/ingest-cbsl-macro call failed (service down or timed out).");
-            watermark.RecordFailure("Transport failure calling /admin/ingest-cbsl-macro.");
+            watermark.RecordFailure(reason);
             await _watermarks.SaveChangesAsync(ct);
-            return;
+            // THE false-green path: the watermark already went red here, but the run row went green.
+            return Failed(reason);
         }
 
         using (resp)
@@ -141,9 +150,10 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
                 _logger.LogWarning(
                     "CBSL macro ingestion: ML /admin/ingest-cbsl-macro returned {StatusCode}. Body: {Body}",
                     (int)resp.StatusCode, body);
-                watermark.RecordFailure($"ML returned {(int)resp.StatusCode}.");
+                var statusReason = $"ML returned {(int)resp.StatusCode}.";
+                watermark.RecordFailure(statusReason);
                 await _watermarks.SaveChangesAsync(ct);
-                return;
+                return Failed(statusReason);
             }
 
             IngestCbslMacroResponse? result;
@@ -154,9 +164,10 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
             catch (JsonException ex)
             {
                 _logger.LogWarning(ex, "CBSL macro ingestion: could not parse /admin/ingest-cbsl-macro response.");
-                watermark.RecordFailure("Unparseable /admin/ingest-cbsl-macro response.");
+                const string parseReason = "Unparseable /admin/ingest-cbsl-macro response.";
+                watermark.RecordFailure(parseReason);
                 await _watermarks.SaveChangesAsync(ct);
-                return;
+                return Failed(parseReason);
             }
 
             var coverage = result?.PerSeriesCoverage ?? new Dictionary<string, int>();
@@ -186,8 +197,20 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
                 successUtc,
                 message: $"inserted={result?.RowsInserted ?? 0}, updated={result?.RowsUpdated ?? 0}, series={coverage.Count}");
             await _watermarks.SaveChangesAsync(ct);
+
+            // A confirmed pass, including the common zero-new-rows case: the parser ran and reported.
+            return new IngestionRunStats(
+                RowsFetched: result?.ArtifactsFetched ?? 0,
+                RowsInserted: result?.RowsInserted ?? 0,
+                RowsSkipped: result?.RowsSkippedInvalid ?? 0);
         }
     }
+
+    private static IngestionRunStats Skipped() =>
+        new(Outcome: IngestionRunOutcome.Skipped);
+
+    private static IngestionRunStats Failed(string reason) =>
+        new(Outcome: IngestionRunOutcome.Failed, FailureReason: reason);
 
     private static async Task<string> SafeReadBodyAsync(HttpResponseMessage resp, CancellationToken ct)
     {

@@ -53,19 +53,19 @@ public class IngestionPassRunnerTests
 
     private sealed class StubWeather(Recorder r) : IWeatherIngestionService
     {
-        public Task IngestAsync(CancellationToken ct)
+        public Task<IngestionRunStats> IngestAsync(CancellationToken ct)
         {
             r.Note(IngestionSources.Weather, ct);
-            return Task.CompletedTask;
+            return Task.FromResult(new IngestionRunStats());
         }
     }
 
     private sealed class StubEconomic(Recorder r) : IEconomicIngestionService
     {
-        public Task IngestAsync(CancellationToken ct)
+        public Task<IngestionRunStats> IngestAsync(CancellationToken ct)
         {
             r.Note(IngestionSources.Economic, ct);
-            return Task.CompletedTask;
+            return Task.FromResult(new IngestionRunStats());
         }
     }
 
@@ -100,10 +100,10 @@ public class IngestionPassRunnerTests
 
     private sealed class StubCbslMacro(Recorder r) : ICbslMacroIngestionService
     {
-        public Task IngestAsync(CancellationToken ct)
+        public Task<IngestionRunStats> IngestAsync(CancellationToken ct)
         {
             r.Note(IngestionSources.CbslMacro, ct);
-            return Task.CompletedTask;
+            return Task.FromResult(new IngestionRunStats());
         }
     }
 

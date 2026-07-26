@@ -14,6 +14,10 @@ namespace AgriForecast.Application.Services;
 // The implementation is a SQL Server session-scoped application lock, so the database — the one thing
 // every host shares — arbitrates. Acquisition NEVER waits (timeout 0): a held lock means "already running
 // somewhere", which the caller reports immediately rather than queueing a second pass behind the first.
+//
+// BOTH pass-running hosts must acquire it or it guards nothing: the API's start handler (refuses with
+// 409 already_running) and the Ingestion Worker (logs and SKIPS that scheduled pass). Adding a third
+// caller of IIngestionPassRunner without a lease silently re-opens concurrent passes.
 public interface IIngestionPassLock
 {
     // Attempts to take the pass lock. Returns the lease on success, or null when it is already held

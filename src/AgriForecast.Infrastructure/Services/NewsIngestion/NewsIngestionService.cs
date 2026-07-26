@@ -73,6 +73,14 @@ public class NewsIngestionService : INewsIngestionService
 
             resp = await _httpClient.SendAsync(request, ct);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // An admin stop, NOT a timeout. HttpClient signals both as TaskCanceledException, so without
+            // this filter a deliberate stop would be recorded as "service down or timed out" and send an
+            // operator hunting for an ML outage that never happened. Rethrow so the audit wrapper applies
+            // its distinct cancelled reason.
+            throw;
+        }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
             // Covers the service being down, DNS/connection refusal, and the client timeout. All of these

@@ -10,17 +10,20 @@ public class Worker : BackgroundService
 {
     private readonly ILogger<Worker> _logger;
     private readonly IIngestionPassRunner _passRunner;
+    private readonly IIngestionPassLock _passLock;
     private readonly IConfiguration _configuration;
     private readonly IHostApplicationLifetime _appLifetime;
 
     public Worker(
         ILogger<Worker> logger,
         IIngestionPassRunner passRunner,
+        IIngestionPassLock passLock,
         IConfiguration configuration,
         IHostApplicationLifetime appLifetime)
     {
         _logger = logger;
         _passRunner = passRunner;
+        _passLock = passLock;
         _configuration = configuration;
         _appLifetime = appLifetime;
     }
@@ -52,9 +55,28 @@ public class Worker : BackgroundService
     // Every source's IngestionRun row shares it so the pass can be reconstructed. Resolving it here rather
     // than inside the runner keeps the runner free of configuration: the API mints a fresh GUID per pass,
     // while this host lets an orchestrator pin one.
-    private Task RunPassAsync(CancellationToken stoppingToken)
+    //
+    // The pass is taken under the SAME cross-process application lock the API's admin start button uses.
+    // Without this, the lock guarded only one of its two callers and the 21:00 job could run straight over
+    // an admin-started pass — double-fetching every source and interleaving watermark writes.
+    private async Task RunPassAsync(CancellationToken stoppingToken)
     {
         var batchId = IngestionRunAudit.ResolveBatchId(_configuration);
-        return _passRunner.RunPassAsync(batchId, stoppingToken);
+
+        // SKIP, never queue or retry. An admin pass is already covering today's data, and the DEC source
+        // fetches full history each pass, so anything this run would have picked up lands on the next one.
+        // The CronJob's startingDeadlineSeconds already handles genuine missed schedules; blocking here
+        // would just park a second pass behind the first and run it against a stale batchId.
+        await using var lease = await _passLock.TryAcquireAsync(stoppingToken);
+        if (lease is null)
+        {
+            _logger.LogWarning(
+                "Ingestion pass {BatchId} SKIPPED: another host already holds the ingestion pass lock "
+                + "(an admin-started pass on the API, or an overlapping scheduled run). No pass was run.",
+                batchId);
+            return;
+        }
+
+        await _passRunner.RunPassAsync(batchId, stoppingToken);
     }
 }

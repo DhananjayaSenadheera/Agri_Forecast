@@ -37,6 +37,11 @@
     <ProjectReference Include="..\AgriForecast.Domain\AgriForecast.Domain.csproj" />
     <ProjectReference Include="..\AgriForecast.Infrastructure\AgriForecast.Infrastructure.csproj" />
     <ProjectReference Include="..\AgriForecast.API\AgriForecast.API.csproj" />
+    <!-- The Ingestion Worker is referenced so the SCHEDULED path can be tested directly. The worker must
+         take the same cross-process application lock the admin start button takes, or the lock guards only
+         one of its two callers; that invariant is only worth anything if it is asserted on the real
+         Worker rather than on a stand-in. -->
+    <ProjectReference Include="..\AgriForecast.Ingestion\AgriForecast.Ingestion.csproj" />
   </ItemGroup>
 
 </Project>

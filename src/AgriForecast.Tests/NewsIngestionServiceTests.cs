@@ -213,6 +213,43 @@ public class NewsIngestionServiceTests
         handler.Calls.Should().Be(0, "the key is checked before any request leaves the process");
     }
 
+    // An admin stop is NOT a timeout. HttpClient signals both as TaskCanceledException, so without an
+    // explicit ct check the stop would be filed as "service down or timed out" and send an operator
+    // hunting an ML outage that never happened. Cancellation must propagate so the audit wrapper applies
+    // its distinct "cancelled by an admin stop" reason.
+    [Fact]
+    public async Task AdminStopDuringTheCall_PropagatesCancellation_RatherThanBlamingTheMlService()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var svc = Service(new ThrowingHttpMessageHandler(new TaskCanceledException("stopped")));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => svc.IngestAsync(cts.Token));
+    }
+
+    [Fact]
+    public async Task AdminStopDuringTheCall_LandsTheRowAsCancelled_NotAsAnOutage()
+    {
+        var runs = new FakeIngestionRunRepository();
+        using var cts = new CancellationTokenSource();
+        var svc = Service(new ThrowingHttpMessageHandler(new TaskCanceledException("stopped")));
+
+        await IngestionRunAudit.RunTrackedAsync(
+            runs, NullLogger.Instance, Guid.NewGuid(), "NEWS",
+            async ct =>
+            {
+                cts.Cancel();
+                return (IngestionRunStats?)await svc.IngestAsync(ct);
+            },
+            cts.Token);
+
+        var row = runs.Single;
+        row.Status.Should().Be(IngestionRunStatus.Failed);
+        row.ErrorSummary.Should().Be(IngestionRunAudit.CancelledReason,
+            "a deliberate stop must not be recorded as an ML service outage");
+        row.FinishedUtc.Should().NotBeNull("the terminal write must survive the cancelled token");
+    }
+
     [Fact]
     public async Task SuccessfulPass_MarksTheRunRowSucceeded_WithCounts()
     {

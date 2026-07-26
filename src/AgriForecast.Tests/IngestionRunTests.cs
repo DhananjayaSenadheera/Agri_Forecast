@@ -73,7 +73,9 @@ public class IngestionRunTests
     [Fact]
     public void MarkSucceeded_StatusOnly_LeavesCountsNull()
     {
-        // A status-only source (weather/economic/news) succeeds with no counts — nulls, not zeros.
+        // A status-only source succeeds with no counts — nulls, not zeros. Every source now reports
+        // IngestionRunStats, but counts stay optional: a source with no meaningful count passes them null
+        // rather than fabricating a 0 that reads as "fetched nothing".
         var run = IngestionRun.StartRunning(Batch, "WEATHER", Started);
 
         run.MarkSucceeded(Finished);
