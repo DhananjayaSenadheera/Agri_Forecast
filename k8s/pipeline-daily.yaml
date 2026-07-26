@@ -1,0 +1,170 @@
+# Daily data pipeline — the Kubernetes port of run-daily.sh (launchd, 16:30 UK
+# = 21:00 Colombo). Six sequential steps with the SAME ordering and the SAME
+# verify gate:
+#
+#   [1] ingestion (market+weather, .NET worker, Ingestion__RunOnce=true baked)
+#   [2] mirror_dec_prices.py   (DAMBULLA_DEC -> PriceObservations)
+#   [3] verify_ingestion.py    <- THE GATE: non-zero exit fails the pod here,
+#                                 so invalid data NEVER reaches news/sentiment/
+#                                 build_features (same semantics as run-daily's
+#                                 set -e abort)
+#   [4] ingest_news.py
+#   [5] score_news.py
+#   [6] build_features.py      (main container — the pipeline's "payload")
+#
+# Sequencing is expressed as initContainers (k8s runs them strictly in order,
+# each must exit 0 before the next starts) with build_features as the main
+# container. backoffLimit: 0 — a failed step must NOT be blindly re-run
+# (re-ingesting/half-done state needs eyes, and run-daily.sh never retried
+# either).
+#
+# BATCH ID: run-daily.sh threads ONE uuid through ingestion
+# (Ingestion__BatchId) and verify (--batch-id) so IngestionRuns and
+# IngestionVerifications rows join up in the admin runs-log UI. Init
+# containers can't share env vars, so the first init container writes the
+# uuid to an emptyDir volume (/shared/batch_id) and those two steps read it
+# via a small sh -c wrapper. The other steps don't take a batch id — same as
+# the script.
+#
+# SUSPENDED BY DEFAULT (suspend: true) — deliberate. The launchd job is still
+# live; running both would double-ingest. Unsuspend ONLY after one supervised
+# manual run succeeds AND launchd is bootout'd (see k8s/README.md). The
+# generous startingDeadlineSeconds means a machine asleep at 21:00 that wakes
+# within 6h still runs: a late run backfills fine (the DEC fetch returns full
+# history per pass), but a day DEC published while we never ran at all is a
+# day of freshness lost until the next run.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: daily-pipeline
+  namespace: agriforecast
+  labels:
+    app: daily-pipeline
+    app.kubernetes.io/part-of: agriforecast
+spec:
+  schedule: "0 21 * * *"
+  timeZone: "Asia/Colombo"
+  suspend: true # unsuspend only after a supervised run — see header + README
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 21600 # 6h catch-up window for a sleeping machine
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5 # keep failures around for post-mortems
+  jobTemplate:
+    spec:
+      backoffLimit: 0 # a failed step needs eyes, not a blind retry
+      activeDeadlineSeconds: 7200 # hard 2h ceiling on the whole run
+      template:
+        metadata:
+          labels:
+            app: daily-pipeline
+        spec:
+          restartPolicy: Never
+          initContainers:
+            # [0] Generate the single batch id shared by steps 1 and 3.
+            - name: batch-id
+              image: agriforecast-ml:latest
+              imagePullPolicy: IfNotPresent
+              command: ["sh", "-c"]
+              # set -e + non-empty assertion: a silent write failure here
+              # would otherwise thread an EMPTY batch id, which verify treats
+              # as "no batch id" — breaking the IngestionRuns <->
+              # IngestionVerifications join in the admin runs-log without any
+              # visible error.
+              args:
+                - |
+                  set -e
+                  cat /proc/sys/kernel/random/uuid > /shared/batch_id
+                  test -s /shared/batch_id
+                  echo "batch id: $(cat /shared/batch_id)"
+              volumeMounts:
+                - { name: shared, mountPath: /shared }
+            # [1] Market + weather ingestion (.NET worker; exits after one
+            # pass thanks to the baked Ingestion__RunOnce=true, which the
+            # exec below preserves).
+            - name: ingestion
+              image: agriforecast-ingestion:latest
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  export Ingestion__BatchId="$(cat /shared/batch_id)"
+                  exec dotnet AgriForecast.Ingestion.dll
+              env:
+                - name: AGRI_DB_PORT
+                  valueFrom:
+                    secretKeyRef: { name: agri-db, key: AGRI_DB_PORT }
+                - name: AGRI_DB_NAME
+                  valueFrom:
+                    secretKeyRef: { name: agri-db, key: AGRI_DB_NAME }
+                - name: AGRI_DB_USER
+                  valueFrom:
+                    secretKeyRef: { name: agri-db, key: AGRI_DB_USER }
+                - name: AGRI_DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: agri-db, key: AGRI_DB_PASSWORD }
+                # Same string run-daily.sh assembles; host.docker.internal
+                # reaches the host-level sql_server_container (port 1434).
+                - name: ConnectionStrings__DefaultConnection
+                  value: "Server=host.docker.internal,$(AGRI_DB_PORT);Database=$(AGRI_DB_NAME);User Id=$(AGRI_DB_USER);Password=$(AGRI_DB_PASSWORD);Encrypt=True;TrustServerCertificate=True;MultipleActiveResultSets=True;"
+              volumeMounts:
+                - { name: shared, mountPath: /shared, readOnly: true }
+            # [2] Mirror DAMBULLA_DEC MarketPrices -> PriceObservations.
+            - name: mirror-dec
+              image: agriforecast-ml:latest
+              imagePullPolicy: IfNotPresent
+              command: ["python", "mirror_dec_prices.py"]
+              envFrom:
+                - secretRef: { name: agri-db }
+              env:
+                - name: AGRI_DB_HOST
+                  value: host.docker.internal # overrides the secret's local value
+            # [3] THE VERIFY GATE — 14-check battery. FAIL (exit 1) stops the
+            # pod right here: news, sentiment and build_features never run,
+            # exactly like run-daily.sh's set -e abort.
+            - name: verify
+              image: agriforecast-ml:latest
+              imagePullPolicy: IfNotPresent
+              command: ["sh", "-c"]
+              args:
+                - exec python verify_ingestion.py --batch-id "$(cat /shared/batch_id)"
+              envFrom:
+                - secretRef: { name: agri-db }
+              env:
+                - name: AGRI_DB_HOST
+                  value: host.docker.internal
+              volumeMounts:
+                - { name: shared, mountPath: /shared, readOnly: true }
+            # [4] News RSS ingestion (NewsArticles).
+            - name: ingest-news
+              image: agriforecast-ml:latest
+              imagePullPolicy: IfNotPresent
+              command: ["python", "ingest_news.py"]
+              envFrom:
+                - secretRef: { name: agri-db }
+              env:
+                - name: AGRI_DB_HOST
+                  value: host.docker.internal
+            # [5] Score news sentiment (NewsSentimentDaily).
+            - name: score-news
+              image: agriforecast-ml:latest
+              imagePullPolicy: IfNotPresent
+              command: ["python", "score_news.py"]
+              envFrom:
+                - secretRef: { name: agri-db }
+              env:
+                - name: AGRI_DB_HOST
+                  value: host.docker.internal
+          containers:
+            # [6] Rebuild the feature store (CropFeatureDaily).
+            - name: build-features
+              image: agriforecast-ml:latest
+              imagePullPolicy: IfNotPresent
+              command: ["python", "build_features.py"]
+              envFrom:
+                - secretRef: { name: agri-db }
+              env:
+                - name: AGRI_DB_HOST
+                  value: host.docker.internal
+          volumes:
+            - name: shared
+              emptyDir: {}

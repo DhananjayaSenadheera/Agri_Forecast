@@ -1,0 +1,124 @@
+# Forecast API (.NET 9, agriforecast-api:latest — built from
+# src/AgriForecast.API/Dockerfile, context src/).
+#
+# Exposed to the HOST browser/dev-frontend via NodePort 30082 -> 8080.
+# The host-run dev API on :5282 keeps working in parallel (dual-mode); this
+# is an additional, cluster-hosted instance of the same app.
+#
+# SECRETS: nothing here holds a credential. The connection string is
+# ASSEMBLED IN-POD from the agri-db secret via Kubernetes $(VAR) dependent
+# env expansion; Jwt__Key and MlService__AdminApiKey come straight from the
+# agri-jwt / agri-ml-key secrets.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forecast-api
+  namespace: agriforecast
+  labels:
+    app: forecast-api
+    app.kubernetes.io/part-of: agriforecast
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: forecast-api
+  template:
+    metadata:
+      labels:
+        app: forecast-api
+    spec:
+      containers:
+        - name: forecast-api
+          image: agriforecast-api:latest
+          imagePullPolicy: IfNotPresent # local image, no registry
+          ports:
+            - containerPort: 8080
+          env:
+            # --- DB credentials (referenced by the $(VAR) expansion below;
+            #     these four must be declared BEFORE the connection string) ---
+            - name: AGRI_DB_PORT
+              valueFrom:
+                secretKeyRef: { name: agri-db, key: AGRI_DB_PORT }
+            - name: AGRI_DB_NAME
+              valueFrom:
+                secretKeyRef: { name: agri-db, key: AGRI_DB_NAME }
+            - name: AGRI_DB_USER
+              valueFrom:
+                secretKeyRef: { name: agri-db, key: AGRI_DB_USER }
+            - name: AGRI_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: agri-db, key: AGRI_DB_PASSWORD }
+            # SQL Server runs OUTSIDE the cluster as the host container
+            # sql_server_container on host port 1434 — reached via
+            # host.docker.internal. TrustServerCertificate=True is the
+            # local-Docker-SQL exception documented in appsettings.json (F-11);
+            # a hosted deployment must supply its own connection string.
+            - name: ConnectionStrings__DefaultConnection
+              value: "Server=host.docker.internal,$(AGRI_DB_PORT);Database=$(AGRI_DB_NAME);User Id=$(AGRI_DB_USER);Password=$(AGRI_DB_PASSWORD);Encrypt=True;TrustServerCertificate=True;MultipleActiveResultSets=True;"
+            # --- JWT + ML service ---
+            - name: Jwt__Key
+              valueFrom:
+                secretKeyRef: { name: agri-jwt, key: JWT_KEY }
+            - name: MlService__BaseUrl
+              value: "http://ml-serving:8077" # in-cluster ClusterIP service
+            - name: MlService__AdminApiKey
+              valueFrom:
+                secretKeyRef: { name: agri-ml-key, key: ML_ADMIN_API_KEY }
+            # --- CORS: browser origins allowed to call this instance ---
+            # 30080 = planned NodePort for the cluster-hosted UI (adjust when
+            # the UI lands); 4173 = vite preview; 5173 = vite dev server.
+            - name: Cors__AllowedOrigins__0
+              value: "http://localhost:30080"
+            - name: Cors__AllowedOrigins__1
+              value: "http://localhost:4173"
+            - name: Cors__AllowedOrigins__2
+              value: "http://localhost:5173"
+            # Label echoed by GET /api/admin/ingestion/status so the admin UI
+            # can tell WHICH process runs ingestion (no secret, cosmetic).
+            - name: Ingestion__ServiceAddress
+              value: "k8s cronjob/daily-pipeline (agriforecast)"
+          # KNOWN LIMITATION (F-08 corollary): through Docker Desktop's
+          # NodePort forwarding every host client presents the same source
+          # IP, so the per-IP rate limiter effectively shares ONE bucket
+          # (100 req/min global, 10 req/min auth) across all local callers.
+          # Acceptable for a single-user dev machine; a hosted deployment
+          # must set ForwardedHeaders__KnownProxies (see appsettings.json)
+          # so the real client IP partitions the limiter.
+          # /health is anonymous AND exempt from rate limiting precisely so
+          # orchestrator probes can't 429-flap the pod (F-08) — no code change
+          # needed here.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: forecast-api
+  namespace: agriforecast
+  labels:
+    app: forecast-api
+    app.kubernetes.io/part-of: agriforecast
+spec:
+  # NodePort so the host browser and the dev frontend can reach the cluster
+  # API at http://localhost:30082 (Docker Desktop maps node ports to
+  # localhost). The ML service deliberately has NO such exposure.
+  type: NodePort
+  selector:
+    app: forecast-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30082
