@@ -29,15 +29,18 @@ public class PipelineHealth_GetDto
     // 6h catch-up window still counts as this night's run.
     public DateTime? StartedUtc { get; set; }
 
-    // "Pass" | "Warn" | "Fail", or null when no verification ran for this night. "Warn" does not block
+    // "Pass" | "Warn" | "Fail" exactly as IngestionVerifications persists them, or null when no
+    // verification ran for this night. "Warn" does not block
     // the pipeline, so it never changes state on its own — it is surfaced for the banner to show.
     public string? VerificationStatus { get; set; }
 
-    // "succeeded" | "failed" | "running" | "skipped", or null when no FEATURE_BUILD row exists in the
-    // window. Reported separately from state because the feature build writes its OWN BatchId (it runs
-    // standalone after verification) and can therefore be re-run by hand after an adjudicated gate
-    // failure. In that case state stays "gate_blocked" and this reads "succeeded" — both facts are true
-    // and the banner shows both.
+    // "succeeded" | "failed" | "running" | "skipped" — the same lowercase words the ingestion runs log
+    // uses — or null when no FEATURE_BUILD row exists for this night. Reported separately from state
+    // because the feature build writes its OWN BatchId (it runs standalone after verification) and can
+    // therefore be re-run by hand hours later, after an adjudicated gate failure. In that case state
+    // stays "gate_blocked" and this reads "succeeded" — both facts are true and the banner shows both.
+    // Scoped to the whole night (fire time to the next fire time), NOT to the 6h catch-up window, which
+    // bounds only when the run may START.
     public string? FeatureBuildStatus { get; set; }
 
     // When this snapshot was taken, so the banner can show staleness of its own poll.

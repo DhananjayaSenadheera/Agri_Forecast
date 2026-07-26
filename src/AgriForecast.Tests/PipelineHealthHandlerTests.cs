@@ -57,12 +57,12 @@ public class PipelineHealthHandlerTests
         }
 
         public Task<IReadOnlyList<PipelineRunRow>> GetRunsForBatchesStartedBetweenAsync(
-            DateTime fromUtc, DateTime toUtc, CancellationToken ct = default)
+            DateTime fromUtc, DateTime toUtcExclusive, CancellationToken ct = default)
         {
             ct.ThrowIfCancellationRequested();
 
             var batchIds = _runs
-                .Where(r => r.StartedUtc >= fromUtc && r.StartedUtc <= toUtc)
+                .Where(r => r.StartedUtc >= fromUtc && r.StartedUtc < toUtcExclusive)
                 .Select(r => r.BatchId)
                 .ToHashSet();
 
@@ -352,19 +352,24 @@ public class PipelineHealthHandlerTests
         health.FeatureBuildStatus.Should().BeNull("the gate stops the pod before build_features runs");
     }
 
-    // The adjudicated-resume shape: an admin looked at the failed checks, decided the data was usable
-    // and re-ran the feature build by hand. That build writes its OWN batch id, so it cannot retro-fit
-    // the night into green — the gate did fail, and the banner shows both facts.
-    [Fact]
-    public async Task GateBlocked_EvenAfterAHandRunFeatureBuildSucceeds()
+    // The adjudicated-resume shape, taken from the live 2026-07-26 night: the gate failed at 21:04
+    // Colombo, and a human who had looked at the failed checks re-ran the feature build by hand at
+    // 03:55 — nearly SEVEN hours later, well outside the 6h catch-up window. That build writes its OWN
+    // batch id, so it cannot retro-fit the night into green; the gate did fail. But it must still be
+    // reported: scoping the feature build to the catch-up window (the first cut of this handler) made
+    // the live manual build read as "never ran", which is the opposite of the truth.
+    [Theory]
+    [InlineData(1)]  // finished inside the catch-up window
+    [InlineData(7)]  // hand-run hours after it closed — the live shape
+    public async Task GateBlocked_EvenAfterAHandRunFeatureBuildSucceeds(int hoursAfterFire)
     {
         var batchId = Guid.NewGuid();
         var store = new FakeStore()
             .Add(CleanBatch(batchId, FireUtc.AddMinutes(1)))
-            .Add(FeatureBuild(FireUtc.AddHours(1), IngestionRunStatus.Succeeded))
+            .Add(FeatureBuild(FireUtc.AddHours(hoursAfterFire), IngestionRunStatus.Succeeded))
             .Add(Verification(batchId, IngestionVerificationStatus.Fail, FireUtc.AddMinutes(20)));
 
-        var health = await HealthAsync(store, FireUtc.AddHours(2));
+        var health = await HealthAsync(store, FireUtc.AddHours(hoursAfterFire + 1));
 
         health.State.Should().Be(PipelineHealthStates.GateBlocked);
         health.VerificationStatus.Should().Be("Fail");
@@ -603,14 +608,32 @@ public class PipelineHealthHandlerTests
     {
         var batchId = Guid.NewGuid();
         var tooLate = FireUtc.AddHours(7);
-        var store = new FakeStore()
-            .Add(CleanBatch(batchId, tooLate))
-            .Add(FeatureBuild(tooLate.AddMinutes(25), IngestionRunStatus.Succeeded));
+        var store = new FakeStore().Add(CleanBatch(batchId, tooLate));
 
         var health = await HealthAsync(store, FireUtc.AddHours(8));
 
         health.State.Should().Be(PipelineHealthStates.Missing);
         health.ExpectedForDate.Should().Be(ExpectedNight);
+    }
+
+    // The catch-up window bounds when the run may START, not when it may finish. A run that starts at
+    // 05:30 into the window still has ingestion, verify, news and sentiment to get through before
+    // build_features, so the build itself lands after the deadline. Requiring the build inside the
+    // catch-up window turned this legitimately green night into a "failed" false alarm.
+    [Fact]
+    public async Task Green_WhenALateCatchUpRunReachesItsFeatureBuildAfterTheWindowCloses()
+    {
+        var batchId = Guid.NewGuid();
+        var lateStart = FireUtc.AddHours(5.5);
+        var store = new FakeStore()
+            .Add(CleanBatch(batchId, lateStart))
+            .Add(FeatureBuild(FireUtc.AddHours(6.5), IngestionRunStatus.Succeeded))
+            .Add(Verification(batchId, IngestionVerificationStatus.Pass, lateStart.AddMinutes(20)));
+
+        var health = await HealthAsync(store, FireUtc.AddHours(7));
+
+        health.State.Should().Be(PipelineHealthStates.Green);
+        health.FeatureBuildStatus.Should().Be("succeeded");
     }
 
     // Two batches in one window (an admin pressed Run now after the scheduled pass) — the latest wins.

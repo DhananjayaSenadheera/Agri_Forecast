@@ -12,14 +12,14 @@ public class PipelineHealthReadStore : IPipelineHealthReadStore
 
     public PipelineHealthReadStore(AgriForecastDbContext db) => _db = db;
 
-    // Two queries on purpose. The first finds which batches touched the window; the second pulls every
+    // Two queries on purpose. The first finds which batches touched the range; the second pulls every
     // row of those batches, including rows that started before it. Without the second pass a batch that
-    // began before the fire time and spilled into the window would look like it started inside it.
+    // began before the fire time and spilled into the range would look like it started inside it.
     public async Task<IReadOnlyList<PipelineRunRow>> GetRunsForBatchesStartedBetweenAsync(
-        DateTime fromUtc, DateTime toUtc, CancellationToken ct = default)
+        DateTime fromUtc, DateTime toUtcExclusive, CancellationToken ct = default)
     {
         var batchIds = await _db.IngestionRuns.AsNoTracking()
-            .Where(r => r.StartedUtc >= fromUtc && r.StartedUtc <= toUtc)
+            .Where(r => r.StartedUtc >= fromUtc && r.StartedUtc < toUtcExclusive)
             .Select(r => r.BatchId)
             .Distinct()
             .ToListAsync(ct);

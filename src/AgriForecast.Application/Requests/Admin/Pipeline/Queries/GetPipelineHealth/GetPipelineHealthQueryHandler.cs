@@ -52,12 +52,22 @@ public class GetPipelineHealthQueryHandler
         GetPipelineHealthQuery request, CancellationToken cancellationToken)
     {
         var nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
-        var fire = ResolveMostRecentFire(nowUtc, _schedule.ScheduleTimeZone, _schedule.LocalFireTime);
+        var tz = _schedule.ScheduleTimeZone;
+        var fire = ResolveMostRecentFire(nowUtc, tz, _schedule.LocalFireTime);
 
+        // Two windows, deliberately different sizes.
+        // The BATCH must have STARTED inside the catch-up window, because that is the k8s rule for what
+        // counts as this night's scheduled run.
+        // The FEATURE BUILD is scoped to the whole night, up to the next fire time: it is the last step,
+        // so a late catch-up run can legitimately reach it after the 6h deadline has passed, and a
+        // hand-run rebuild after an adjudicated gate failure can land hours later still. Scoping it to
+        // the catch-up window instead made both invisible — a real miss, caught against live data where
+        // a 22:25Z manual build read as "no feature build" on a 15:32Z run.
         var windowStart = fire.Utc;
         var windowEnd = fire.Utc.AddMinutes(_schedule.CatchUpWindowMinutes);
+        var nightEnd = ResolveNextFire(fire, tz, _schedule.LocalFireTime);
 
-        var rows = await _store.GetRunsForBatchesStartedBetweenAsync(windowStart, windowEnd, cancellationToken);
+        var rows = await _store.GetRunsForBatchesStartedBetweenAsync(windowStart, nightEnd, cancellationToken);
 
         // FEATURE_BUILD is not an ingestion source and carries its own solo BatchId, so it can never be
         // the batch we pick — but it IS the signal rule 5 turns on, so it is read separately.
@@ -73,11 +83,11 @@ public class GetPipelineHealthQueryHandler
             .ThenByDescending(b => b.BatchId)
             .FirstOrDefault();
 
-        // Every feature-build attempt inside the window, newest first. More than one means a hand-run
-        // rebuild after an adjudicated gate failure; the newest is the current truth.
+        // Every feature-build attempt this night, newest first. More than one means a rebuild after a
+        // failed or adjudicated first attempt; the newest is the current truth.
         var featureBuildRows = rows
             .Where(r => excluded.Contains(r.Source)
-                        && r.StartedUtc >= windowStart && r.StartedUtc <= windowEnd)
+                        && r.StartedUtc >= windowStart && r.StartedUtc < nightEnd)
             .OrderByDescending(r => r.StartedUtc)
             .ToList();
 
@@ -161,6 +171,14 @@ public class GetPipelineHealthQueryHandler
 
         return (ToUtcInstant(localDate.ToDateTime(localFireTime), tz), localDate);
     }
+
+    // When this night ends: the next scheduled fire. Always in the future for the night we report on, so
+    // it never actually clips anything today — it is here so the "this night's feature build" rule stays
+    // correct by construction rather than by relying on the handler only ever looking at the newest
+    // night. Recomputed through the zone rather than adding 24h, for the same DST reason as above.
+    private static DateTime ResolveNextFire(
+        (DateTime Utc, DateOnly LocalDate) fire, TimeZoneInfo tz, TimeOnly localFireTime) =>
+        ToUtcInstant(fire.LocalDate.AddDays(1).ToDateTime(localFireTime), tz);
 
     // Wall clock -> UTC, without throwing on a DST transition. Sri Lanka has no DST so neither branch
     // fires today, but the zone is configurable and a health endpoint that 500s on a clock change would
