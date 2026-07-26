@@ -47,21 +47,22 @@ public class ApiHostedIngestionPasses : IApiHostedIngestionPasses
             return false;
         }
 
-        batchId = handle.BatchId;
-
         // Cancel OUTSIDE the monitor: continuations registered on the token run inline on Cancel(), and
         // running them while holding the gate invites a deadlock against Begin/Dispose.
         // A pass that finished between the read and here has already disposed its CTS; that race is a
-        // no-op stop, not an error, so the ObjectDisposedException is swallowed.
+        // no-op stop, not an error, so the ObjectDisposedException is swallowed — and batchId stays empty,
+        // because reporting an id for a stop that did not happen would put a false row in the audit trail.
         try
         {
             handle.Cancel();
         }
         catch (ObjectDisposedException)
         {
+            batchId = Guid.Empty;
             return false;
         }
 
+        batchId = handle.BatchId;
         return true;
     }
 

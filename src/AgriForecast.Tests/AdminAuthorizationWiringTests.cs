@@ -89,7 +89,7 @@ public class AdminAuthorizationWiringTests
         IsAdminLocked(controller, method).Should().BeFalse();
     }
 
-    // AdminIngestionController: both reads are Admin-only. Unlike the other read endpoints they surface
+    // AdminIngestionController: the two reads are Admin-only. Unlike the other read endpoints they surface
     // operational internals, so prove [Authorize(Roles = Admin)] is actually wired on each action.
     [Theory]
     [InlineData(nameof(AdminIngestionController.GetStatus))]
@@ -98,6 +98,18 @@ public class AdminAuthorizationWiringTests
     {
         IsAdminLocked(typeof(AdminIngestionController), method).Should().BeTrue(
             $"AdminIngestionController.{method} exposes ingestion internals and must be Admin-locked");
+        IsAnonymous(typeof(AdminIngestionController), method).Should().BeFalse();
+    }
+
+    // The service-control POSTs run (or halt) the entire data pipeline, so they are the highest-privilege
+    // endpoints on the controller. A bare [Authorize] here would make ingestion farmer-triggerable.
+    [Theory]
+    [InlineData(nameof(AdminIngestionController.StartService))]
+    [InlineData(nameof(AdminIngestionController.StopService))]
+    public void IngestionServiceControls_AreAdminOnly(string method)
+    {
+        IsAdminLocked(typeof(AdminIngestionController), method).Should().BeTrue(
+            $"AdminIngestionController.{method} runs the data pipeline and must be Admin-locked");
         IsAnonymous(typeof(AdminIngestionController), method).Should().BeFalse();
     }
 

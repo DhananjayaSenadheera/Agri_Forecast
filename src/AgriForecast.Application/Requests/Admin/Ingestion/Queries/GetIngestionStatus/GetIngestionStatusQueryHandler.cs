@@ -25,11 +25,16 @@ public class GetIngestionStatusQueryHandler
 {
     private readonly IIngestionReadStore _store;
     private readonly IIngestionStatusSettings _settings;
+    private readonly IApiHostedIngestionPasses _hostedPasses;
 
-    public GetIngestionStatusQueryHandler(IIngestionReadStore store, IIngestionStatusSettings settings)
+    public GetIngestionStatusQueryHandler(
+        IIngestionReadStore store,
+        IIngestionStatusSettings settings,
+        IApiHostedIngestionPasses hostedPasses)
     {
         _store = store;
         _settings = settings;
+        _hostedPasses = hostedPasses;
     }
 
     public async Task<Result<IngestionStatus_GetDto>> Handle(
@@ -76,6 +81,10 @@ public class GetIngestionStatusQueryHandler
         {
             State = state,
             ServiceAddress = serviceAddress,
+            // Read from the in-process registry, NOT derived from state: "something is running" and "I can
+            // stop it" are different facts, and conflating them is what would make the Stop button lie
+            // about a pass owned by the scheduled worker.
+            CanStop = _hostedPasses.IsRunning,
             LastRunAtUtc = AsUtc(lastRunAtUtc),
             LastRunStatus = lastRunStatus,
             LastVerification = verification is null
