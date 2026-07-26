@@ -13,11 +13,18 @@
 # (S3/Azure Blob) populated by the training job — swap the volume, nothing
 # else changes.
 #
-# RESOURCES: no metrics-server on this cluster; sized from `docker stats` on
-# the live pod (idle with model loaded: ~307MiB — heaviest of the three
-# Deployments, since this is the one holding the unpickled xgboost model +
-# shap in memory). request/limit give ~1.7x/~5x headroom over that idle
-# baseline for concurrent prediction requests.
+# RESOURCES: sized for PARSE PEAKS, not idle. `docker stats` on the live pod
+# shows ~307MiB idle with the model loaded, but this pod is also where the
+# nightly CBSL/HARTI pdfplumber PDF-parse routes run (serving/app.py's
+# /admin/ingest-* endpoints) -- an OOMKill here doesn't just drop a forecast
+# request, it takes down forecasts AND three ingestion sources at once. A
+# limit sized off idle FastAPI memory undersells that risk: this PR's
+# `build-features` container (plain pandas DB I/O, no PDF parsing) was
+# independently measured at 568MB peak during verification, so pdfplumber's
+# heavier per-page parsing on THIS pod needs real headroom above that, not a
+# limit barely 5x an idle number. 3Gi/1000m is the defensible number on this
+# host (no metrics-server here, so still a documented default, not
+# autoscaler-derived).
 #
 # SECURITY CONTEXT: agriforecast-ml is python:3.12-slim with NO non-root user
 # baked in -- verified empirically (`docker run --rm --entrypoint id
@@ -91,7 +98,7 @@ spec:
             failureThreshold: 3
           resources:
             requests: { memory: "512Mi", cpu: "250m" }
-            limits: { memory: "1536Mi", cpu: "1000m" }
+            limits: { memory: "3Gi", cpu: "1000m" }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }

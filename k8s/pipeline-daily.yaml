@@ -3,15 +3,18 @@
 # verify gate:
 #
 #   [0] wait-for-sql          <- SQL COLD-START GATE (PR #62 declared follow-up):
-#                                 bounded TCP poll of host.docker.internal:1434
-#                                 so a dead/not-yet-up DB fails visibly here
-#                                 (exit 1, ~5 min ceiling) instead of the old
-#                                 failure mode -- ingestion dying immediately
-#                                 against a cold DB with no retry (backoffLimit:
-#                                 0). Does not replace `docker update --restart
-#                                 unless-stopped sql_server_container` (still
-#                                 the fix for the DB not being up at all); this
-#                                 is the bounded wait for "up but not ready yet".
+#                                 bounded TCP poll of
+#                                 host.docker.internal:$AGRI_DB_PORT (the same
+#                                 agri-db secret every other step reads, not
+#                                 hardcoded) so a dead/not-yet-up DB fails
+#                                 visibly here (exit 1, ~5 min ceiling) instead
+#                                 of the old failure mode -- ingestion dying
+#                                 immediately against a cold DB with no retry
+#                                 (backoffLimit: 0). Does not replace `docker
+#                                 update --restart unless-stopped
+#                                 sql_server_container` (still the fix for the
+#                                 DB not being up at all); this is the bounded
+#                                 wait for "up but not ready yet".
 #   [1] ingestion (market+weather, .NET worker, Ingestion__RunOnce=true baked)
 #   [2] mirror_dec_prices.py   (DAMBULLA_DEC -> PriceObservations)
 #   [3] verify_ingestion.py    <- THE GATE: non-zero exit fails the pod here,
@@ -20,16 +23,28 @@
 #                                 set -e abort)
 #   [4] ingest_news.py
 #   [5] score_news.py
-#   [6] build_features.py && qa_features.py  (main container — the payload,
-#       then a QA gate). qa_features.py is DETECTION not PREVENTION: by the
-#       time it runs, build_features.py has already persisted CropFeatureDaily
-#       (if_exists='replace'), so a QA failure means bad features are already
-#       live in the store. Its only job here is to fail the container loudly
-#       (non-zero exit -> Job Failed -> surfaces in the admin Logs page) so a
-#       broken build doesn't pass silently, the way it did before this wire-up
-#       (the harness previously only ran by hand). Known gap: TC5/TC5b's
+#   [6] build_features.py  (main container — the payload). build_features.py
+#       now runs qa_features' check suite ITSELF, after persisting
+#       CropFeatureDaily but before marking the FEATURE_BUILD run row
+#       Succeeded (see build_features.py's `_run_qa_gate` docstring) -- NOT a
+#       separate `&& qa_features.py` step in this manifest. A deliberately
+#       FAILED check marks that row Failed and the container exits non-zero
+#       (Job Failed); the Failed row then shows up in the admin ingestion
+#       runs table at /admin/ingestion (unfiltered by default) -- it does
+#       NOT flip that page's status card/banner, which deliberately excludes
+#       Source='FEATURE_BUILD' from state/lastRunStatus by design (see
+#       IngestionSources.ExcludedFromServiceState -- the feature build runs
+#       last every day, so including it there would permanently mask a
+#       failed DAMBULLA_DEC/WEATHER/ECONOMIC/NEWS run). There is also no
+#       separate ingestion-aware "/health" endpoint; that route is a static
+#       liveness ping for k8s probes. A CRASH inside the QA harness itself
+#       (a bug, not a failed check) is fail-open and does not touch the row.
+#       Still DETECTION not PREVENTION: the bad row is already in
+#       CropFeatureDaily by the time the gate runs -- it does not block the
+#       write, only makes it visible on the runs table. Known gap: TC5/TC5b's
 #       leakage check covers 42 of 76 feature columns (missing
-#       festivals/macro/price_obs/market_slugs) -- see qa_features.py header.
+#       festivals/macro/price_obs/market_slugs) -- see qa_features.py's
+#       header.
 #
 # Sequencing is expressed as initContainers (k8s runs them strictly in order,
 # each must exit 0 before the next starts) with build_features as the main
@@ -49,9 +64,10 @@
 # cluster, so not autoscaler-derived) -- see k8s/README.md "Resource sizing"
 # for the measurements and reasoning behind each tier. Trivial shell steps get
 # a small fixed footprint; python steps that only do light DB I/O get a
-# shared tier; build-features+qa_features (loads the full CropFeatureDaily
-# table twice via pandas, plus qa_features' TC5 double feature rebuild) gets
-# the heaviest pipeline tier.
+# shared tier; build-features (loads the full history via pandas AND now
+# runs the qa_features check suite in-process -- re-reads the full
+# CropFeatureDaily table plus a TC5 double feature rebuild) gets the
+# heaviest pipeline tier.
 #
 # SECURITY CONTEXT: forecast-ingestion already runs as the image's built-in
 # non-root 'app' user (uid 1654, same as forecast-api -- see
@@ -101,22 +117,27 @@ spec:
           restartPolicy: Never
           initContainers:
             # [0] SQL cold-start gate. Bounded TCP poll (5s interval, 300s
-            # ceiling) of host.docker.internal:1434 -- BEFORE anything that
-            # touches the DB. Uses the already-cached agriforecast-ml image
-            # (python's stdlib socket module) rather than pulling busybox, so
-            # this needs no network access to Docker Hub to work offline.
-            # Exits 1 (visible Job failure) rather than hanging forever if SQL
-            # never comes up -- the "dead DB" case run-daily.sh's exit trap
-            # used to catch, that a bare CronJob step would otherwise just
-            # fail once against a cold DB with backoffLimit: 0 and no retry.
+            # ceiling) of host.docker.internal:<AGRI_DB_PORT> -- BEFORE
+            # anything that touches the DB. Port comes from the same agri-db
+            # secret every other DB-touching step already reads (AGRI_DB_PORT
+            # below), not hardcoded, so it can never drift from the real port.
+            # Uses the already-cached agriforecast-ml image (python's stdlib
+            # socket module) rather than pulling busybox, so this needs no
+            # network access to Docker Hub to work offline. Exits 1 (visible
+            # Job failure) rather than hanging forever if SQL never comes up
+            # -- the "dead DB" case run-daily.sh's exit trap used to catch,
+            # that a bare CronJob step would otherwise just fail once against
+            # a cold DB with backoffLimit: 0 and no retry.
             - name: wait-for-sql
               image: agriforecast-ml:latest
               imagePullPolicy: IfNotPresent
               command: ["python", "-c"]
               args:
                 - |
-                  import socket, sys, time
-                  host, port, timeout_s, interval_s = "host.docker.internal", 1434, 300, 5
+                  import os, socket, sys, time
+                  host = "host.docker.internal"
+                  port = int(os.environ["AGRI_DB_PORT"])
+                  timeout_s, interval_s = 300, 5
                   deadline = time.time() + timeout_s
                   while time.time() < deadline:
                       try:
@@ -128,6 +149,10 @@ spec:
                           time.sleep(interval_s)
                   print(f"SQL still unreachable at {host}:{port} after {timeout_s}s -- failing visibly (cold-start gate)")
                   sys.exit(1)
+              env:
+                - name: AGRI_DB_PORT
+                  valueFrom:
+                    secretKeyRef: { name: agri-db, key: AGRI_DB_PORT }
               resources:
                 requests: { memory: "32Mi", cpu: "10m" }
                 limits: { memory: "64Mi", cpu: "100m" }
@@ -279,21 +304,22 @@ spec:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }
           containers:
-            # [7] Rebuild the feature store (CropFeatureDaily), then run the
-            # QA harness against what was just persisted. QA is detection,
-            # not prevention -- see header comment above. Either half failing
-            # (build or QA) fails this container non-zero -> Job Failed.
-            # Heaviest pipeline tier: build_features loads the full price/
-            # weather/fx/policy/sentiment history via pandas and rebuilds
-            # features for ~96 crops; qa_features re-reads the full
-            # CropFeatureDaily table AND rebuilds Beans' 11-year history twice
-            # more for the TC5 leakage-by-truncation check.
+            # [7] Rebuild the feature store (CropFeatureDaily). build_features.py
+            # itself now runs the qa_features check suite AFTER persisting but
+            # BEFORE marking the FEATURE_BUILD run row Succeeded (see
+            # build_features.py's `_run_qa_gate`) -- a deliberately failed
+            # check flips that SAME row to Failed and re-raises, which is what
+            # fails this container non-zero -> Job Failed. QA is still
+            # detection, not prevention -- see header comment above. Heaviest
+            # pipeline tier: build_features loads the full price/weather/fx/
+            # policy/sentiment history via pandas and rebuilds features for
+            # ~96 crops; the QA gate re-reads the full CropFeatureDaily table
+            # AND rebuilds Beans' 11-year history twice more for the TC5
+            # leakage-by-truncation check, all in this one process.
             - name: build-features
               image: agriforecast-ml:latest
               imagePullPolicy: IfNotPresent
-              command: ["sh", "-c"]
-              args:
-                - python build_features.py && python qa_features.py
+              command: ["python", "build_features.py"]
               envFrom:
                 - secretRef: { name: agri-db }
               env:

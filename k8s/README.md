@@ -133,8 +133,9 @@ path:
    ```
 
    `pipeline-daily.yaml` also now has a `wait-for-sql` init container (a
-   bounded ~5 min TCP poll of `host.docker.internal:1434`, before `batch-id`)
-   as defense-in-depth for the "up but not ready yet" window. It does NOT
+   bounded ~5 min TCP poll of `host.docker.internal:$AGRI_DB_PORT`, read from
+   the same `agri-db` secret every other step uses, before `batch-id`) as
+   defense-in-depth for the "up but not ready yet" window. It does NOT
    replace the restart policy above — that's still the fix for the DB not
    being up at all; the init container just makes a cold-start failure
    surface as a clean, visible Job failure instead of the ingestion step
@@ -211,10 +212,10 @@ the live pods where a baseline existed at write time (idle):
 |---|---|---|---|---|
 | forecast-api | ~41MiB | 256Mi / 100m | 1Gi / 500m | ASP.NET Core, EF Core; ~6x headroom over idle for real request load |
 | forecast-ui | ~9MiB | *(ForecastUI repo — separate PR)* | | nginx serving a static SPA; lightest of the three Deployments |
-| ml-serving | ~307MiB (model loaded) | 512Mi / 250m | 1536Mi / 1000m | Heaviest Deployment — holds the unpickled xgboost model + shap in memory |
+| ml-serving | ~307MiB idle (model loaded) | 512Mi / 250m | **3Gi** / 1000m | Sized for PARSE PEAKS, not idle: this pod also runs the pdfplumber CBSL/HARTI parse routes nightly, and an OOMKill here takes down forecasts + three ingestion sources at once. Reviewer measured `build-features` (a lighter DB-I/O step) at 568MB peak during this PR's verification — real headroom for pdfplumber's heavier per-page cost is 3Gi, not a limit sized off an idle FastAPI process |
 | pipeline: trivial shell steps (wait-for-sql, batch-id) | n/a | 16-32Mi / 10m | 32-64Mi / 50-100m | Fixed tiny footprint |
 | pipeline: light DB-I/O python/dotnet steps (ingestion, mirror-dec, verify, ingest-news, score-news) | n/a | 128Mi / 100m | 512Mi / 500m | No heavy libraries loaded (no torch/transformers — VADER is rule-based) |
-| pipeline: build-features + qa_features | n/a | 512Mi / 250m | 1536Mi / 1000m | Loads full price/weather/fx/policy/sentiment history via pandas + qa_features rebuilds Beans' 11-year history twice more |
+| pipeline: build-features (now includes the qa_features gate in-process) | measured 568MB peak | 512Mi / 250m | 1536Mi / 1000m | Loads full price/weather/fx/policy/sentiment history via pandas, persists CropFeatureDaily, then runs qa_features.run_qa() in the same process (re-reads the full table + rebuilds Beans' 11-year history twice more for TC5) before marking the run row Succeeded |
 | monthly: ingest-cbsl-macro | n/a | 256Mi / 100m | 768Mi / 500m | pdfplumber PDF parsing is more memory-hungry per page than plain DB I/O |
 
 **forecast-ui.yaml lives in the separate ForecastUI repo** (this is the

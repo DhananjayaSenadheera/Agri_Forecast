@@ -56,11 +56,13 @@ COPY mirror_dec_prices.py .
 # invoked by run-daily.sh AFTER mirror_dec_prices.py / BEFORE build_features.
 # Same class of bug as above if omitted -- see agriforecast_ml/ingest_verify.py.
 COPY verify_ingestion.py .
-# qa_features.py (feature-store QA harness) is now invoked by
-# k8s/pipeline-daily.yaml's main container as `build_features.py &&
-# qa_features.py`. Same class of bug as above if omitted -- caught here
-# BEFORE it could ship, by dry-testing the actual image build+run in the
-# nightly-qa-gate PR rather than assuming the COPY list was already complete.
+# qa_features.py (feature-store QA harness) is `import qa_features`'d
+# directly by build_features.py (its post-persist QA gate -- see
+# build_features.py's `_run_qa_gate`), not invoked as a separate script.
+# Still needs its own COPY: same class of bug as above if omitted -- caught
+# here BEFORE it could ship, by dry-testing the actual image build+run in
+# the nightly-qa-gate PR rather than assuming the COPY list was already
+# complete.
 COPY qa_features.py .
 
 EXPOSE 8077

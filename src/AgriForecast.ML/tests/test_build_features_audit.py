@@ -14,12 +14,22 @@ Coverage:
                                   kwargs; swallows a broken mark_succeeded.
   TestFinishAuditRunFailed    -- no-op when engine/run_id is None; forwards the
                                   exception; swallows a broken mark_failed.
+  TestRunQaGate               -- the post-persist QA gate in isolation: a
+                                  failed check raises naming qa_features; an
+                                  all-pass result is a silent no-op; a CRASH
+                                  inside qa_features.run_qa() itself is
+                                  fail-open (logged, does not raise).
   TestMainAuditIntegration    -- end-to-end main(): success path calls
                                   mark_succeeded with the right
-                                  rows_inserted/distinct_crops/coverage; a
-                                  pipeline exception calls mark_failed AND
-                                  still re-raises; a totally broken audit layer
-                                  never blocks a successful build.
+                                  rows_inserted/distinct_crops/coverage (QA
+                                  gate mocked to all-pass); a pipeline
+                                  exception calls mark_failed AND still
+                                  re-raises; a QA check FAILURE (after a
+                                  successful persist) calls mark_failed with a
+                                  qa_features-naming reason AND re-raises; a
+                                  QA harness CRASH is fail-open and still
+                                  records Succeeded; a totally broken audit
+                                  layer never blocks a successful build.
 """
 from __future__ import annotations
 
@@ -142,6 +152,43 @@ class TestFinishAuditRunFailed:
         assert "feature_run_log" in capsys.readouterr().err
 
 
+# _run_qa_gate
+
+class TestRunQaGate:
+    def test_all_pass_is_a_silent_noop(self, monkeypatch):
+        monkeypatch.setattr(build_features.qa_features, "run_qa",
+                             lambda: (["c1", "c2"], []))
+        build_features._run_qa_gate()  # must not raise
+
+    def test_a_failed_check_raises_naming_qa_features_and_the_checks(self, monkeypatch):
+        monkeypatch.setattr(
+            build_features.qa_features, "run_qa",
+            lambda: (["c1"], ["all contract columns present, none extra"]),
+        )
+        with pytest.raises(RuntimeError, match="qa_features") as exc_info:
+            build_features._run_qa_gate()
+        assert "1 check" in str(exc_info.value)
+        assert "all contract columns present, none extra" in str(exc_info.value)
+
+    def test_multiple_failed_checks_all_named(self, monkeypatch):
+        monkeypatch.setattr(
+            build_features.qa_features, "run_qa",
+            lambda: ([], ["row count > 0", "no duplicate (crop,date) keys"]),
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            build_features._run_qa_gate()
+        msg = str(exc_info.value)
+        assert "row count > 0" in msg
+        assert "no duplicate (crop,date) keys" in msg
+
+    def test_harness_crash_is_fail_open_and_does_not_raise(self, monkeypatch, capsys):
+        def _boom():
+            raise RuntimeError("qa_features has a bug, not a failed check")
+        monkeypatch.setattr(build_features.qa_features, "run_qa", _boom)
+        build_features._run_qa_gate()  # must not raise
+        assert "qa_features" in capsys.readouterr().err
+
+
 # main() end-to-end audit wiring
 
 def _fake_feats() -> pd.DataFrame:
@@ -153,7 +200,12 @@ def _fake_feats() -> pd.DataFrame:
     })
 
 
-def _patch_pipeline(monkeypatch, feats: pd.DataFrame, written: int):
+def _patch_pipeline(monkeypatch, feats: pd.DataFrame, written: int,
+                     qa_result=(["fake-qa-check"], [])):
+    """qa_result defaults to an all-pass (passed, failed) tuple so every
+    existing test that doesn't care about QA specifically still reaches
+    mark_succeeded, exactly as before this gate existed. Tests that DO care
+    pass their own (passed, failed) or monkeypatch run_qa to raise."""
     empty_df = pd.DataFrame()
     monkeypatch.setattr(build_features.load, "load_prices",
                          lambda: pd.DataFrame({"CropId": ["VEG000001"]}))
@@ -169,6 +221,7 @@ def _patch_pipeline(monkeypatch, feats: pd.DataFrame, written: int):
     monkeypatch.setattr(build_features.features, "build_all",
                          lambda *a, **k: feats)
     monkeypatch.setattr(build_features.store, "write_features", lambda df: written)
+    monkeypatch.setattr(build_features.qa_features, "run_qa", lambda: qa_result)
 
 
 class TestMainAuditIntegration:
@@ -277,6 +330,112 @@ class TestMainAuditIntegration:
         engine, run_id, exc = failed_calls[0]
         assert engine == "the-engine" and run_id == "run-1"
         assert str(exc) == "feature build blew up"
+
+    def test_qa_failure_after_successful_persist_records_failed_row_and_reraises(
+        self, monkeypatch,
+    ):
+        """The write to CropFeatureDaily succeeded (store.write_features ran
+        clean), but qa_features.run_qa() found a real, deliberate check
+        failure against what was just persisted. That must still flip the
+        FEATURE_BUILD row to Failed (naming qa_features + the failed check)
+        and re-raise -- this is the whole point of the gate: a bad build
+        must read Failed, not green, on the admin Logs page / health
+        endpoint."""
+        _patch_pipeline(
+            monkeypatch, _fake_feats(), written=3,
+            qa_result=([], ["all contract columns present, none extra"]),
+        )
+        monkeypatch.setattr(build_features, "load_env_file", lambda: None)
+
+        monkeypatch.setattr(build_features, "get_engine", lambda: "the-engine")
+        monkeypatch.setattr(
+            build_features.feature_run_log, "start_run",
+            lambda engine: ("run-1", "batch-1", "started"),
+        )
+        failed_calls = []
+        monkeypatch.setattr(
+            build_features.feature_run_log, "mark_failed",
+            lambda engine, run_id, exc: failed_calls.append((engine, run_id, exc)),
+        )
+        monkeypatch.setattr(
+            build_features.feature_run_log, "mark_succeeded",
+            lambda *a, **k: pytest.fail(
+                "mark_succeeded must not be called: QA found a real failed check"),
+        )
+
+        with pytest.raises(RuntimeError, match="qa_features"):
+            build_features.main()
+
+        assert len(failed_calls) == 1
+        engine, run_id, exc = failed_calls[0]
+        assert engine == "the-engine" and run_id == "run-1"
+        assert "qa_features" in str(exc)
+        assert "all contract columns present, none extra" in str(exc)
+
+    def test_qa_pass_after_successful_persist_records_succeeded_row(self, monkeypatch):
+        """The inverse of the above: all QA checks pass, so the run still
+        records Succeeded exactly as it would have before this gate existed.
+        (test_success_path_records_succeeded_row already covers this via the
+        _patch_pipeline default, but this test names the QA-specific
+        behaviour explicitly, matching the reviewer's requested coverage.)"""
+        _patch_pipeline(
+            monkeypatch, _fake_feats(), written=3,
+            qa_result=(["c1", "c2", "c3"], []),
+        )
+        monkeypatch.setattr(build_features, "load_env_file", lambda: None)
+
+        monkeypatch.setattr(build_features, "get_engine", lambda: "the-engine")
+        monkeypatch.setattr(
+            build_features.feature_run_log, "start_run",
+            lambda engine: ("run-1", "batch-1", "started"),
+        )
+        succeeded_calls = []
+        monkeypatch.setattr(
+            build_features.feature_run_log, "mark_succeeded",
+            lambda engine, run_id, **k: succeeded_calls.append((engine, run_id, k)),
+        )
+        monkeypatch.setattr(
+            build_features.feature_run_log, "mark_failed",
+            lambda *a, **k: pytest.fail("mark_failed must not be called: QA all passed"),
+        )
+
+        build_features.main()  # must not raise -- exit 0
+
+        assert len(succeeded_calls) == 1
+        assert succeeded_calls[0][2]["rows_inserted"] == 3
+
+    def test_qa_harness_crash_is_fail_open_and_still_records_succeeded(self, monkeypatch):
+        """qa_features.run_qa() itself raises (a bug in the harness, not a
+        deliberately failed check). The already-persisted, otherwise-correct
+        build must NOT be recorded as Failed over a QA harness defect --
+        mark_succeeded still fires."""
+        _patch_pipeline(monkeypatch, _fake_feats(), written=3)
+
+        def _qa_boom():
+            raise AttributeError("qa_features has a bug, not a failed check")
+        monkeypatch.setattr(build_features.qa_features, "run_qa", _qa_boom)
+        monkeypatch.setattr(build_features, "load_env_file", lambda: None)
+
+        monkeypatch.setattr(build_features, "get_engine", lambda: "the-engine")
+        monkeypatch.setattr(
+            build_features.feature_run_log, "start_run",
+            lambda engine: ("run-1", "batch-1", "started"),
+        )
+        succeeded_calls = []
+        monkeypatch.setattr(
+            build_features.feature_run_log, "mark_succeeded",
+            lambda engine, run_id, **k: succeeded_calls.append((engine, run_id, k)),
+        )
+        monkeypatch.setattr(
+            build_features.feature_run_log, "mark_failed",
+            lambda *a, **k: pytest.fail(
+                "mark_failed must not be called: a QA harness crash is fail-open"),
+        )
+
+        build_features.main()  # must not raise -- exit 0
+
+        assert len(succeeded_calls) == 1
+        assert succeeded_calls[0][2]["rows_inserted"] == 3
 
     def test_totally_broken_audit_layer_never_blocks_a_successful_build(self, monkeypatch):
         """No DB configured at all: get_engine raises immediately. The build

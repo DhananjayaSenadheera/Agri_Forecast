@@ -1,14 +1,40 @@
 """QA harness for the feature pipeline. Independently recomputes features and
 runs a leakage-by-truncation test (the decisive no-leakage check).
 
-Wired into the nightly K8s pipeline (k8s/pipeline-daily.yaml) as
-`build_features.py && qa_features.py` in the main container. This is
+`run_qa()` is invoked from INSIDE build_features.py's post-persist QA gate
+(see build_features.py's `_run_qa_gate`), after CropFeatureDaily has been
+written but BEFORE the FEATURE_BUILD run row is marked Succeeded. This is
 DETECTION, not PREVENTION: build_features.py has already persisted
-CropFeatureDaily (if_exists='replace') by the time this runs, so a QA
-failure means bad features are already live in the store -- it does not
-block the write. A non-zero exit here fails the Job so the failure is
-visible (admin Logs page / health endpoint), same as any other pipeline
-step, but the bad data has already landed.
+CropFeatureDaily (if_exists='replace') by the time this runs, so a failed
+check means bad features are already live in the store -- it does not block
+the write. But a failed check DOES flip that run's FEATURE_BUILD row to
+Failed and re-raise (build_features.py fails loudly, same as any other
+pipeline exception).
+
+What "visible" means, precisely (verified against AgriForecast.Application/
+.../GetIngestionStatusQueryHandler.cs and AgriForecast.Domain/Constants/
+IngestionSources.cs, not assumed): the Failed row DOES appear in the admin
+ingestion runs table at /admin/ingestion (GET /runs, unfiltered by default,
+also filterable by ?source=FEATURE_BUILD). It does NOT flip that page's
+status card/banner (state / lastRunAtUtc / lastRunStatus) --
+IngestionSources.ExcludedFromServiceState deliberately excludes FEATURE_BUILD
+from that aggregate on purpose (the feature build runs last every day, so
+without the exclusion it would permanently mask a failed DAMBULLA_DEC /
+WEATHER / ECONOMIC / NEWS run behind an evergreen "succeeded" -- the
+"lastRunStatus-hijack trap"). There is also no separate ingestion-aware
+"health endpoint": the API's literal /health route is a static liveness ping
+({"status":"healthy"}) for k8s probes, unrelated to IngestionRuns. So: real,
+row-level visibility on the runs page -- not a banner flip, not a health
+check.
+
+A crash INSIDE this harness (a bug here, not a deliberately failed check) is
+a different case and is fail-open at the build_features.py call site, not
+here -- see `_run_qa_gate`'s docstring.
+
+Also runnable standalone for a manual check: `python qa_features.py` runs
+the same suite and exits 1 on any failed check, 0 if all pass. This script
+does NOT write to IngestionRuns itself -- that only happens through
+build_features.py's integration.
 
 KNOWN GAP (not fixed here, see memory agriforecast-qa-features-contract.md):
 TC5/TC5b call build_all() WITHOUT festivals/macro/price_obs/market_slugs, so
@@ -35,7 +61,16 @@ def daily_price(group):
     return g["AvgPrice"].reindex(full).ffill(limit=FF)
 
 
-def main():
+def run_qa() -> "tuple[list[str], list[str]]":
+    """Runs the full QA check suite once against the live DB and returns
+    (passed, failed) lists of check names. Never calls sys.exit -- exit-code
+    /run-status policy belongs to the caller: the CLI entry point below
+    (main()) turns a non-empty `failed` into a process exit 1; build_features
+    .py's `_run_qa_gate` turns it into a Failed FEATURE_BUILD row + a raised
+    exception. A genuine infra problem (DB unreachable, a query blowing up)
+    still raises out of this function exactly as it always has -- deciding
+    whether THAT is fail-open or fail-shut is also the caller's job.
+    """
     passed, failed = [], []
     def check(name, ok, detail=""):
         (passed if ok else failed).append(name)
@@ -266,9 +301,15 @@ def main():
     print(f"\n=== RESULT: {len(passed)} passed, {len(failed)} failed ===")
     if failed:
         print("FAILED:", failed)
-    # Non-zero exit on any failure -- the whole reason this is wired into the
-    # nightly pipeline is so a QA failure fails the container (and the K8s
-    # Job) rather than printing a message nobody is watching.
+    return passed, failed
+
+
+def main() -> int:
+    """Standalone CLI entry point: `python qa_features.py`. Runs the same
+    checks as the build_features.py integration and maps the result to a
+    process exit code -- 1 if any check failed, 0 if all passed -- for a
+    manual run or ad-hoc debugging. Does not touch IngestionRuns."""
+    _passed, failed = run_qa()
     return 1 if failed else 0
 
 
