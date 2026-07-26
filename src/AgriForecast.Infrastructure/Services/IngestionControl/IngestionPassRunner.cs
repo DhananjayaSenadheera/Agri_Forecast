@@ -128,6 +128,10 @@ public class IngestionPassRunner : IIngestionPassRunner
             })
         };
 
+        // True once a source's OWN run row records the admin stop (Failed + CancelledReason), which happens
+        // when the cancel lands mid-source. It stops the halt being written twice — see below.
+        var cancellationRecorded = false;
+
         foreach (var (source, body) in sources)
         {
             // Admin stop (or host shutdown) between sources: stop launching new work rather than tearing
@@ -137,10 +141,27 @@ public class IngestionPassRunner : IIngestionPassRunner
                 _logger.LogInformation(
                     "Ingestion pass {BatchId} cancelled before {Source}; remaining sources skipped.",
                     batchId, source);
+
+                // The halt must leave a mark on the BATCH, not just in the user-activity audit. Without one,
+                // a stop landing in the gap between two sources left every written row green and the status
+                // roll-up reported lastRunStatus="succeeded" for a pass the admin deliberately killed
+                // (live: batch 9def4f2b, stopped after DAMBULLA_DEC and before WEATHER). One Failed row for
+                // the source that was about to start makes the roll-up honest, and only the sources that
+                // truly ran keep their real outcomes.
+                //
+                // Skipped is NOT an option: the roll-up counts Skipped inside "succeeded".
+                //
+                // Written only when the stop is not already on the record. If the cancel arrived mid-source,
+                // that source's row already says Cancelled, and a second marker would invent a halt for a
+                // source nobody was waiting on.
+                if (!cancellationRecorded)
+                    await IngestionRunAudit.RecordCancelledBeforeStartAsync(runs, _logger, batchId, source);
+
                 return;
             }
 
-            await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, source, body, ct);
+            cancellationRecorded =
+                await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, source, body, ct);
         }
 
         _logger.LogInformation("Ingestion pass complete. BatchId={BatchId}", batchId);
