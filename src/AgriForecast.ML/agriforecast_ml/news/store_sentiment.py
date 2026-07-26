@@ -92,14 +92,9 @@ def write_daily(daily: pd.DataFrame, *, engine=None) -> int:
     return len(out)
 
 
-# --------------------------------------------------------------------------- #
-# Per-article signal writeback: NewsArticles.SentimentScore + .Topics.
-#
-# NO LONGER a debug aid: the admin News feed (.NET GET /api/news-articles)
-# surfaces both columns per article (category badge + bullish/bearish glyph in
-# the FE), so score_news.run writes them by default on every pass. Column
-# semantics: NULL = not yet scored; Topics '' = scored, no agri topic fired.
-# --------------------------------------------------------------------------- #
+# Per-article writeback of NewsArticles.SentimentScore and .Topics. The admin News feed
+# surfaces both per article, so score_news writes them on every pass. NULL means not yet
+# scored; an empty Topics string means scored with no agri topic fired.
 _DDL_ADD_SCORE_COLUMN = f"""IF NOT EXISTS (
     SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_NAME = '{ARTICLES_TABLE}' AND COLUMN_NAME = 'SentimentScore'
@@ -175,9 +170,7 @@ def write_article_scores(scored: pd.DataFrame, *, engine=None) -> int:
     return updated
 
 
-# --------------------------------------------------------------------------- #
-# Read side for Chunk D convenience (load NewsArticles to score them).
-# --------------------------------------------------------------------------- #
+# Read side: load NewsArticles so they can be scored.
 def load_articles(*, engine=None) -> pd.DataFrame:
     """Load NewsArticles for scoring.  Returns Url, Title, Summary, dates."""
     eng = engine or get_engine()

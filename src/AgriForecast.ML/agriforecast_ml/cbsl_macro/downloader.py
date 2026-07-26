@@ -1,28 +1,19 @@
-"""CBSL macro PDF downloader — CCPI press releases + Monthly Economic
-Indicators (MEI) packs.
+"""CBSL macro PDF downloader: CCPI press releases and Monthly Economic Indicators packs.
 
-Mirrors ``agriforecast_ml.harti.downloader``'s pattern (permissive
-scrape-with-drop-counters, capped streamed download, polite delay), adapted
-for two listing pages instead of one:
+Mirrors harti/downloader.py (permissive scrape with drop counters, capped streamed
+download, polite delay), adapted for two listing pages.
 
-  CCPI press-release listing: https://www.cbsl.gov.lk/en/measures-of-consumer-price-inflation
-    Single page, no pagination observed (probe 2026-07-04: 18 CCPI links,
-    Jan 2025 -> present, no ``<ul class="pager">`` element). Filenames embed
-    the publication date: ``press_YYYYMMDD_..._ccpi_e.pdf``.
+The CCPI listing is a single page with no pagination, and its filenames embed the
+publication date as press_YYYYMMDD_..._ccpi_e.pdf.
 
-  MEI listing: https://www.cbsl.gov.lk/en/statistics/economic-indicators/monthly-indicators
-    Drupal-paginated (``?page=N``, 12 items/page, observed up to page=11 =>
-    ~12 years of packs). Filenames embed the pack's YYYYMM (NOT the
-    ReferenceDate the pack's trade table describes -- see cbsl_macro/parser.py
-    for the "MEI pack carries prior-month trade data" note). Filename
-    variants observed in the wild: ``MEI_202605_e.pdf`` (clean),
-    ``MEI_202503_er.pdf`` ("er" suffix), ``MEI_202604_e_0.pdf`` (Drupal
-    filename-collision "_0" suffix) -- the date regex must tolerate a
-    trailing suffix after the YYYYMM token, never require an exact match.
+The MEI listing is Drupal-paginated (?page=N, 12 items per page). Its filenames embed the
+pack's YYYYMM, which is NOT the ReferenceDate the pack's trade table describes. Real
+filenames vary (MEI_202605_e.pdf, MEI_202503_er.pdf, MEI_202604_e_0.pdf), so the date
+regex must tolerate a trailing suffix after the YYYYMM token rather than require an exact
+match.
 
-Cache filenames are derived from the PARSED date/month, never the URL
-basename (spec requirement) -- ``cbsl_ccpi_YYYYMMDD.pdf`` /
-``cbsl_mei_YYYYMM.pdf``.
+Cache filenames are derived from the PARSED date or month, never the URL basename:
+cbsl_ccpi_YYYYMMDD.pdf and cbsl_mei_YYYYMM.pdf.
 """
 from __future__ import annotations
 
@@ -286,19 +277,14 @@ def _safe_download(
 
 
 def _dedup_by_key(links: list, key_fn) -> tuple[list, int]:
-    """Keep the FIRST link per logical key, drop later duplicates.
+    """Keep the FIRST link per logical key and drop later duplicates.
 
-    Real-world gotcha (live-verification run, 2026-07-04): CBSL's Drupal
-    listing occasionally serves TWO distinct URLs for the SAME logical
-    period after a re-upload (observed: ``MEI_201909_e_0.pdf`` AND
-    ``MEI_201909_e_1.pdf`` both present on the MEI listing, both parsing to
-    pack_yyyymm='201909'). Deduping only by URL (as the scrapers already do)
-    is not enough — both survive that dedup and would be downloaded,
-    parsed, and upserted as two logically-identical points, which collides
-    on the DB's own (SeriesCode, ReferenceDate, PublishedAt) unique index
-    and aborts the whole batch's transaction. Dedup by the PARSED key
-    up front instead, so at most one artifact per period ever reaches the
-    parser/loader — dropped duplicates are counted, never silent.
+    CBSL's Drupal listing occasionally serves two distinct URLs for the same logical period
+    after a re-upload (MEI_201909_e_0.pdf and MEI_201909_e_1.pdf were both live). Deduping by
+    URL is not enough: both survive, both get parsed and upserted as the same point, and they
+    collide on the (SeriesCode, ReferenceDate, PublishedAt) unique index, aborting the whole
+    batch. Deduping by the parsed key up front means at most one artifact per period reaches
+    the parser. Dropped duplicates are counted, never silent.
     """
     seen = set()
     kept = []

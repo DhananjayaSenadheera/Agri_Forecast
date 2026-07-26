@@ -1,26 +1,14 @@
-"""Curated list of free English RSS feeds for AgriForecast news ingestion.
+"""Curated list of free English RSS feeds for news ingestion.
 
-Selection criteria:
-  - Freely available RSS (no API key, no login).
-  - English language.
-  - Relevant to: Sri Lankan agriculture, commodity/food prices, weather disasters,
-    regional trade, or global crop-market signals that affect SL prices.
+Selection: freely available RSS (no API key or login), English, and relevant to Sri
+Lankan agriculture, food prices, weather disasters, regional trade or global crop-market
+signals. Feeds are grouped by category, and the fetcher tolerates a dead feed by warning
+and carrying on rather than aborting the run.
 
-Feeds are grouped by category for clarity.  The fetcher tolerates dead feeds
-gracefully -- if a feed URL becomes stale it warns and continues; it does NOT
-abort the run.
-
-Column produced by the fetcher: Source (str) maps to the 'source' field here.
-
-Feed health (live-probed 2026-06-30).  Removed feeds that no longer yield RSS:
-  - reuters_biz       feeds.reuters.com decommissioned (DNS no longer resolves)
-  - worldbank_food    feeds.worldbank.org decommissioned (DNS no longer resolves)
-  - fao_news          www.fao.org/feeds/rss/en/news/ returns 404
-  - daily_ft          www.ft.lk/rss/ now serves a JS-gated HTML page, not RSS
-  - news_first        newsfirst.lk/feed/ returns Cloudflare 403 to all bots
-  - daily_mirror_lk   dailymirror.lk/rss.xml returns Cloudflare 403 to all bots
-The two Cloudflare-403 outlets are good content sources but cannot be reached by
-a plain HTTP fetcher; revisit only if we add a headless-browser fetch path.
+Several feeds were removed after going dead: Reuters business and World Bank food (hosts
+decommissioned), FAO news (404), Daily FT (now JS-gated HTML), and News First and Daily
+Mirror (Cloudflare 403 to all bots). The last two are good sources but unreachable
+without a headless browser.
 """
 from __future__ import annotations
 
@@ -33,9 +21,7 @@ class FeedSpec(TypedDict):
     category: str     # informational label for logging/reporting
 
 
-# ---------------------------------------------------------------------------
-# SL English-language news outlets -- agriculture / business / economy sections
-# ---------------------------------------------------------------------------
+# Sri Lankan English outlets: agriculture, business and economy sections.
 _SL_FEEDS: list[FeedSpec] = [
     {
         "source": "economy_next",
@@ -59,9 +45,7 @@ _SL_FEEDS: list[FeedSpec] = [
     },
 ]
 
-# ---------------------------------------------------------------------------
-# Global / regional agriculture & commodity feeds
-# ---------------------------------------------------------------------------
+# Global and regional agriculture and commodity feeds.
 _GLOBAL_AG_FEEDS: list[FeedSpec] = [
     {
         # ReliefWeb's per-country RSS path now 301-redirects to the updates river;
@@ -77,9 +61,7 @@ _GLOBAL_AG_FEEDS: list[FeedSpec] = [
     },
 ]
 
-# ---------------------------------------------------------------------------
-# Public export
-# ---------------------------------------------------------------------------
+# Public export.
 FEEDS: list[FeedSpec] = _SL_FEEDS + _GLOBAL_AG_FEEDS
 
 

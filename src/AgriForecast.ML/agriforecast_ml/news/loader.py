@@ -137,7 +137,6 @@ def upsert_articles(
             for row in rows:
                 existing_urls.add(row[0])
 
-        # Insert only new URLs
         for art in articles:
             url = art["url"]
             if url in existing_urls:

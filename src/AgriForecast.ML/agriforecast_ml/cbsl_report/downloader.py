@@ -29,10 +29,9 @@ URL_TEMPLATE = (
     "statistics/pricerpt/price_report_{yyyymmdd}_e.pdf"
 )
 
-# Belt against a mis-set watermark asking for a giant range: the daily pass is
-# incremental (a few days at most), and the owner-decided capture-only scope
-# (2026-07-22) has NO historical backfill. A caller that genuinely wants a
-# backfill passes an explicit wide range AND raises this cap consciously.
+# Belt against a mis-set watermark asking for a giant range: the daily pass is incremental
+# and the capture-only scope has no historical backfill. A caller that genuinely wants one
+# passes an explicit wide range and raises this cap deliberately.
 DEFAULT_MAX_DATES_PER_PASS = 62
 
 
