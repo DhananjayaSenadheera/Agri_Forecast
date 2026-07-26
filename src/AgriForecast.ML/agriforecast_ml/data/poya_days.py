@@ -1,62 +1,15 @@
 """Sri Lankan full-moon Poya day calendar, 2015-2030.
 
-WHY THIS EXISTS (ClickUp 86cahef64, R1.1 P1 Step 5): Poya days are
-mercantile-holiday, market-closed days in Sri Lanka (banks, government
-offices, and — per corpus behaviour verified against the live HARTI
-PriceObservations/MarketPrices corpus, see data_quality.py module docstring
-— HARTI's daily wholesale bulletin is also not published). A gap-detection
-routine that does not know about Poya days would misreport every single
-Poya as a 1-day "missing data" gap, drowning the real signal (actual missing
-PDFs, download failures, market disruptions) in ~12-13 false positives a
-year, every year. This file is the single source of truth so that
-suppression rule lives in exactly one place.
+Poya days are mercantile holidays and HARTI does not publish its daily bulletin on
+them, so gap detection needs this list or it reports about 12-13 false gaps a year.
 
-============================================================================
-PROVENANCE / CONFIDENCE — READ BEFORE TRUSTING THESE DATES IN PRODUCTION
-============================================================================
-These dates were populated from the assistant's general knowledge of the
-Sri Lankan full-moon Poya calendar (which is itself derived from the actual
-astronomical full moon in Sri Lanka's timezone, published yearly by the
-Sri Lankan government / Department of Buddhist Affairs). They are NOT
-computed astronomically at runtime (deliberate design choice — see
-data_quality.py: a static, human-auditable list is preferred over a runtime
-ephemeris dependency for a fact that only changes once a year, in a known,
-finite way).
+TODO: these dates have NOT been verified against an official source (CBSL bank
+holiday circulars or the Department of Buddhist Affairs gazette). 2015-2026 are
+historical and very likely right; 2027-2030 are provisional and can shift by a day.
+Good enough for suppressing gap-report false positives, not for anything binding.
 
-CONFIDENCE BY YEAR RANGE (self-assessed, be skeptical of all of it):
-  - 2015-2026 (inclusive): HIGH confidence. These are actual historical
-    dates (2015-2025 are fully in the past as of this task's "today" of
-    2026-07-02; 2026 is mostly in the past/current). Cross-checked
-    internally for correct ~29.5-day lunar spacing and no duplicates (see
-    tests/test_poya.py structural tests), but NOT independently verified
-    against an official Sri Lankan government gazette or bank-holiday
-    circular by a human. Treat as "very likely correct, needs one human
-    spot-check before this is trusted for anything financially binding."
-  - 2027-2030: LOWER confidence. These are future dates computed by the
-    same lunar-cycle reasoning but further from any date the assistant has
-    strong grounding on, and Sri Lanka's official calendar occasionally
-    shifts a Poya day by ±1 calendar date late (due to exact moonrise
-    timing / regional calendar authority decisions) versus a naive
-    astronomical calculation. These entries should be treated as
-    PROVISIONAL and re-verified against an official source (e.g.
-    Department of Buddhist Affairs / bank holiday circular) roughly a year
-    ahead of each date actually being used operationally.
-
-ACTION REQUIRED before this file is relied on for anything beyond
-suppressing gap-report false positives in this task: a human must verify
-every date below (2015-2030) against an official Sri Lankan source (e.g.
-https://www.cbsl.gov.lk bank holiday circulars, or the Department of
-Buddhist Affairs gazette) and remove this notice once done. Until then,
-gap_report()'s Poya suppression is "best effort," not authoritative.
-
-============================================================================
-STRUCTURE
-============================================================================
-``POYA_DAYS`` maps year -> sorted list of date.isoformat() strings ("YYYY-
-MM-DD"). Most years have 12 Poya days (one per lunar month); years
-containing an intercalary ("Adhi"/leap) lunar month have 13. Both counts are
-valid and asserted in the structural test (12 or 13 per year, never fewer,
-never more) rather than hardcoding 12 for every year.
+POYA_DAYS maps year -> sorted list of 'YYYY-MM-DD' strings. A year has 12 Poya days,
+or 13 when it contains an intercalary lunar month.
 """
 from __future__ import annotations
 

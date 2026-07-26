@@ -1,50 +1,28 @@
-"""Outbound-fetch SSRF guard for the ingestion paths (ClickUp 86cahef8f / S1).
+"""Outbound-fetch SSRF guard for the ingestion paths.
 
-The HARTI listing scraper and the news RSS fetcher follow URLs that ultimately
-come from remote, attacker-influenceable content (the HARTI listing page's
-``<a href>`` values; a feed's ``<link>``/redirect chain). Left unguarded, a
-poisoned link could point an outbound request at:
+The HARTI listing scraper and the news RSS fetcher follow URLs that ultimately come from
+remote, attacker-influenceable content, so an unguarded fetch could be pointed at cloud
+metadata (169.254.169.254), a loopback admin port, or any other unexpected host.
 
-  * an internal service (``http://169.254.169.254/`` cloud metadata,
-    ``http://127.0.0.1:8000/admin/...``, ``http://10.0.0.5/``), or
-  * an unexpected external host entirely.
+Every ingestion fetch goes through this module, which enforces three controls in order:
 
-This module is the single choke-point every ingestion fetch goes through. It
-enforces THREE controls, in order:
+  1. Scheme allowlist - https only, plus http for explicitly allowlisted hosts, since
+     some government endpoints are http-only.
+  2. Host allowlist - the host must match an entry exactly or as a parent-domain suffix.
+  3. Private-IP block - every IP the host resolves to must be globally routable, so a DNS
+     answer of 127.0.0.1 for an allowlisted host is still rejected.
 
-  1. Scheme allowlist — only ``https`` (and ``http`` for hosts explicitly on the
-     allowlist, since some gov endpoints are http-only) is permitted; no
-     ``file:``/``ftp:``/``gopher:`` etc.
-  2. Host allowlist — the URL's host must match an entry in the configured
-     allowlist (exact host or a parent-domain suffix). Nothing else is fetched.
-  3. Private/loopback/link-local IP block — every IP the host resolves to
-     (resolve-then-check, so a DNS answer of 127.0.0.1 for an allowlisted host
-     is still rejected) must be a global/public address.
+Redirects are not auto-followed: a 3xx Location is re-validated through the same three
+controls before being followed manually.
 
-Redirects are NOT auto-followed (``allow_redirects=False``); a ``Location`` on a
-3xx is re-validated through the exact same three controls before being followed
-manually, so a redirect can never escape the allowlist or reach a private IP.
+Known residual: the IP check resolves at check time while requests re-resolves at connect
+time, so DNS rebinding could in principle land on a different IP. That needs control of
+DNS for an already-allowlisted host plus a sub-second race. Pinning the validated IP into
+the socket is deliberately out of scope and recorded here rather than overlooked.
 
-TOCTOU residual (accepted for this threat model): the private-IP block resolves
-the host at CHECK time, but ``requests`` re-resolves at CONNECT time, so a DNS
-answer that changes between the two (DNS-rebinding) could in principle let a
-connect land on a different IP than the one we validated. Exploiting this
-requires the attacker to control DNS for a host that is ALREADY on our
-allowlist (our hosts are fixed gov/news domains we do not delegate) AND to win a
-sub-second race — a much higher bar than the poisoned-link SSRF this guard
-exists to stop. Closing it fully would require pinning the validated IP into the
-socket connection; that is deliberately out of scope here and recorded as a
-known residual, not an oversight.
-
-Config (all optional; safe defaults ship in code):
-  AGRI_INGEST_ALLOWED_HOSTS   comma-separated host allowlist override. When set,
-                              REPLACES the built-in default list. Entries are
-                              matched as exact host OR parent-domain suffix
-                              (``harti.gov.lk`` allows ``www.harti.gov.lk``).
-  AGRI_INGEST_ALLOW_PRIVATE_IPS  set to "1"/"true" to skip the private-IP block
-                              (LOCAL TEST ONLY — e.g. hitting a localhost mock).
-                              Never set in production.
-  AGRI_INGEST_MAX_REDIRECTS   max redirect hops to follow (default 5).
+Config, all optional: AGRI_INGEST_ALLOWED_HOSTS REPLACES the built-in host list,
+AGRI_INGEST_ALLOW_PRIVATE_IPS skips the private-IP block (local tests only, never in
+production), and AGRI_INGEST_MAX_REDIRECTS caps redirect hops (default 5).
 """
 from __future__ import annotations
 
@@ -64,12 +42,9 @@ logger = logging.getLogger(__name__)
 _DEFAULT_ALLOWED_HOSTS: tuple[str, ...] = (
     # HARTI daily-price bulletins (listing page + PDF assets).
     "harti.gov.lk",
-    # CBSL macro ingestion (ClickUp 86cahefbh / P3): CCPI press-release listing
-    # + Monthly Economic Indicators (MEI) pack listing + PDF assets, all served
-    # under this single apex. Deliberately NOT adding statistics.gov.lk (NCPI's
-    # DCS host) even though NCPI was probed — it was scope-cut (2026-07-04 P3
-    # decision) specifically so the allowlist stays single-apex; prefer
-    # dropping a series over adding a second host.
+    # CBSL macro ingestion: CCPI press releases and the Monthly Economic Indicators packs,
+    # all served under this one apex. statistics.gov.lk is deliberately not added - keeping
+    # the allowlist single-apex is preferred over covering one more series.
     "cbsl.gov.lk",
     # News RSS feeds (see agriforecast_ml/news/feeds.py).
     "economynext.com",
@@ -88,9 +63,8 @@ class DisallowedUrlError(Exception):
     """Raised when an outbound URL fails an SSRF control (scheme/host/IP)."""
 
 
-# One-time visibility: remember the last allowlist we logged so an operator who
-# sets AGRI_INGEST_ALLOWED_HOSTS (and thereby silently drops the built-in
-# defaults) sees the ACTIVE set exactly once, at first use / on any change.
+# Log the active allowlist once, and again if it changes, so an operator who sets
+# AGRI_INGEST_ALLOWED_HOSTS and thereby drops the built-in defaults can see it.
 _last_logged_allowlist: tuple[str, ...] | None = None
 
 

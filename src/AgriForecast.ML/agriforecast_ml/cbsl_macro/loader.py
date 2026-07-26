@@ -1,48 +1,23 @@
-"""CBSL macro loader — PublishedAt (vintage) resolution + idempotent upsert
-into MacroSeriesPoints.
+"""CBSL macro loader: PublishedAt (vintage) resolution plus an idempotent upsert into
+MacroSeriesPoints.
 
-VINTAGE POLICY (2026-07-04 P3 decision, DECISIONS.md — this is the spec):
-  First-print only; KnowledgeDate (PublishedAt) = the real publication date.
-  NEVER default PublishedAt := ReferenceDate (anti-conservative / lookahead).
-  Resolution order, per source:
+Vintage policy: first print only, and PublishedAt is the REAL publication date. Never
+default PublishedAt to ReferenceDate - that is anti-conservative and leaks.
 
-    CCPI (source="CBSL_CCPI"):
-      1. URL-embedded date (press_YYYYMMDD_...) -- always available (the
-         downloader only accepts links with a parseable filename date).
-      2. PDF /CreationDate -- probe-confirmed present AND agreeing with the
-         URL date on all 3 real fixtures. Cross-checked against (1): if they
-         DISAGREE, use the LATER of the two (never the earlier -- erring
-         late only delays a join, erring early leaks) and WARN.
-      IsPublishedAtImputed = False in both cases (both are real, recovered
-      publication signals, never a lag-prior guess).
+CCPI resolution order: the URL-embedded date (always available, since the downloader only
+accepts links with a parseable filename date), cross-checked against the PDF
+/CreationDate. If the two disagree, the LATER wins and we WARN - erring late only delays a
+join, erring early leaks. Both are real signals, so IsPublishedAtImputed stays False.
 
-    MEI (source="CBSL_MEI"):
-      1. PDF /CreationDate -- probe-confirmed ABSENT on the MEI_202605
-         fixture (metadata carries only ModDate, no CreationDate key). Read
-         defensively in case some MEI pack someday carries one.
-      2. Listing-page date, if the caller supplies one (not modelled by this
-         MVP's scraper -- the MEI listing page probed 2026-07-04 shows no
-         per-item published date, only the pack's own YYYYMM in the
-         filename) -- kept as a plumbed-through parameter for forward
-         compatibility, currently always None in practice.
-      3. Conservative-LATE imputation: ReferenceDate + a per-series lag
-         prior (see _MEI_LAG_PRIOR_DAYS), IsPublishedAtImputed = True.
-         The lag prior is deliberately generous (mirrors HARTI's
-         conservative-late reasoning in harti/loader.py's
-         _resolve_as_of_utc): MEI packs are observed 1 calendar month behind
-         their own pack month for trade data and published only once the
-         FOLLOWING pack's page confirms them, so both FOOD_IMPORTS_YOY and
-         POLICY_RATE_OPR use the PACK'S OWN month + a full-month-plus-buffer
-         lag from ReferenceDate as the imputed vintage.
+MEI resolution order: the PDF /CreationDate (usually absent, but read defensively), then a
+listing-page date if the caller has one (the scraper does not model one today), then
+conservative-LATE imputation of ReferenceDate + a per-series lag prior with
+IsPublishedAtImputed = True.
 
-Idempotency: upsert keyed on the FULL unique triple (SeriesCode,
-ReferenceDate, PublishedAt) -- matches
-IX_MacroSeriesPoints_SeriesCode_ReferenceDate_PublishedAt (unique). A revised
-print of the same ReferenceDate with a NEW PublishedAt is a distinct row by
-design (never skipped as "already present") -- this loader never revises an
-existing (SeriesCode, ReferenceDate, PublishedAt) row's Value; it only
-inserts a first-print + updates RetrievedAtUtc/Value on an EXACT key repeat
-(e.g. a re-run of the same artifact).
+Idempotency: the upsert is keyed on the FULL unique triple (SeriesCode, ReferenceDate,
+PublishedAt). A revised print of the same ReferenceDate with a NEW PublishedAt is a
+distinct row by design; an exact key repeat, such as re-running the same artifact, updates
+Value and RetrievedAtUtc in place.
 """
 from __future__ import annotations
 
@@ -69,9 +44,8 @@ _PDF_DATE_RE = re.compile(
 def _parse_pdf_creation_date(raw: "str | None") -> "datetime | None":
     """Parse a PDF /CreationDate string into a tz-aware UTC datetime.
 
-    Mirrors harti/loader.py's ``_parse_pdf_creation_date`` exactly (same
-    regex, same optional-offset handling) -- duplicated rather than imported
-    to keep cbsl_macro/ independently deletable from harti/.
+    Mirrors harti/loader.py's version exactly, duplicated rather than imported so cbsl_macro/
+    stays independently deletable from harti/.
     """
     if not raw:
         return None
@@ -92,14 +66,10 @@ def _parse_pdf_creation_date(raw: "str | None") -> "datetime | None":
     return local.astimezone(timezone.utc)
 
 
-# Per-series conservative lag prior applied when NO real vintage signal is
-# available at all (used for MEI when both /CreationDate and a listing date
-# are absent, which per the 2026-07-04 probe is the common case for MEI).
-# MEI packs describe DATA one month behind their own pack month and are only
-# confirmed on cbsl.gov.lk sometime after the following month begins; 45 days
-# from the (already 1-month-lagged) ReferenceDate is a deliberately generous,
-# conservative-LATE buffer -- erring late only delays a downstream join,
-# erring early would leak.
+# Conservative lag prior, used only when no real vintage signal exists at all, which for
+# MEI is the common case. MEI packs describe data a month behind their own pack month and
+# are confirmed on the site later still, so 45 days from the already-lagged ReferenceDate
+# is deliberately generous: erring late only delays a join, erring early would leak.
 _MEI_LAG_PRIOR_DAYS = 45
 
 
@@ -190,10 +160,8 @@ def upsert_macro_points(
 
     Returns counts: {"inserted", "updated", "skipped_invalid"}.
     """
-    # Engine construction is deferred until we know we actually need to talk
-    # to the DB (i.e. NOT dry_run) -- a dry_run call must be usable in a
-    # hermetic test / no-DB-configured environment without raising on engine
-    # construction alone.
+    # Build the engine only when we actually need the DB, so a dry_run works in a hermetic
+    # test or an environment with no DB configured.
     now_utc = datetime.now(timezone.utc)
     counters = dict(inserted=0, updated=0, skipped_invalid=0)
 
@@ -226,19 +194,11 @@ def upsert_macro_points(
             "is_published_at_imputed": is_imputed,
         })
 
-    # Defensive in-batch dedup on the exact upsert key (SeriesCode,
-    # ReferenceDate, PublishedAt). Belt-and-suspenders: the downloader layer
-    # already dedups duplicate-period artifacts before they ever reach the
-    # parser (see cbsl_macro.downloader._dedup_by_key — a real Drupal
-    # duplicate-upload was caught this way during live verification), but two
-    # DIFFERENT artifacts (e.g. a CCPI release AND a stale cached copy) could
-    # in principle resolve to the identical key. Without this, a genuine
-    # in-batch duplicate hits the DB's unique index mid-transaction and
-    # aborts the ENTIRE batch (observed live) -- collapsing to the LAST
-    # occurrence here (values should be identical for a true duplicate;
-    # logged loudly if they are not, since that would mean two DIFFERENT
-    # values are claiming the same vintage) keeps the pass from failing
-    # loudly bombing wholesale over one bad pair.
+    # Defensive in-batch dedup on the exact upsert key. The downloader already drops
+    # duplicate-period artifacts, but two different artifacts could still resolve to the same
+    # key, and that hits the unique index mid-transaction and aborts the ENTIRE batch (seen
+    # live). Collapsing to the last occurrence keeps the pass alive; differing values for the
+    # same key are logged loudly, since that means two values claim one vintage.
     dedup: dict[tuple[str, str, str], dict] = {}
     n_batch_dup = 0
     for row in to_upsert:

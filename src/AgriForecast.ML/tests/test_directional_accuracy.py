@@ -29,9 +29,7 @@ if str(ML_ROOT) not in sys.path:
 from agriforecast_ml.train.evaluate import directional_accuracy  # noqa: E402
 
 
-# ===========================================================================
 # PURE: known-answer fixtures
-# ===========================================================================
 
 class TestDirectionalAccuracy:
     def test_all_hits(self):
@@ -120,9 +118,7 @@ class TestDirectionalAccuracy:
         assert r["n_excluded"] == 0
 
 
-# ===========================================================================
 # SCHEMA: metadata["cv"] additive-key invariant
-# ===========================================================================
 
 # The exact set of flat cv keys that existed BEFORE P4 step 0b. tests/
 # test_phase3.py reads these directly; they must survive verbatim.

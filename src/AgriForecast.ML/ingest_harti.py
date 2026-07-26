@@ -90,9 +90,7 @@ def main() -> None:
 
     from agriforecast_ml.harti import downloader, parser as harti_parser, loader, qa
 
-    # ------------------------------------------------------------------ #
     # Step 1: Download / scrape PDFs
-    # ------------------------------------------------------------------ #
     cache_dir: Path = args.cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -137,9 +135,7 @@ def main() -> None:
 
     log.info("Step 1 complete: %d PDFs to parse", len(cached_pdfs))
 
-    # ------------------------------------------------------------------ #
     # Step 2: Parse PDFs
-    # ------------------------------------------------------------------ #
     log.info("Step 2: Parsing %d PDFs...", len(cached_pdfs))
     parsed_rows = harti_parser.parse_many(cached_pdfs, log_every=200)
     log.info("Step 2 complete: %d parsed price rows", len(parsed_rows))
@@ -152,9 +148,7 @@ def main() -> None:
     crop_counts = Counter(r.harti_label for r in parsed_rows)
     log.info("Parsed rows by HARTI crop label: %s", dict(sorted(crop_counts.items())))
 
-    # ------------------------------------------------------------------ #
     # Step 3: Load into DB (with splice rule + idempotent upsert)
-    # ------------------------------------------------------------------ #
     log.info(
         "Step 3: Loading into MarketPrices (Dambulla-only, back-compat; dry_run=%s)...",
         args.dry_run,
@@ -162,11 +156,8 @@ def main() -> None:
     counters = loader.upsert_harti_prices(parsed_rows, dry_run=args.dry_run)
     log.info("Step 3 complete: %s", counters)
 
-    # ------------------------------------------------------------------ #
-    # Step 3b: Load ALL markets (Dambulla, Pettah, Narahenpita) into
-    # PriceObservations — R1.1 P1 multi-market table. Additive to Step 3;
-    # no splice rule applies here (see loader.py docstring).
-    # ------------------------------------------------------------------ #
+    # Step 3b: load ALL markets into PriceObservations. Additive to step 3, and the splice
+    # rule does not apply here (see loader.py).
     log.info(
         "Step 3b: Loading into PriceObservations (all markets; dry_run=%s)...",
         args.dry_run,
@@ -174,9 +165,7 @@ def main() -> None:
     po_counters = loader.upsert_harti_price_observations(parsed_rows, dry_run=args.dry_run)
     log.info("Step 3b complete: %s", po_counters)
 
-    # ------------------------------------------------------------------ #
     # Step 4: QA checks
-    # ------------------------------------------------------------------ #
     if args.skip_qa or args.dry_run:
         if args.dry_run:
             log.info("Dry run — skipping QA (no DB writes)")
@@ -205,15 +194,10 @@ def main() -> None:
         log.error("QA FAILED: %s", exc)
         sys.exit(2)
 
-    # Step 4b: PriceObservations-scoped data-quality checks (R1.1 P1 Step 5,
-    # ClickUp 86cahef64). assert_no_source_duplicates is a hard-fail check
-    # (mirrors qa.assert_no_source_duplicates above, scoped to
-    # PriceObservations rather than the legacy MarketPrices table) — it must
-    # run every ingestion pass, not just be available to call manually.
-    # gap_report()/flag_price_outliers() are intentionally NOT called here:
-    # per their own contracts they return structured findings for manual
-    # ack / are meant to be run as a separate post-ingestion pass, not gate
-    # this pipeline's exit code.
+    # Step 4b: PriceObservations-scoped data-quality checks. assert_no_source_duplicates is a
+    # hard fail and must run on every pass. gap_report() and flag_price_outliers() are
+    # deliberately not called here: they return findings for manual acknowledgement and must
+    # not gate this pipeline's exit code.
     from agriforecast_ml.data_quality import assert_no_source_duplicates
     log.info("Step 4b: Running PriceObservations cross-source duplicate check...")
     try:

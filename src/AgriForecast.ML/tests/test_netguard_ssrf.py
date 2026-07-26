@@ -39,9 +39,7 @@ from agriforecast_ml.netguard import (  # noqa: E402
 )
 
 
-# ---------------------------------------------------------------------------
 # Helpers: mock DNS resolution so tests never touch the network.
-# ---------------------------------------------------------------------------
 
 def _patch_resolve(monkeypatch, ip: str):
     """Make every host resolve to ``ip`` (single A record)."""
@@ -58,9 +56,7 @@ def _make_response(*, redirect_to=None, status=200):
     return resp
 
 
-# ===========================================================================
 # assert_host_allowed — offline scheme + host allowlist (no DNS)
-# ===========================================================================
 
 class TestHostAllowlist:
     def test_allowlisted_exact_host_passes(self):
@@ -96,9 +92,7 @@ class TestHostAllowlist:
             assert_host_allowed("https:///no-host")
 
 
-# ===========================================================================
 # assert_url_allowed — private/loopback/link-local IP block (resolve-then-check)
-# ===========================================================================
 
 class TestPrivateIpBlock:
     def test_public_ip_for_allowlisted_host_passes(self, monkeypatch):
@@ -132,9 +126,7 @@ class TestPrivateIpBlock:
         assert_url_allowed("https://harti.gov.lk/x")  # no raise
 
 
-# ===========================================================================
 # Host allowlist override via env
-# ===========================================================================
 
 class TestAllowlistOverride:
     def test_env_override_replaces_default_list(self, monkeypatch):
@@ -145,9 +137,7 @@ class TestAllowlistOverride:
         assert_host_allowed("https://only-this.example/x")
 
 
-# ===========================================================================
 # guarded_get — redirects are not auto-followed and are re-validated
-# ===========================================================================
 
 class TestGuardedGetRedirects:
     def test_no_redirect_returns_response(self, monkeypatch):
@@ -212,9 +202,7 @@ class TestGuardedGetRedirects:
             guarded_get(session, "https://harti.gov.lk/start")
 
 
-# ===========================================================================
 # Wiring: the HARTI download loop rejects an off-allowlist URL as a failure
-# ===========================================================================
 
 class TestDownloaderWiring:
     def test_download_pdfs_blocks_offlist_url_without_aborting(self, tmp_path, monkeypatch):
@@ -235,9 +223,7 @@ class TestDownloaderWiring:
         session.get.assert_not_called()
 
 
-# ===========================================================================
 # Wiring: the news fetcher skips a disallowed feed URL without fetching (N5)
-# ===========================================================================
 
 class TestNewsFetcherWiring:
     def test_fetch_feed_skips_metadata_ip_url_and_never_parses(self):

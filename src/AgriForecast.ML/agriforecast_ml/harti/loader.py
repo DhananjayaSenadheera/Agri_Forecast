@@ -1,131 +1,49 @@
-"""HARTI price loader — CropId/MarketId resolution + splice rule + idempotent
-DB upsert.
+"""HARTI price loader: CropId/MarketId resolution, the splice rule and idempotent upserts.
 
-SPLICE / DEDUP RULE (critical — avoids double-counting in rolling features):
-  DEC is authoritative from 2025-05-05 onward.
+Splice rule (avoids double-counting in rolling features). DEC is authoritative from
+2025-05-05, so HARTI rows are only inserted for PriceDate before that. Ridge Gourd and
+Beans are the exception: DEC data is too noisy until 2025-06-30, so HARTI is accepted up
+to and including that date for those two crops and the overlapping DEC rows are excluded
+in load.load_prices() rather than deleted from the DB. The invariant is that no
+(CropId, PriceDate) pair reaches the feature build from both sources.
 
-  General rule:
-    Insert HARTI rows ONLY for PriceDate < 2025-05-05 (pre-DEC historical tail).
+The splice applies to upsert_harti_prices() only - the legacy Dambulla to MarketPrices
+path. upsert_harti_price_observations() does not apply it: PriceObservations is a
+point-in-time table whose correctness comes from AsOfUtc, not a date cutoff.
 
-  EXCEPTION — DEC launch noise (Ridge Gourd + Beans only):
-    DEC data 2025-05-05 → 2025-06-30 is garbage (CV 49–58%) for these two crops.
-    For Ridge Gourd and Beans: insert HARTI up to 2025-06-30 (inclusive).
-    The corresponding DEC rows for those crops in that window are excluded in the
-    ML load path (load_prices() in load.py) — NOT deleted from the DB.
+Idempotency. The MarketPrices path is keyed on (CropId, PriceDate, Source). The
+PriceObservations path is name-keyed, because HARTI leaves ExternalCommodityId NULL, so
+the applicable unique index is (MarketId, ExternalCommodityName, ObservedDate, Source).
+Re-running either path updates existing rows in place rather than duplicating them.
 
-  Net invariant: no (CropId, PriceDate) pair has both a HARTI and a DEC row
-  reaching the feature build.
+Crop and market resolution. Market names resolve against the DB Markets dimension BY NAME
+and never a hardcoded GUID; a name that does not resolve is WARN-skipped, never invented.
+upsert_harti_price_observations() resolves CropId through canonical.CommodityAliasResolver
+(a HARTI-scoped alias beats a global one). A label with no active alias is written with
+CropId NULL and a WARNING - never guessed - and heals later via
+canonical.heal_price_observation_crops() without re-running this loader.
 
-  NOTE: the splice rule is applied by upsert_harti_prices() (the legacy
-  Dambulla -> MarketPrices path) ONLY. upsert_harti_price_observations()
-  (the new multi-market -> PriceObservations path, R1.1 P1) does NOT apply
-  the splice — PriceObservations is a fresh point-in-time table with its own
-  identity and is not part of the MarketPrices/DAMBULLA_DEC splice
-  invariant. Point-in-time correctness there comes from AsOfUtc, not a date
-  cutoff.
+Some bulletin labels are deliberately unmapped (Pumpkin, Carrot, Cabbage, Beetroot) because
+the DB only has variety- or region-qualified crops and mapping would mean guessing. The
+'Eggplant' row that appears from 2023-02 is HARTI relabelling the Wing Beans row, not the
+DB's own Eggplant crop, so it is excluded too.
 
-IDEMPOTENCY (legacy MarketPrices path — upsert_harti_prices):
-  Upsert keyed on (CropId, PriceDate, Source).  Re-running is safe — existing
-  rows are updated (prices/RetrievedAtUtc refresh), not duplicated.
+Price columns. HARTI publishes a min/max range per market per crop, so its rows always
+populate MinPrice/MaxPrice and always leave WholesalePrice/RetailPrice NULL, even for
+Pettah and Narahenpita. Those two columns are for sources that publish a single point
+figure. The feature layer must read MinPrice/MaxPrice for Source='HARTI'.
 
-IDEMPOTENCY (PriceObservations path — upsert_harti_price_observations, R1.1 P1):
-  HARTI is name-keyed (ExternalCommodityId is NULL), so the applicable unique
-  index is UX_PriceObservations_MarketCommodityNameDateSource on
-  (MarketId, ExternalCommodityName, ObservedDate, Source) — i.e. the
-  idempotency key is (Source, commodity, PriceDate, MarketId), extending the
-  legacy (Source, ExternalProductId, PriceDate) key with the market
-  dimension per the R1.1 P1 spec.  Re-running is safe — existing rows are
-  updated in place, not duplicated.
+Unit contract. HARTI daily wholesale bulletins are Rs/kg, verified corpus-wide, so every
+row is written with UnitRaw and UnitConversionFactor from canonical.py and
+IsUnitConfirmed=1. The prices are already LKR/kg, so no numeric conversion is applied.
 
-CROP MAP:
-  R2 Step 6.1 (D-DF6, 2026-07-07) widened this from 6 to 20 mappable
-  canonical crops (24 exact label keys incl. potato/onion variants)
-  -- see _HARTI_TO_DB_NAME for the full current mapping and the excluded/
-  unmappable labels list (Pumpkin, Carrot, Cabbage, Beetroot: DB only has
-  region/variety-qualified names, no plain crop, so mapping would mean
-  guessing a variety -- deliberately not done). 4 ORIGINALLY-uncovered
-  crops (Winged Bean, Ginger, Cooking Melon, Watermelon) still have no
-  usable HARTI Dambulla data under their own DB names — skip them. (NOTE:
-  from 2023-02-01 the bulletin carries a row literally labelled "Eggplant"
-  at the position formerly held by "Dambala (Wing Beans)" — this is HARTI's
-  own relabelling of the Wing Beans row, not DB's distinct "Eggplant" crop,
-  and is deliberately excluded from _TARGET_CROPS/_HARTI_TO_DB_NAME to avoid
-  a false alias merge; see parser.py's _TARGET_CROPS docstring.)
-
-MARKET MAP (R1.1 P1 + R1.1 P2 + R2 Step 6.1):
-  parser.ParsedPrice.market_name values ("Dambulla", "Pettah", "Narahenpita",
-  "Thambuttegama", "Keppetipola", "Kandy", "Meegoda", "Norochchole",
-  "Nuwara Eliya", "Bandarawela", "Veyangoda") are resolved against the DB
-  Markets dimension BY NAME (never a hardcoded GUID) — see
-  _build_market_map().  Seeded rows (migration
-  AddMultiMarketAndPointInTimeData): Dambulla Dedicated Economic Centre
-  (MKT00000001), Keppetipola Dedicated Economic Centre (MKT00000002),
-  Thambuttegama Dedicated Economic Centre (MKT00000003), "Pettah (HARTI
-  wholesale)" (MKT00000004), "Narahenpita (HARTI retail)" (MKT00000005).
-  Note Keppetipola/Thambuttegama use their plain DEC name (same pattern as
-  Dambulla) — unlike Pettah/Narahenpita they do NOT carry a "(HARTI
-  wholesale/retail)" suffix, because (like Dambulla) they are seeded as
-  their own first-class DEC market rows, not HARTI-only aliases of a
-  market that also has other sources. A parsed market_name that does not
-  resolve is WARN-skipped, never invented.
-
-  The 6 R2 Step 6.1 markets (Kandy, Meegoda, Norochchole, Nuwara Eliya,
-  Bandarawela, Veyangoda) have NO Markets row yet (live-queried, confirmed
-  absent — subtask 6.2's job) — _PARSER_MARKET_TO_DB_NAME carries
-  PLACEHOLDER "(HARTI wholesale)"-suffixed names for them today, which
-  legitimately WARN-skip every row until 6.2 creates the matching rows.
-
-PRICE COLUMNS (PriceObservations):
-  HARTI rows ALWAYS populate MinPrice/MaxPrice and ALWAYS leave
-  WholesalePrice/RetailPrice NULL — HARTI publishes a min/max range per
-  market per crop, the same convention as the legacy MarketPrices table, for
-  every market including Pettah/Narahenpita. WholesalePrice/RetailPrice are
-  for other sources that publish a single point figure. The feature layer
-  must read MinPrice/MaxPrice for Source='HARTI', not WholesalePrice.
-
-CROP RESOLUTION (R1.1 P1 Stage B, canonical mapping layer):
-  upsert_harti_price_observations() resolves each row's CropId via
-  ..canonical.CommodityAliasResolver, loaded once per call (cache-per-run,
-  same pattern as _build_market_map()) against active CommodityAliases rows
-  scoped Source='HARTI' (falling back to a global alias if no HARTI-scoped
-  one matches). A label with no active alias match is written with
-  CropId = NULL and logged as a WARNING — never guessed, never
-  fuzzy-matched. Existing NULL-CropId rows self-heal later via
-  canonical.heal_price_observation_crops() as new aliases are added; this
-  loader does not need to be re-run for that.
-
-UNIT CONTRACT (R1.1 P1 Stage B):
-  HARTI daily wholesale bulletins are Rs/kg, verified corpus-wide (bulletin
-  header states "... (Rs./kg)" for every located market column in the same
-  table — see harti_multimarket_audit.md). Every row this loader writes
-  therefore sets UnitRaw=canonical.HARTI_UNIT_RAW ("Rs/kg"),
-  UnitConversionFactor=canonical.HARTI_UNIT_CONVERSION_FACTOR (1.0), and
-  IsUnitConfirmed=1 — per the fail-closed contract documented in
-  canonical.py, a source writer may only set IsUnitConfirmed=1 when the unit
-  is a verified constant of that source (true here) or a per-row confirmed
-  conversion. MinPrice/MaxPrice are already the LKR/kg figures HARTI
-  publishes, so no numeric conversion is applied (factor 1.0).
-
-QUARANTINE HOLDS ARE STICKY-DOWN ACROSS RE-INGEST (R1.1 P1 Step 5,
-ClickUp 86cahef64): IsUnitConfirmed=0 set by data_quality.flag_price_outliers()
-or by this loader's own min>max quarantine (see data_quality.validate_price_row)
-is a ONE-WAY gate with respect to routine re-ingestion. upsert_harti_price_
-observations() is designed to be re-run repeatedly (ingest_harti.py
---no-download re-parses the whole cache every time it runs) and is
-idempotent on every OTHER column — but IsUnitConfirmed must NOT be
-"idempotent" in the naive sense of "just re-write whatever the fresh parse
-says," because a fresh, clean re-parse of an already-held row always
-computes IsUnitConfirmed=1 (validation.hold=False for a normal min<=max
-row), which would silently erase the hold the very next time this loader
-runs — defeating flag_price_outliers()'s entire quarantine mechanism. The
-UPDATE branch therefore uses
-  IsUnitConfirmed = CASE WHEN IsUnitConfirmed = 0 THEN 0 ELSE :is_unit_confirmed END
-i.e. already-0 (held) stays 0 regardless of what this run's row computes;
-already-1 (not held) takes the incoming value normally, so a newly-detected
-min>max on a previously-clean row can still transition 1 -> 0 in the same
-write. The ONLY sanctioned way to release an existing hold is
-data_quality.clear_outlier_hold() (explicit, single-row, parameterized,
-never a bulk/incidental side effect of re-ingesting).
+Quarantine holds are STICKY-DOWN across re-ingest. IsUnitConfirmed=0, whether set by
+data_quality.flag_price_outliers() or by this loader's own min>max quarantine, must survive
+a re-run. This loader is designed to be re-run routinely, and a clean re-parse of a held
+row always computes IsUnitConfirmed=1, so an unconditional SET would silently erase the
+hold. The UPDATE branch therefore keeps an existing 0 at 0 while letting a 1 take the
+incoming value, so a newly-detected min>max can still lower it. The only sanctioned way to
+release a hold is data_quality.clear_outlier_hold().
 """
 from __future__ import annotations
 
@@ -149,16 +67,11 @@ from .parser import ParsedPrice
 logger = logging.getLogger(__name__)
 
 SOURCE = "HARTI"
-# Per-label synthetic ExternalProductIds for HARTI.
-# MUST be distinct (the unique index is (Source, ExternalProductId, PriceDate)
-# — NOT including CropId).  Negative values avoid collision with DEC range 1-101.
-#
-# R2 Step 6.1 (D-DF6) note: this dict backs ONLY upsert_harti_prices() (the
-# legacy Dambulla-only MarketPrices path), which filters to market_name ==
-# "Dambulla" before ever looking up an ExternalProductId -- so only crops
-# with real Dambulla-column data need an entry here. New IDs continue the
-# existing negative-integer numbering (-7, -8, ...), never colliding with
-# the original -1..-6 or the DEC positive range (1-101).
+# Per-label synthetic ExternalProductIds for HARTI. They MUST be distinct, because the
+# unique index is (Source, ExternalProductId, PriceDate) and does not include CropId.
+# Negative values avoid colliding with the DEC range of 1-101. Only crops with real
+# Dambulla-column data need an entry, since this dict backs the Dambulla-only
+# MarketPrices path alone.
 _HARTI_PRODUCT_IDS: dict[str, int] = {
     "Beans":          -1,
     "Ladies Fingers":  -2,
@@ -171,8 +84,7 @@ _HARTI_PRODUCT_IDS: dict[str, int] = {
     "Leeks":          -9,
     "Knolkhol":      -10,
     "Raddish":       -11,
-    # -12 intentionally unused (was Pumpkin -- removed, see parser.py
-    # _TARGET_CROPS docstring: Pumpkin is unmappable, never reaches this dict)
+    # -12 is intentionally unused: it was Pumpkin, which is unmappable and never reaches here.
     "Cucumber":      -13,
     "Drumstick":     -14,
     "Long Beans":    -15,
@@ -188,46 +100,20 @@ _HARTI_PRODUCT_IDS: dict[str, int] = {
     "Big Onion Local":       -25,
 }
 
-# --------------------------------------------------------------------------
-# Market name -> DB Markets.Name mapping (R1.1 P1)
-# --------------------------------------------------------------------------
-# parser.market_name (the canonical market key emitted by the parser) -> the
-# exact Markets.Name string seeded by the AddMultiMarketAndPointInTimeData
-# migration. Resolution happens BY NAME via a DB query in _build_market_map()
-# — GUIDs are never hardcoded here.
-#
-# Thambuttegama / Keppetipola (ClickUp 86cahef44, R1.1 P2): DB names verified
-# live against the Markets table (MKT00000002 / MKT00000003) — "Thambuttegama
-# Dedicated Economic Centre" / "Keppetipola Dedicated Economic Centre". Note
-# these DB names differ in spelling from the parser's canonical market_name
-# keys and from HARTI's own PDF header text (parser key "Thambuttegama" [one
-# fewer "th" than HARTI's PDF spelling "Thambuththegama"] matches the DB
-# row's spelling, which was seeded independently of HARTI's bulletin text) —
-# this dict is exactly the name-alias mapping that bridges that spelling gap,
-# same role it already plays for Pettah->"Peliyagoda"-family HARTI headers.
-#
-# R2 Step 6.2 (D-DF6): the 6 additional markets (Kandy, Meegoda,
-# Norochchole, Nuwara Eliya, Bandarawela, Veyangoda) now have live Markets
-# rows (MKT00000007..MKT00000012, seeded by SeedMarkets in
-# AgriForecastDbContext.cs).  These Name strings are byte-for-byte the
-# seeded Market.Name values.  Classification was owner web-verified in 6.2
-# and split: Meegoda / Nuwara Eliya / Veyangoda are formally-designated
-# Dedicated Economic Centres; Kandy / Norochchole / Bandarawela are
-# municipal/assembly wholesale markets ("(HARTI wholesale)" suffix, like
-# Pettah).  Per the fail-closed contract in _build_market_map() below, an
-# unresolved DB name is WARN-skipped at runtime, never invented -- kept as
-# a live safety net if a name ever drifts.
+# Parser market name -> the exact Markets.Name string seeded by the migration. Resolution
+# happens BY NAME in _build_market_map(); GUIDs are never hardcoded here. The parser's
+# canonical keys, HARTI's PDF header spellings and the DB names all differ, and this dict
+# is exactly the alias mapping that bridges those gaps. An unresolved DB name is
+# WARN-skipped at runtime, never invented, which is the safety net if a name ever drifts.
 _PARSER_MARKET_TO_DB_NAME: dict[str, str] = {
     "Dambulla":      "Dambulla Dedicated Economic Centre",
     "Pettah":        "Pettah (HARTI wholesale)",
     "Narahenpita":   "Narahenpita (HARTI retail)",
     "Thambuttegama": "Thambuttegama Dedicated Economic Centre",
     "Keppetipola":   "Keppetipola Dedicated Economic Centre",
-    # -- R2 Step 6.2: live Markets rows now exist (MKT00000007..MKT00000012).
-    #    Names are byte-for-byte the seeded Market.Name values (SeedMarkets in
-    #    AgriForecastDbContext.cs). Classification per owner web-verification:
-    #    Meegoda / Nuwara Eliya / Veyangoda = Dedicated Economic Centres;
-    #    Kandy / Norochchole / Bandarawela = "(HARTI wholesale)" markets. --
+    # Names below are byte-for-byte the seeded Market.Name values. Meegoda, Nuwara Eliya and
+    # Veyangoda are Dedicated Economic Centres; Kandy, Norochchole and Bandarawela are
+    # municipal wholesale markets and carry the '(HARTI wholesale)' suffix, like Pettah.
     "Kandy":         "Kandy (HARTI wholesale)",
     "Meegoda":       "Meegoda Dedicated Economic Centre",
     "Norochchole":   "Norochchole (HARTI wholesale)",
@@ -236,9 +122,7 @@ _PARSER_MARKET_TO_DB_NAME: dict[str, str] = {
     "Veyangoda":     "Veyangoda Dedicated Economic Centre",
 }
 
-# --------------------------------------------------------------------------
-# Splice boundary dates
-# --------------------------------------------------------------------------
+# Splice boundary dates.
 # General cutoff: HARTI rows must be before this date (exclusive).
 _SPLICE_GENERAL: date = date(2025, 5, 5)
 
@@ -247,17 +131,10 @@ _SPLICE_GENERAL: date = date(2025, 5, 5)
 _SPLICE_EXCEPTION_CROPS_DB_NAMES: frozenset[str] = frozenset({"Ridge Gourd", "Beans"})
 _SPLICE_EXCEPTION_END: date = date(2025, 6, 30)
 
-# --------------------------------------------------------------------------
-# HARTI label → DB Crop.Name mapping
-# --------------------------------------------------------------------------
-# R2 Step 6.1 (D-DF6) note: this dict backs upsert_harti_prices() (the
-# legacy Dambulla-only MarketPrices path) ONLY -- it is NOT the
-# CommodityAliases fail-closed resolver that upsert_harti_price_
-# observations() uses for the PriceObservations multi-market path (see
-# CommodityAliasResolver in canonical.py, extended separately in subtask
-# 6.2). Keys are the CANONICAL harti_label values emitted by parser.
-# _TARGET_CROPS (i.e. the post-consolidation label -- "Brinjals", not the
-# raw pre-2023 "Brinjals (Village)"/"Brinjals (Other)" PDF cell text).
+# HARTI label -> DB Crop.Name. This backs the legacy Dambulla-only MarketPrices path only;
+# the PriceObservations path resolves crops through CommodityAliases instead. Keys are the
+# canonical post-consolidation labels the parser emits ('Brinjals', not the raw pre-2023
+# '(Village)'/'(Other)' cell text).
 _HARTI_TO_DB_NAME: dict[str, str] = {
     "Beans":          "Beans",
     "Ladies Fingers": "Lady's Fingers",
@@ -283,13 +160,9 @@ _HARTI_TO_DB_NAME: dict[str, str] = {
     "Potato (Nuwaraeliya)": "Potatoes - Nuwaraeliya",
     "Big Onion Imported":   "Big Onion Import",
     "Big Onion Local":      "Big Onion Lanka",
-    # NOT mapped (deliberately excluded from _TARGET_CROPS -- see parser.py
-    # docstring and the Step 6.1 report "unmappable labels" for the full
-    # reasoning): Pumpkin (DB only has "Pumpkin - Big"/"Pumpkin - Malashian",
-    # no plain "Pumpkin" -- picking one would be guessing); Carrot, Cabbage,
-    # Beetroot (DB only has region-qualified variants, no plain crop; the
-    # bulletin's own region-qualified rows -- e.g. "Cabbage (Kandy)" --
-    # still don't line up 1:1 with DB's region choices without guessing).
+    # Deliberately NOT mapped: Pumpkin, Carrot, Cabbage and Beetroot. The DB only has
+    # variety- or region-qualified crops for these, so mapping the bulletin's generic row
+    # would mean guessing a variety.
 }
 
 
@@ -394,28 +267,21 @@ def _build_market_map(engine: sa.engine.Engine) -> dict[str, uuid.UUID]:
     return result
 
 
-# MarketCode of the sole Dambulla market row (Markets.MarketCode is a stable
-# business code, seeded by migration -- NEVER hardcode the row's GUID, which
-# is per-DB; see D-DF3 / R2 Step 3 in the project memory).
+# MarketCode of the sole Dambulla market row. Markets.MarketCode is a stable business code;
+# never hardcode the row's GUID, which is per-DB.
 _DAMBULLA_MARKET_CODE = "MKT00000001"
 
 
 def _dambulla_market_id(engine: sa.engine.Engine) -> uuid.UUID:
-    """Resolve the Dambulla Markets.Id at runtime (BY CODE, never a hardcoded
-    GUID -- GUIDs are per-DB).
+    """Resolve the Dambulla Markets.Id at runtime BY CODE - never a hardcoded GUID, GUIDs are
+    per-DB.
 
-    Used to populate MarketPrices.EconomicCenterId for HARTI rows written by
-    upsert_harti_prices() (the legacy Dambulla-only MarketPrices path): the
-    R2 Step-3 Markets/EconomicCenters merge repoints EconomicCenterId at
-    Markets.Id, and both DAMBULLA_DEC and HARTI rows resolve to the same
-    Dambulla market row (hub-adjudicated -- the legacy HARTI splice loader
-    IS Dambulla prices).
+    Used to populate MarketPrices.EconomicCenterId for HARTI rows written by the legacy
+    Dambulla-only path; both DAMBULLA_DEC and HARTI rows resolve to the same Dambulla market
+    row. Call it once per upsert, not per row.
 
-    Cache-per-run: callers should call this once per upsert call (mirrors
-    _build_crop_map() / _build_market_map()), not per row.
-
-    Raises RuntimeError if the Dambulla market row is missing -- fails
-    loudly rather than silently writing NULL/a guessed GUID.
+    Raises RuntimeError if the Dambulla market row is missing, rather than writing NULL or a
+    guessed GUID.
     """
     with engine.connect() as conn:
         row = conn.execute(
@@ -432,24 +298,15 @@ def _dambulla_market_id(engine: sa.engine.Engine) -> uuid.UUID:
     return _parse_guid(row[0])
 
 
-# --------------------------------------------------------------------------
-# Bulletin publication timestamp (AsOfUtc) extraction
-# --------------------------------------------------------------------------
-# PDF /CreationDate format: "D:YYYYMMDDHHmmSS+HH'mm'" (or trailing Z / no
-# offset).  This is HARTI's own document-creation timestamp -- i.e. when the
-# bulletin was actually published, which is frequently the day AFTER the
-# ObservedDate (bulletins are typically finalised the next morning).  This is
-# exactly the point-in-time vintage PriceObservation.AsOfUtc is for: never
-# treat ObservedDate as "known" as of itself.
+# PDF /CreationDate format: "D:YYYYMMDDHHmmSS+HH'mm'", or a trailing Z, or no offset.
+# This is HARTI's own document-creation timestamp, i.e. when the bulletin was published,
+# frequently the day AFTER ObservedDate. That is exactly what AsOfUtc is for: never treat
+# ObservedDate as known as of itself.
 #
-# The apostrophe delimiters around the offset minutes ("+05'30'") are the
-# PDF-spec-correct form and are what every real PDF observed in the corpus
-# uses, but they are made OPTIONAL here ("+0530" also matches): a
-# delimiter-less offset falling through this regex would previously hit the
-# "no offset info present" branch and be misread as already-UTC -- a silent
-# 5.5h-early misread that is exactly the kind of look-ahead risk AsOfUtc
-# exists to prevent. Matching it correctly (rather than falling back) is
-# strictly safer than the WARN-and-fall-back path.
+# The apostrophes around the offset minutes are the spec-correct form every real PDF here
+# uses, but they are OPTIONAL in the regex: a delimiter-less offset would otherwise fall
+# through to the 'no offset' branch and be misread as already-UTC, a silent 5.5h-early
+# reading and exactly the look-ahead risk AsOfUtc exists to prevent.
 _PDF_DATE_RE = re.compile(
     r"D:(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})"
     r"(?:([+-])(\d{2})'?(\d{2})'?|Z)?"
@@ -486,35 +343,24 @@ def _parse_pdf_creation_date(raw: "str | None") -> "datetime | None":
 
 _SRI_LANKA_OFFSET = timedelta(hours=5, minutes=30)
 
-# Conservative-late fallback publication time-of-day, in Sri Lanka local time
-# (see _resolve_as_of_utc for the reasoning). 06:00 SL is safely AFTER the
-# ~04:30-10:00 SL window genuine HARTI bulletins are observed to publish in
-# (per real /CreationDate timestamps in the corpus) -- i.e. still
-# conservative-late relative to the true publication time, not just relative
-# to ObservedDate.
+# Conservative-late fallback publication time, in Sri Lanka local time. 06:00 SL sits
+# inside the ~04:30-10:00 window real bulletins publish in, so it is late relative to the
+# true publication time, not just relative to ObservedDate.
 _FALLBACK_PUBLISH_TIME_SL = time(6, 0, 0)
 
 
 def _resolve_as_of_utc(pdf_creation_date_raw: "str | None", observed_date: date) -> datetime:
     """Resolve the AsOfUtc (bulletin publication vintage) for a parsed row.
 
-    Preferred source: the PDF's /CreationDate metadata (the bulletin's real
-    publication timestamp).
+    Preferred source is the PDF's /CreationDate metadata, the bulletin's real publication
+    timestamp. The fallback, which is rare, is ObservedDate + 1 day at 06:00 Sri Lanka time
+    (00:30 UTC).
 
-    Fallback (WARN, rare — /CreationDate was found on 100% of a 40-PDF
-    spot-check across the corpus): ObservedDate + 1 day at 06:00 Sri Lanka
-    time (+05:30) = ObservedDate+1 00:30 UTC.
-
-    Why conservative-LATE, not end-of-day-on-ObservedDate: genuine HARTI
-    bulletins are observed (real /CreationDate timestamps across the corpus)
-    to publish the morning AFTER ObservedDate, roughly 04:30-10:00 Sri Lanka
-    time -- i.e. ObservedDate+1 ~23:00-04:30 UTC. A same-day 23:59:59 UTC
-    fallback would sit ~4-5 hours EARLIER than that real publication window,
-    which is a look-ahead leakage risk (the fallback would make the
-    observation "known" before HARTI actually published it). Erring late
-    instead of early is always the safe direction for AsOfUtc: an
-    over-conservative AsOfUtc merely delays when a point-in-time join sees
-    the row (never wrong, only late); an under-conservative one leaks.
+    Why conservative-late rather than end-of-day on ObservedDate: real bulletins publish the
+    morning AFTER ObservedDate, so a same-day fallback would sit hours before the true
+    publication window and make the observation 'known' before HARTI published it. An
+    over-conservative AsOfUtc only delays when a point-in-time join sees the row; an
+    under-conservative one leaks.
     """
     parsed = _parse_pdf_creation_date(pdf_creation_date_raw)
     if parsed is not None:
@@ -538,36 +384,23 @@ def upsert_harti_prices(
     engine: sa.engine.Engine | None = None,
     dry_run: bool = False,
 ) -> dict:
-    """Upsert parsed HARTI prices into MarketPrices — Dambulla only (back-compat).
+    """Upsert parsed HARTI prices into MarketPrices - Dambulla only, for back-compat.
 
-    Keyed on (CropId, PriceDate, Source) — idempotent re-runs are safe.
+    Keyed on (CropId, PriceDate, Source), so re-runs are safe. The parser emits rows for
+    several markets, but MarketPrices has no market dimension in its unique key, so this
+    legacy path filters to Dambulla; every market (including a second Dambulla copy) lands in
+    PriceObservations via upsert_harti_price_observations().
 
-    R1.1 P1 note: parser.parse_pdf() now emits rows for multiple markets
-    (Dambulla, Pettah, Narahenpita).  MarketPrices has no MarketId concept
-    (it always implicitly meant Dambulla) and its unique key
-    (Source, ExternalProductId, PriceDate) has no market dimension to
-    extend — so this legacy path deliberately filters to Dambulla-only rows
-    to preserve exact back-compat behaviour.  Multi-market rows (including a
-    second Dambulla copy) land in PriceObservations instead — see
-    upsert_harti_price_observations().
-
-    EconomicCenterId (R2 Step 3, Markets/EconomicCenters merge): every row
-    written/updated here gets EconomicCenterId = the Dambulla Markets.Id,
-    resolved at runtime BY CODE via _dambulla_market_id() (never a
-    hardcoded GUID — GUIDs are per-DB) and cached once per call. Both
-    DAMBULLA_DEC and HARTI rows resolve to the same Dambulla market row
-    (hub-adjudicated: this legacy splice loader IS Dambulla prices). Raises
-    RuntimeError if the Dambulla market row is missing rather than writing
-    NULL/a guessed value.
+    Every row gets EconomicCenterId = the Dambulla Markets.Id, resolved at runtime by code and
+    cached once per call. A missing Dambulla row raises rather than writing a guess.
 
     Args:
         parsed_rows:  Output of parser.parse_many().
         engine:       SQLAlchemy engine; created from config if None.
-        dry_run:      If True, resolve everything but skip DB writes (for testing).
+        dry_run:      Resolve everything but skip DB writes.
 
-    Returns:
-        Dict with counts: inserted, updated, skipped_splice, skipped_no_crop,
-        skipped_invalid_price, skipped_non_dambulla.
+    Returns counts: inserted, updated, skipped_splice, skipped_no_crop,
+    skipped_invalid_price, skipped_non_dambulla.
     """
     if engine is None:
         engine = get_engine()
@@ -642,7 +475,6 @@ def upsert_harti_prices(
 
     with engine.begin() as conn:
         # Check which (CropId, PriceDate, Source) already exist
-        # Build set of existing keys for efficient lookup
         existing_keys: set[tuple[str, str]] = set()
         # Query in chunks to avoid massive IN clauses
         chunk_size = 500
@@ -733,64 +565,37 @@ def upsert_harti_price_observations(
     engine: sa.engine.Engine | None = None,
     dry_run: bool = False,
 ) -> dict:
-    """Upsert parsed HARTI prices (ALL markets: Dambulla, Pettah, Narahenpita)
-    into PriceObservations — the R1.1 P1 multi-market, point-in-time table.
+    """Upsert parsed HARTI prices for ALL markets into PriceObservations.
 
-    This is additive to upsert_harti_prices(): that function keeps writing
-    Dambulla-only rows into the legacy MarketPrices table for back-compat;
-    this function writes every parsed market's rows (Dambulla included) into
-    PriceObservations so downstream multi-market features have a single
-    consistent source.
+    Additive to upsert_harti_prices(), which keeps writing Dambulla-only rows into the legacy
+    MarketPrices table. This one writes every parsed market's rows, Dambulla included, so
+    multi-market features have one consistent source.
 
-    Identity / idempotency (R1.1 P1 spec: (Source, commodity, PriceDate,
-    MarketId)):
-      HARTI is name-keyed (no ExternalCommodityId), so ExternalCommodityId is
-      always NULL and the applicable DB constraint is
-      UX_PriceObservations_MarketCommodityNameDateSource on
-      (MarketId, ExternalCommodityName, ObservedDate, Source) — i.e. exactly
-      (Source, commodity, PriceDate, MarketId) with "commodity" resolved via
-      name.  Existing rows are UPDATEd in place on a key match; new keys are
-      INSERTed.  Safe to re-run.
+    Identity and idempotency: HARTI is name-keyed, so ExternalCommodityId is always NULL and
+    the applicable constraint is (MarketId, ExternalCommodityName, ObservedDate, Source).
+    Matching rows are UPDATEd in place, new keys INSERTed, so it is safe to re-run.
 
-    Point-in-time contract:
-      AsOfUtc is ALWAYS the bulletin's own publication timestamp (PDF
-      /CreationDate metadata, resolved via _resolve_as_of_utc — never
-      caller/system "now").  RetrievedAtUtc is stamped as "now" here (audit
-      only, never a feature) — mirrors NewsArticles/CropFeatureDaily write
-      patterns elsewhere in this package.
+    Point-in-time: AsOfUtc is always the bulletin's own publication timestamp from the PDF
+    metadata (see _resolve_as_of_utc), never the caller's 'now'. RetrievedAtUtc is stamped now
+    and is audit-only, never a feature.
 
-    Market resolution (risk R1): parser market_name -> DB Markets.Id is
-    resolved BY NAME once per call (_build_market_map(), cached for the
-    duration of this call) — never a hardcoded GUID.  A market_name that
-    does not resolve is WARN-skipped, never invented.
+    Market names resolve BY NAME once per call, never a hardcoded GUID; an unresolved name is
+    WARN-skipped. Failure modes split deliberately: if the Markets or CommodityAliases lookup
+    itself cannot load, this upsert ABORTS, because ingesting a whole run with everything
+    unresolved is worse than failing loudly. A per-row miss only WARNs and skips, or writes
+    CropId NULL, and ingestion continues.
 
-    Failure-mode split (by design): if the Markets or CommodityAliases
-    lookup itself cannot be loaded (table missing/DB unreachable), the
-    _build_market_map()/CommodityAliasResolver construction below raises and
-    this whole upsert ABORTS — better to fail loudly than ingest an entire
-    run with every row unresolved.  A per-row miss (unknown market name /
-    unknown commodity label) is the opposite: WARN + skip / WARN + CropId
-    NULL respectively, and ingestion continues.
-
-    Price column convention: HARTI publishes a single Min/Max wholesale
-    range per market per crop (no separate wholesale-vs-retail split, no
-    single-point price) — the same convention the legacy MarketPrices table
-    uses. HARTI rows therefore ALWAYS populate MinPrice/MaxPrice and ALWAYS
-    leave WholesalePrice/RetailPrice NULL, even for Pettah/Narahenpita
-    (their bulletin cells are min/max ranges too, not a single figure).
-    WholesalePrice/RetailPrice exist on PriceObservations for OTHER sources
-    (e.g. CBSL) that publish a single point figure per series — the future
-    feature layer must read MinPrice/MaxPrice (or their midpoint) for
-    Source='HARTI' rows, not WholesalePrice, which will be NULL here.
+    HARTI publishes a min/max range per market per crop, so rows always populate
+    MinPrice/MaxPrice and always leave WholesalePrice/RetailPrice NULL, even for Pettah and
+    Narahenpita. Those columns exist for sources that publish a single point figure.
 
     Args:
         parsed_rows:  Output of parser.parse_many() (multi-market).
         engine:       SQLAlchemy engine; created from config if None.
-        dry_run:      If True, resolve everything but skip DB writes (for testing).
+        dry_run:      Resolve everything but skip DB writes.
 
-    Returns:
-        Dict with counts: inserted, updated, skipped_no_market,
-        skipped_invalid_price, crop_resolved, crop_unresolved.
+    Returns counts: inserted, updated, skipped_no_market, skipped_invalid_price,
+    crop_resolved, crop_unresolved.
     """
     if engine is None:
         engine = get_engine()
@@ -822,12 +627,9 @@ def upsert_harti_price_observations(
 
         observed_date = date.fromisoformat(pr.date_str)
 
-        # Shared, source-agnostic row validator (R1.1 P1 Step 5,
-        # data_quality.validate_price_row) — non-positive price is
-        # REJECTED (row not written at all); min>max is QUARANTINED
-        # (written with IsUnitConfirmed=0, never silently swapped). See
-        # data_quality.py module docstring Sections 1-2 for full rationale
-        # and why this differs from the parser's own upstream lo/hi swap.
+        # Shared, source-agnostic row validator: a non-positive price is REJECTED (the row is not
+        # written at all) and min>max is QUARANTINED (written with IsUnitConfirmed=0, never
+        # silently swapped).
         validation = validate_price_row(
             min_price=pr.min_price,
             max_price=pr.max_price,
@@ -846,12 +648,10 @@ def upsert_harti_price_observations(
         market_id = market_map[pr.market_name]
         as_of_utc = _resolve_as_of_utc(pr.pdf_creation_date_raw, observed_date)
 
-        # Canonical crop resolution (R1.1 P1 Stage B): resolve via active
-        # CommodityAliases (source-scoped 'HARTI' beats a global alias for
-        # the same label). Never guess — unresolved stays NULL + WARN, and
-        # the row still gets inserted (crop resolution is additive, not a
-        # gate on ingestion; heal_price_observation_crops() back-fills it
-        # later as aliases are added).
+        # Resolve the crop through the active CommodityAliases (a HARTI-scoped alias beats a
+        # global one for the same label). Never guess: an unresolved label stays NULL with a WARN
+        # and the row is still inserted, because crop resolution is additive rather than a gate.
+        # heal_price_observation_crops() back-fills it later as aliases are added.
         crop_id = crop_resolver.resolve(pr.harti_label, SOURCE)
         if crop_id is None:
             logger.warning(
@@ -874,12 +674,9 @@ def upsert_harti_price_observations(
             "as_of_utc": as_of_utc,
             "unit_raw": HARTI_UNIT_RAW,
             "unit_conversion_factor": HARTI_UNIT_CONVERSION_FACTOR,
-            # HARTI's own unit is a verified corpus-wide constant (see
-            # canonical.py's fail-closed contract), so this would normally
-            # always be True — EXCEPT a min>max hold from validate_price_row
-            # above forces it to False (quarantine), overriding the source's
-            # own unit-confirmation status. Ambiguous-price rows must not
-            # reach the feature layer regardless of unit confidence.
+            # HARTI's unit is a verified corpus-wide constant, so this is normally True - except that
+            # a min>max hold from validate_price_row above forces it False. An ambiguous-price row
+            # must not reach the feature layer regardless of unit confidence.
             "is_unit_confirmed": not validation.hold,
         })
 
@@ -900,9 +697,8 @@ def upsert_harti_price_observations(
         return counters
 
     with engine.begin() as conn:
-        # Look up existing (MarketId, ExternalCommodityName, ObservedDate, Source)
-        # keys for the candidate batch (mirrors the name-keyed filtered unique
-        # index UX_PriceObservations_MarketCommodityNameDateSource).
+        # Look up the existing (MarketId, ExternalCommodityName, ObservedDate, Source) keys for
+        # this batch, mirroring the name-keyed filtered unique index.
         existing_keys: set[tuple[str, str, str]] = set()
         unique_market_ids = list({r["market_id"] for r in to_upsert})
         chunk_size = 200
@@ -933,35 +729,15 @@ def upsert_harti_price_observations(
                 row["observed_date"].isoformat(),
             )
             if key in existing_keys:
-                # UPDATE existing row. CropId uses COALESCE so a re-run never
-                # overwrites an already-assigned CropId (mirrors the .NET
-                # AssignCrop no-silent-re-map contract) -- it can only move
-                # NULL -> resolved, exactly like heal_price_observation_crops().
+                # UPDATE the existing row. CropId uses COALESCE so a re-run can only move NULL
+                # -> resolved and never overwrites an already-assigned CropId.
                 #
-                # IsUnitConfirmed is STICKY-DOWN, never silently raised back
-                # up by a routine re-ingest (R1.1 P1 Step 5 reviewer finding,
-                # ClickUp 86cahef64): a hold set by flag_price_outliers() or
-                # a prior min>max quarantine (IsUnitConfirmed=0) must survive
-                # re-running this upsert with the SAME clean parsed row --
-                # ingest_harti.py is designed to be re-run routinely
-                # (--no-download re-parses is idempotent), and a naive
-                # unconditional SET would silently erase the hold the moment
-                # the same row is re-parsed clean (validation.hold=False ->
-                # is_unit_confirmed=True), defeating the entire quarantine
-                # mechanism. The CASE below is a one-way ratchet:
-                #   - already 0 (held)      -> stays 0, no matter what the
-                #                              incoming row's own flag says.
-                #   - currently 1 (cleared) -> takes the incoming value, so
-                #                              a genuinely ambiguous re-parse
-                #                              (validation.hold=True, e.g. a
-                #                              layout regression that starts
-                #                              emitting min>max) can still
-                #                              LOWER 1 -> 0 on this same
-                #                              write -- only RAISING 0 -> 1
-                #                              is blocked here.
-                # The only way to release an existing hold is the explicit,
-                # single-row, parameterized data_quality.clear_outlier_hold()
-                # -- never an incidental side effect of re-ingesting.
+                # IsUnitConfirmed is STICKY-DOWN. A hold (0) set by flag_price_outliers() or by
+                # an earlier min>max quarantine must survive re-running this upsert with the same
+                # clean parsed row, which always recomputes 1. The CASE below is a one-way
+                # ratchet: already 0 stays 0, while a current 1 takes the incoming value, so a
+                # genuinely ambiguous re-parse can still lower 1 -> 0. Only raising 0 -> 1 is
+                # blocked, and the only way to release a hold is data_quality.clear_outlier_hold().
                 conn.execute(
                     sa.text(
                         """UPDATE PriceObservations

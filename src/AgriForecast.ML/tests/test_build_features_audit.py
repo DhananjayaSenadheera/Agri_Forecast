@@ -37,9 +37,7 @@ if str(ML_ROOT) not in sys.path:
 import build_features  # noqa: E402
 
 
-# ===========================================================================
 # _start_audit_run
-# ===========================================================================
 
 class TestStartAuditRun:
     def test_success_returns_engine_and_run_id(self, monkeypatch):
@@ -73,9 +71,7 @@ class TestStartAuditRun:
         assert "feature_run_log" in capsys.readouterr().err
 
 
-# ===========================================================================
 # _finish_audit_run_succeeded
-# ===========================================================================
 
 class TestFinishAuditRunSucceeded:
     def test_noop_when_engine_is_none(self, monkeypatch):
@@ -114,9 +110,7 @@ class TestFinishAuditRunSucceeded:
         assert "feature_run_log" in capsys.readouterr().err
 
 
-# ===========================================================================
 # _finish_audit_run_failed
-# ===========================================================================
 
 class TestFinishAuditRunFailed:
     def test_noop_when_engine_is_none(self, monkeypatch):
@@ -148,9 +142,7 @@ class TestFinishAuditRunFailed:
         assert "feature_run_log" in capsys.readouterr().err
 
 
-# ===========================================================================
 # main() end-to-end audit wiring
-# ===========================================================================
 
 def _fake_feats() -> pd.DataFrame:
     return pd.DataFrame({

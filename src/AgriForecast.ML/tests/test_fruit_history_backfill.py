@@ -21,9 +21,7 @@ KOLIKUTTU = "FRT000005"
 PAPAYA = "FRT000018"
 
 
-# --------------------------------------------------------------------------
 # PURE tests (no DB)
-# --------------------------------------------------------------------------
 def test_ext_ids_are_the_two_adopted_crops_only():
     assert set(fhb.FRUIT_EXT_PRODUCT_IDS) == {AMBUL, SEENI}
     assert fhb.ADOPTED_CROP_CODES == (AMBUL, SEENI)
@@ -64,9 +62,7 @@ def test_partition_upsert_all_update_when_present_idempotent():
     assert len(ins) == 0 and len(upd) == 2, "re-run must be a no-op insert (idempotent)"
 
 
-# --------------------------------------------------------------------------
 # DB-gated tests
-# --------------------------------------------------------------------------
 def _engine_or_skip():
     try:
         from agriforecast_ml.envfile import load_env_file

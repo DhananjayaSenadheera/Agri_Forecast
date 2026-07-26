@@ -50,10 +50,8 @@ from agriforecast_ml import features as _features  # noqa: E402
 from agriforecast_ml import load as _load  # noqa: E402
 
 
-# ===========================================================================
 # DB-gated helper (mirrors test_festivals.py::_db_or_skip / test_macro_vintage
 # convention: skip, never fail, when the live DB is unreachable)
-# ===========================================================================
 
 def _db_or_skip():
     try:
@@ -77,9 +75,7 @@ def _all_markets(engine):
     return rows
 
 
-# ===========================================================================
 # Contract test: get_feature_safe_market_ids() live-DB behaviour
-# ===========================================================================
 
 class TestFeatureSafeMarketIdsLiveContract:
     """Live-DB counterpart to test_canonical.py::TestFeatureSafeMarketIds
@@ -195,14 +191,12 @@ class TestFeatureSafeMarketIdsLiveContract:
         )
 
 
-# ===========================================================================
 # Builder-level unit tests for features._attach_market_spread (P4 step 2).
 #
 # Hermetic (no DB): drive the function with synthetic PriceObservations frames
 # so the point-in-time / staleness / NaN-not-0 / derived-summary contract is
 # pinned without a live database. QA writes the fuller leakage suite on top of
 # these (see the task plan).
-# ===========================================================================
 
 _SLUGS = ["Dambulla", "Keppetipola", "Thambuttegama", "Pettah", "Narahenpita"]
 
@@ -366,11 +360,9 @@ class TestMarketSlugHelper:
         assert _load._market_slug(None) == ""
 
 
-# ===========================================================================
 # QA leakage/boundary suite (P4 step 2, ClickUp 86caheffr) -- the remaining 6
 # tests from the approved spec, appended on top of the builder's 12 unit
 # tests above. All hermetic (synthetic frames, no DB) per the spec.
-# ===========================================================================
 
 _SPREAD_COLS = [
     "MktDambullaAvgPrice", "MktDambullaLag7",

@@ -202,7 +202,7 @@ def parse_pdf(pdf_path: Path, date_str_hint: str | None = None) -> list[ParsedCb
         ]
         lines = _group_lines(words)
 
-        # ---- header anchors -------------------------------------------------
+        # Header anchors.
         # Market-group header: the line carrying Pettah/Dambulla/.../Narahenpita.
         market_line = None
         for line in lines:
@@ -222,9 +222,8 @@ def parse_pdf(pdf_path: Path, date_str_hint: str | None = None) -> list[ParsedCb
                         pdf_path.name, len(market_words))
             return rows
 
-        # Day anchors: "Today" words give the today sub-column centres;
-        # "Yesterday" (Tue-Fri) or "Friday" (Monday reports) give the
-        # comparison sub-column centres. 5 of each.
+        # Day anchors: the 'Today' words give the today sub-column centres, and 'Yesterday'
+        # (Tue-Fri) or 'Friday' (Monday reports) give the comparison ones. Five of each.
         today_words = [w for line in lines for w in line if w.text == "Today"]
         comp_words = [w for line in lines for w in line
                       if w.text in ("Yesterday", "Friday")]
@@ -259,7 +258,7 @@ def parse_pdf(pdf_path: Path, date_str_hint: str | None = None) -> list[ParsedCb
             )
             anchor_names.append((centre, market_names_by_word[id(mw)], is_today))
 
-        # ---- item rows ------------------------------------------------------
+        # Item rows.
         section: str | None = None
         for line in lines:
             sec = _section_of(line)

@@ -25,9 +25,7 @@ from agriforecast_ml.serving import predict
 from agriforecast_ml.train import fallback_select
 
 
-# --------------------------------------------------------------------------- #
 # Synthetic labelled-frame builder for the selection logic.
-# --------------------------------------------------------------------------- #
 def _crop_rows(cid, code, name, dates, avg, label, gp=30):
     return pd.DataFrame({
         "CropId": cid, "CropCode": code, "CropName": name,
@@ -151,9 +149,7 @@ class TestSelectionLogic:
         assert np.isnan(out[0])
 
 
-# --------------------------------------------------------------------------- #
 # Serving: reading the choice map + fail-closed re-centring.
-# --------------------------------------------------------------------------- #
 def _payload(choice=None, per_obs=400):
     fb = {
         "per_crop": {"cid1": {"p10": 20.0, "p50": 30.0, "p90": 45.0, "n_obs": per_obs}},

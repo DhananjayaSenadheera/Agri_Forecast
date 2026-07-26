@@ -38,9 +38,7 @@ from agriforecast_ml.cbsl_macro import downloader, loader, parser  # noqa: E402
 from agriforecast_ml import netguard  # noqa: E402
 
 
-# ===========================================================================
 # 1. Parser tests against real fixture PDFs — exact expected values
-# ===========================================================================
 
 class TestCcpiParserFixtures:
     """Values below were independently read off the real fixture text
@@ -211,9 +209,7 @@ class TestMeiParserFixture:
         assert all(p.pdf_creation_date_raw is None for p in points)
 
 
-# ===========================================================================
 # 2. URL / date-pattern tests
-# ===========================================================================
 
 class TestCcpiDateExtraction:
     def test_standard_filename(self):
@@ -255,9 +251,7 @@ class TestMeiMonthExtraction:
         assert downloader._extract_mei_month("some_other_report.pdf") is None
 
 
-# ===========================================================================
 # 3. Cache-filename sanitization — derived from PARSED date, never URL basename
-# ===========================================================================
 
 class TestCacheFilenameSanitization:
     def test_ccpi_cache_filename_from_parsed_date_not_url(self, tmp_path, monkeypatch):
@@ -314,12 +308,10 @@ class TestCacheFilenameSanitization:
         assert local_path.name == "cbsl_mei_202605.pdf"
 
 
-# ===========================================================================
 # 3b. Duplicate-period artifact dedup (real bug found during live
 #     verification: CBSL served MEI_201909_e_0.pdf AND MEI_201909_e_1.pdf,
 #     both resolving to pack_yyyymm='201909', which collided on the DB's
 #     unique index and aborted the whole batch transaction).
-# ===========================================================================
 
 class TestDuplicatePeriodDedup:
     def test_dedup_by_key_keeps_first_drops_rest(self):
@@ -388,9 +380,7 @@ class TestLoaderInBatchDedup:
         )
 
 
-# ===========================================================================
 # 4. Page-count cap
-# ===========================================================================
 
 class TestPageCountCap:
     def test_ccpi_parser_rejects_pdf_over_page_cap(self, monkeypatch):
@@ -426,9 +416,7 @@ class TestPageCountCap:
                 assert len(pdf.pages) <= parser._MAX_PAGES
 
 
-# ===========================================================================
 # 5. PublishedAt resolution: CCPI cross-check + MEI conservative-late rule
-# ===========================================================================
 
 class TestCcpiPublishedAtResolution:
     def test_url_date_and_creation_date_agree(self):
@@ -526,9 +514,7 @@ class TestMeiPublishedAtResolution:
         assert imputed is False
 
 
-# ===========================================================================
 # 6. SHA-256 recorded per downloaded artifact
-# ===========================================================================
 
 class TestSha256Recorded:
     def test_sha256_hex_matches_hashlib(self):
@@ -557,9 +543,7 @@ class TestSha256Recorded:
         assert result[0][2] == hashlib.sha256(body).hexdigest()
 
 
-# ===========================================================================
 # 7. netguard: cbsl.gov.lk allowed, statistics.gov.lk NOT allowed
-# ===========================================================================
 
 class TestNetguardAllowlist:
     def test_cbsl_gov_lk_is_allowed(self):
@@ -576,9 +560,7 @@ class TestNetguardAllowlist:
             netguard.assert_host_allowed("https://www.statistics.gov.lk/some/path")
 
 
-# ===========================================================================
 # 8. Route registered on admin_router + auth test (mirrors HARTI's route test)
-# ===========================================================================
 
 class TestAdminRouteAuth:
     """Mirrors tests/test_admin_auth.py's pattern for /admin/ingest-harti,

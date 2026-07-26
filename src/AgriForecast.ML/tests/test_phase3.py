@@ -24,9 +24,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-# ---------------------------------------------------------------------------
 # Path setup: ensure we can import the package from the ML root
-# ---------------------------------------------------------------------------
 ML_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ML_ROOT))
 
@@ -40,9 +38,7 @@ PLANT_DATE = date(2026, 1, 15)
 AS_OF      = date(2026, 1, 15)
 
 
-# ===========================================================================
 # 1. CONTRACT  (dataset.py)
-# ===========================================================================
 
 class TestContract:
     """dataset.feature_columns and contract_hash behave correctly."""
@@ -142,9 +138,7 @@ class TestContract:
         )
 
 
-# ===========================================================================
 # 2. BASELINES  (baselines.py)
-# ===========================================================================
 
 class TestBaselines:
 
@@ -217,9 +211,7 @@ class TestBaselines:
         assert pred.shape[0] == len(self._eval_df())
 
 
-# ===========================================================================
 # 3. LEAKAGE-BY-TRUNCATION  (features.py) – the gold-standard check
-# ===========================================================================
 
 class TestLeakageByTruncation:
     """
@@ -286,9 +278,7 @@ class TestLeakageByTruncation:
         )
 
 
-# ===========================================================================
 # 3b. FX POINT-IN-TIME AS-OF JOIN  (features._attach_fx)
-# ===========================================================================
 
 class TestFxAsOfJoin:
     """
@@ -358,9 +348,7 @@ class TestFxAsOfJoin:
         )
 
 
-# ===========================================================================
 # 4. PREDICT_HARVEST  (serving/predict.py)
-# ===========================================================================
 
 class TestPredictHarvest:
     """
@@ -492,9 +480,7 @@ class TestPredictHarvest:
             assert active == "crop_mean_fallback"
 
 
-# ===========================================================================
 # 5. TIMELINE  (serving/predict.py)
-# ===========================================================================
 
 class TestTimeline:
 
@@ -625,14 +611,10 @@ class TestTimeline:
             )
 
 
-# ===========================================================================
 # 6. GATE HONESTY  (model.py / registry metadata)
-# ===========================================================================
 
-# ---------------------------------------------------------------------------
 # Supported served ML kinds.  When beats_baseline=True the serving path must
 # use one of these -- never an unrecognised string that bypasses the guard.
-# ---------------------------------------------------------------------------
 _SERVED_ML_KINDS = frozenset({"model", "residual"})
 
 
@@ -943,9 +925,7 @@ class TestResidualServingPath:
             P._PAYLOAD = old
 
 
-# ===========================================================================
 # 7. COLD-START FALLBACK LADDER  (P4 step 1 — ClickUp 86cahefhn)
-# ===========================================================================
 
 class TestFallbackLadder:
     """Cold-start graceful-degradation: per-crop (n_obs >= threshold) -> category

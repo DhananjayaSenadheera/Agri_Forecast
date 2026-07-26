@@ -1,44 +1,12 @@
-"""
-AgriForecast ML -- data-quality check tests (R1.1 P1 Step 5,
-ClickUp 86cahef64, PRD Section 2.5).
+"""Data-quality check tests.
 
-All tests are hermetic: a mocked SQLAlchemy engine (MagicMock, matching the
-style of test_canonical.py / test_harti_multimarket.py), no network, no
-live DB. Live-DB verification is done separately (see task report).
+Hermetic: a mocked SQLAlchemy engine, no network, no live DB.
 
-Coverage:
-  TestValidatePriceRow        -- shared source-agnostic row validator:
-                                  non-positive price -> reject; min>max ->
-                                  hold (quarantine, NOT a silent swap,
-                                  pinned per the design-decision doc in
-                                  data_quality.py); a clean row passes.
-  TestHartiWriterWiredToValidator
-                               -- upsert_harti_price_observations() actually
-                                  calls the shared validator: rejects
-                                  non-positive rows, quarantines min>max
-                                  rows (IsUnitConfirmed=0), passes clean
-                                  rows through with IsUnitConfirmed=1.
-  TestGapReport                -- tiering (1-2/3-7/8+), Poya suppression
-                                  (a Poya day inside a 1-day gap makes the
-                                  gap vanish), cold-start skip for thin
-                                  series, structured (non-raising) return.
-  TestOutlierFlagging          -- rolling-90d IQR hold flags a spike,
-                                  leaves normal variance alone, skips
-                                  cold-start series, NEVER deletes (holds
-                                  via IsUnitConfirmed=0), dry_run writes
-                                  nothing, clear_outlier_hold is single-row
-                                  and parameterized.
-  TestNoLeakage                -- the outlier reference window for a
-                                  candidate at T never includes T itself or
-                                  anything >= T (backward-looking only).
-  TestNoSourceDuplicates       -- real SQL shape (GROUP BY ... HAVING
-                                  COUNT(DISTINCT Source) > 1); raises with
-                                  offending triples listed; passes cleanly
-                                  when the (mocked) DB returns none.
-  TestMacroPointInTimeGuards   -- assert_vintage_sane /
-                                  assert_effective_not_future: pure
-                                  functions, future-publication and
-                                  before-reference-period rejected.
+Covers the shared row validator (a non-positive price is rejected, min>max is quarantined
+rather than silently swapped), gap tiering with Poya suppression and the cold-start skip,
+the rolling-IQR outlier hold (never deletes, dry_run writes nothing, clearing is
+single-row), the backward-only leakage window, the cross-source duplicate SQL, and the
+pure macro point-in-time guards.
 """
 from __future__ import annotations
 
@@ -50,9 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ---------------------------------------------------------------------------
 # Path setup
-# ---------------------------------------------------------------------------
 ML_ROOT = Path(__file__).resolve().parents[1]
 if str(ML_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_ROOT))
@@ -62,9 +28,7 @@ from agriforecast_ml.harti import loader as harti_loader  # noqa: E402
 from agriforecast_ml.harti.parser import ParsedPrice  # noqa: E402
 
 
-# ===========================================================================
 # Mock engine helpers (mirrors test_canonical.py::_mock_engine_returning)
-# ===========================================================================
 
 def _mock_engine_returning(rows: list[tuple]) -> MagicMock:
     engine = MagicMock()
@@ -164,9 +128,7 @@ BEANS_CROP_ID = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
 DAMBULLA_MARKET_ID = uuid.UUID("bbbbbbbb-0000-0000-0000-000000000001")
 
 
-# ===========================================================================
 # 1. validate_price_row -- shared, source-agnostic
-# ===========================================================================
 
 class TestValidatePriceRow:
     def test_clean_row_is_accepted_not_rejected_not_held(self):
@@ -232,9 +194,7 @@ class TestValidatePriceRow:
         assert result.reason == "ok"
 
 
-# ===========================================================================
 # 2. Wired into upsert_harti_price_observations()
-# ===========================================================================
 
 class TestHartiWriterWiredToValidator:
     def _fake_market_map(self):
@@ -309,11 +269,9 @@ class TestHartiWriterWiredToValidator:
         assert params["is_unit_confirmed"] is True
 
 
-# ===========================================================================
 # 2b. Sticky-hold regression (reviewer BLOCKING finding, R1.1 P1 Step 5):
 # a routine re-ingest of an already-quarantined row must NOT silently raise
 # IsUnitConfirmed back to 1. Only clear_outlier_hold() may release a hold.
-# ===========================================================================
 
 class TestUpdateBranchNeverSilentlyUnholdsQuarantinedRows:
     """Exercises the UPDATE branch specifically (the existing-key path),
@@ -450,9 +408,7 @@ class TestUpdateBranchNeverSilentlyUnholdsQuarantinedRows:
         assert params["is_unit_confirmed"] is True
 
 
-# ===========================================================================
 # 3. gap_report()
-# ===========================================================================
 
 class TestGapReport:
     def _rows(self, crop, market_id, market_name, source, dates):
@@ -578,9 +534,7 @@ class TestGapReport:
         assert "entries" in report and "series_scanned" in report
 
 
-# ===========================================================================
 # 4. flag_price_outliers() / clear_outlier_hold()
-# ===========================================================================
 
 class TestOutlierFlagging:
     def _make_rows(self, crop_id, market_id, ext_name, base_date, midpoints):
@@ -694,9 +648,7 @@ class TestOutlierFlagging:
         assert result is False
 
 
-# ===========================================================================
 # 5. No-leakage guard on the outlier rolling window
-# ===========================================================================
 
 class TestNoLeakage:
     def test_reference_window_never_includes_the_candidate_or_future_rows(self):
@@ -755,9 +707,7 @@ class TestNoLeakage:
         assert result["flagged"][0]["midpoint"] == 9999.0
 
 
-# ===========================================================================
 # 6. assert_no_source_duplicates()
-# ===========================================================================
 
 DAMBULLA_MARKET_ID = "11111111-1111-1111-1111-111111111111"
 PETTAH_MARKET_ID = "22222222-2222-2222-2222-222222222222"
@@ -831,10 +781,8 @@ class TestNoSourceDuplicates:
         with pytest.raises(RuntimeError, match="MKT00000001"):
             dq.assert_no_source_duplicates(engine)
 
-    # -----------------------------------------------------------------
     # SF2 (reviewer should-fix) + CBSL extension (2026-07-22): the
     # coexistence allowances are scoped PER adjudicated market.
-    # -----------------------------------------------------------------
     def test_harti_dec_pair_at_dambulla_is_allowed(self):
         """The adjudicated overlap ({HARTI, DAMBULLA_DEC} AT the resolved
         Dambulla market) must NOT raise -- subset semantics keep the
@@ -927,9 +875,7 @@ class TestNoSourceDuplicates:
         assert result == 1
 
 
-# ===========================================================================
 # 7. Macro point-in-time guards (P3 stub -- pure functions, no DB)
-# ===========================================================================
 
 class TestMacroPointInTimeGuards:
     def test_vintage_sane_accepts_publication_after_reference_start_and_not_future(self):

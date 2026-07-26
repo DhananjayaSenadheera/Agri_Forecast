@@ -91,9 +91,7 @@ def _db_rows(engine):
         return {r._mapping["Version"]: dict(r._mapping) for r in res}
 
 
-# ===========================================================================
 # collect_versions
-# ===========================================================================
 
 class TestCollectVersions:
     def test_reads_and_resolves_pointer(self, tmp_path):
@@ -122,9 +120,7 @@ class TestCollectVersions:
             bf.collect_versions(tmp_path / "nope")
 
 
-# ===========================================================================
 # Divergence (v17-style override)
-# ===========================================================================
 
 class TestDivergence:
     def test_pointer_version_with_false_metadata_diverges(self, tmp_path):
@@ -142,9 +138,7 @@ class TestDivergence:
         assert by_v["v16"]["decision_promoted"] is True
 
 
-# ===========================================================================
 # Write + idempotency via main()
-# ===========================================================================
 
 class TestWriteAndIdempotency:
     def _run(self, monkeypatch, engine, models_dir, extra_argv=()):
@@ -182,9 +176,7 @@ class TestWriteAndIdempotency:
         assert sum(r["Promoted"] for r in second.values()) == 1
 
 
-# ===========================================================================
 # --dry-run
-# ===========================================================================
 
 class TestDryRun:
     def test_dry_run_never_touches_db(self, tmp_path, monkeypatch, capsys):
@@ -204,9 +196,7 @@ class TestDryRun:
         assert "nothing written" in out
 
 
-# ===========================================================================
 # Exit codes
-# ===========================================================================
 
 class TestExitCodes:
     def test_missing_models_dir_exits_2(self, tmp_path, monkeypatch, capsys):

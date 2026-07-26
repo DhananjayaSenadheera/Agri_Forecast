@@ -1,116 +1,28 @@
-"""Canonical mapping layer — Python resolution/normalisation side (R1.1 P1
-Stage B, ClickUp 86cahef4z).
+"""Canonical mapping layer: crop-alias resolution and the market dedup rule.
 
-This module is the single home for cross-source commodity-alias resolution
-and the market-dimension dedup rule. It is intentionally source-agnostic
-(unlike ``harti/loader.py``, which is HARTI-specific): any future source
-writer (CBSL, DEC, ...) resolves crops and filters markets through the same
-two entry points defined here, so the resolution/aggregation contract never
-forks per source.
+Source-agnostic, unlike harti/loader.py: every source writer (HARTI, DEC, CBSL)
+resolves crops and filters markets through the two entry points here, so the
+contract never forks per source.
 
-Consumes the Stage A (.NET) schema:
-  CommodityAliases  — Id, Alias, CropId (FK Crops), Source (NULL = all
-                       sources), Language, IsActive, CreatedAtUtc. Unique
-                       indexes: (Alias, Source) WHERE Source IS NOT NULL,
-                       (Alias) WHERE Source IS NULL.
-  PriceObservations.UnitRaw / UnitConversionFactor / IsUnitConfirmed —
-                       fail-closed unit quarantine (IsUnitConfirmed defaults
-                       to 0/false; unconfirmed rows must never reach
-                       features).
+Crop resolution
+  resolve_crop_id() and CommodityAliasResolver look up ACTIVE CommodityAliases
+  rows. An exact (Alias, Source) match always beats an (Alias, Source IS NULL)
+  global match. Alias text is matched case-insensitively to mirror the DB
+  collation. A label with no active alias resolves to None - never guess, never
+  fuzzy-match; the caller writes CropId = NULL and logs a WARNING, because a
+  visible gap beats a silently corrupted series. heal_price_observation_crops()
+  back-fills CropId on existing rows and only ever moves NULL -> a value.
 
-================================================================================
-1. CROP RESOLUTION (self-heal)
-================================================================================
-``resolve_crop_id(label, source, engine=...)`` and the batch-oriented
-``CommodityAliasResolver`` load ACTIVE CommodityAliases rows and resolve a
-raw commodity label + source to a CropId.
+Unit contract (binding on every source writer)
+  PriceObservations always stores LKR/kg. Set IsUnitConfirmed=1 only when the
+  unit is a verified constant of that source (HARTI bulletins are Rs/kg
+  corpus-wide) or a real per-row conversion was applied. Anything else stays 0,
+  and a row with IsUnitConfirmed=0 must never reach the feature layer.
 
-Precedence: an exact (Alias, Source) match ALWAYS wins over an (Alias,
-Source IS NULL) global match, even though both could theoretically match the
-same label — this mirrors the two filtered unique indexes Stage A created
-(a source-scoped row and a global row for the same Alias text can coexist,
-since they live in different filtered indexes; the source-scoped one is more
-specific and takes precedence for that source's ingestion).
-
-Case handling: SQL Server's default collation for this table is
-case-INSENSITIVE by design (see CommodityAlias.cs), so "Beans"/"beans"/
-"BEANS" must all resolve identically. The Python-side lookup mirrors that by
-lower-casing both the loaded alias keys and the incoming label before
-dict lookup (rather than re-querying the DB per label) — see
-``_normalise_key``. This is a caching decision, not a semantic one: the
-resolver loads the full active-alias set ONCE per call/instance (cheap; the
-table is small, tens to low-hundreds of rows) and does the match in memory
-for every row in a batch, rather than issuing one query per label.
-
-Never guess, never fuzzy-match: a label with no active alias match resolves
-to None. Callers must write CropId = NULL and log a WARNING (which is this
-project's "ingestion log" — see harti/loader.py and harti/qa.py, there is no
-dedicated IngestionLog table; a logged WARNING at the point of the
-unresolved row IS the visible gap). Guessing a close-enough crop would
-silently corrupt the series — worse than a visible gap.
-
-``heal_price_observation_crops(engine, source=None)`` back-fills CropId on
-existing PriceObservations rows where CropId IS NULL and an active alias now
-resolves ExternalCommodityName (+ Source). It is idempotent (rows already
-healed have CropId set and the WHERE CropId IS NULL guard excludes them on
-re-run) and respects IsActive (only active aliases are used to heal — a
-deactivated alias must not resurrect a mapping). It intentionally uses the
-same one-directional guard as the .NET AssignCrop contract: it ONLY ever
-transitions CropId NULL -> a value, and NEVER touches a row that already has
-a CropId (no silent re-map of an already-assigned observation — that would
-require the explicit overwrite path the .NET side gates behind
-``AssignCrop(cropId, overwrite: true)``, which this function deliberately
-does not expose).
-
-================================================================================
-2. UNIT NORMALISATION + QUARANTINE CONTRACT
-================================================================================
-HARTI daily wholesale bulletins state prices in Rs./kg (verified corpus-wide
-— see harti_multimarket_audit.md, e.g. "Vegetable wholesale price in main
-markets on 26/11/2022 (Rs./kg)" — every located market column in the same
-table shares that one header-level unit statement). PriceObservations stores
-prices ALWAYS as post-conversion LKR/kg.
-
-Contract (module docstring, binding on every source writer):
-  A source writer may set IsUnitConfirmed=1 ONLY when:
-    (a) the unit is a VERIFIED CONSTANT of that source, corpus-wide — e.g.
-        HARTI daily wholesale bulletins are verified Rs/kg for every row
-        (UnitRaw='Rs/kg', UnitConversionFactor=1.0), or
-    (b) a per-row confirmed conversion has actually been computed and
-        applied (UnitConversionFactor reflects the real factor used, and the
-        price stored is already the converted LKR/kg figure).
-  Anything else — an unverified/unknown unit, a source whose unit statement
-  varies row-to-row and hasn't been individually confirmed, or simply not
-  having checked — MUST leave IsUnitConfirmed=0 (the column's fail-closed
-  default). A quarantined (IsUnitConfirmed=0) row must never reach the
-  feature layer; aggregation/feature-build code must filter
-  WHERE IsUnitConfirmed = 1.
-
-``HARTI_UNIT_RAW`` / ``HARTI_UNIT_CONVERSION_FACTOR`` are the confirmed
-constants for the HARTI source, exported here as the single source of truth
-so harti/loader.py (and any future HARTI-adjacent writer) never re-derives
-or hardcodes them independently.
-
-================================================================================
-3. MARKET-RESOLUTION DEDUP RULE (the S2 trap)
-================================================================================
-``get_feature_safe_market_ids(engine)`` returns the set of Market IDs
-eligible for cross-market aggregation in future feature-builds.
-
-The Pettah double-count trap this guards against: the live Markets
-dimension contains (a) MarketType=3 (NationalAggregate) pseudo-markets that
-carry an ALREADY-AVERAGED figure across real markets (e.g. a CBSL national
-average) — summing/averaging that INTO a cross-market aggregate alongside
-the real markets it was itself derived from double-counts the same
-underlying price signal; and (b) 'ECOMAP-%'-coded twin markets — synthetic
-demo/seed markets used for the Economic-Center-Map UI feature, which are
-NOT real HARTI/DEC trading locations and would silently inflate a
-cross-market average with fabricated rows if included. Both categories must
-be excluded from any query that aggregates "the market" as a set of
-independent, non-overlapping physical trading locations. This function is
-the one place that exclusion rule lives — feature-build code must call it
-rather than re-deriving the WHERE clause ad hoc (which is exactly how a
-future S2-style trap would get re-introduced).
+Market dedup
+  get_feature_safe_market_ids() excludes NationalAggregate pseudo-markets (an
+  already-averaged figure, so including it double-counts) and synthetic ECOMAP-%
+  twin markets. Aggregate through it instead of re-deriving the WHERE clause.
 """
 from __future__ import annotations
 
@@ -124,17 +36,11 @@ from .db import get_engine
 
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------
-# Unit contract constants — HARTI daily wholesale bulletins (verified
-# corpus-wide; see harti_multimarket_audit.md header excerpt).
-# --------------------------------------------------------------------------
+# Unit constants for HARTI bulletins: verified Rs/kg corpus-wide.
 HARTI_UNIT_RAW = "Rs/kg"
 HARTI_UNIT_CONVERSION_FACTOR = 1.0
 
-# Dambulla DEC live API — confirmed Rs/kg (MarketPrices.MinPrice/MaxPrice are
-# already the LKR/kg figures the .NET MarketPriceIngestionService stores; see
-# dec_mirror.py, which is the only writer of this source into
-# PriceObservations).
+# The Dambulla DEC API is confirmed Rs/kg; dec_mirror.py is its only writer.
 DEC_UNIT_RAW = "Rs/kg"
 DEC_UNIT_CONVERSION_FACTOR = 1.0
 
@@ -142,9 +48,8 @@ DEC_UNIT_CONVERSION_FACTOR = 1.0
 def _parse_guid(raw) -> uuid.UUID:
     """Normalise a SQL Server Guid column value (str or bytes) to uuid.UUID.
 
-    Mirrors harti/loader.py::_parse_guid — pymssql may return a Guid as a
-    string or as raw bytes depending on driver/column config, and
-    byte-ordered Guids from SQL Server are little-endian.
+    pymssql returns a Guid as a string or as little-endian bytes depending on the
+    driver, so both are handled. Mirrors harti/loader.py::_parse_guid.
     """
     if isinstance(raw, (bytes, bytearray)):
         return uuid.UUID(bytes_le=raw)
@@ -152,32 +57,20 @@ def _parse_guid(raw) -> uuid.UUID:
 
 
 def _normalise_key(alias: str, source: "str | None") -> tuple[str, "str | None"]:
-    """Case-insensitive lookup key, mirroring the DB's case-insensitive
-    collation on CommodityAliases.Alias (see CommodityAlias.cs). Source is
-    compared as-is (case-sensitive) — Source is a controlled code value
-    ("HARTI", ...), not free text, and every writer in this codebase passes
-    it as a fixed literal, so case drift there is not a real-world risk the
-    way alias-text case drift is.
+    """Case-insensitive lookup key, mirroring the DB collation on CommodityAliases.Alias.
 
-    ASCII assumption: str.lower() only equals the DB's CI collation for
-    ASCII alias text, which is all we store today (English labels; future
-    Sinhala/Tamil romanizations are ASCII too). If a non-ASCII alias ever
-    diverges, the failure mode is a MISS (CropId NULL + WARN, healable
-    later) — never a wrong-crop match; the DB unique indexes stay the real
-    integrity guard.
+    Source is compared as-is: it is a controlled code value, not free text.
+    str.lower() only matches the DB collation for ASCII aliases; a non-ASCII mismatch
+    would miss (CropId NULL + WARN), never resolve to the wrong crop.
     """
     return (alias.strip().lower(), source)
 
 
 class CommodityAliasResolver:
-    """Loads active CommodityAliases once and resolves (label, source) pairs
-    in memory for the duration of one call/instance — the "cache-per-run"
-    pattern used elsewhere in this package (see
-    harti/loader.py::_build_market_map).
+    """Loads active CommodityAliases once and resolves (label, source) pairs in memory.
 
-    Precedence: an exact (Alias, Source) match wins over an (Alias, NULL)
-    global match. Unresolved labels return None — never a guess, never a
-    fuzzy match.
+    An exact (Alias, Source) match wins over an (Alias, NULL) global match.
+    Unresolved labels return None - never a guess, never a fuzzy match.
     """
 
     def __init__(self, engine: sa.engine.Engine):
@@ -211,10 +104,7 @@ class CommodityAliasResolver:
         )
 
     def resolve(self, label: str, source: "str | None" = None) -> "uuid.UUID | None":
-        """Resolve a raw commodity label (+ optional source) to a CropId, or
-        None if no active alias matches. Source-scoped match takes
-        precedence over a global match for the same label.
-        """
+        """Resolve a label (+ optional source) to a CropId, or None if no active alias matches."""
         if not label:
             return None
         norm_alias, _ = _normalise_key(label, None)
@@ -233,12 +123,9 @@ def resolve_crop_id(
     *,
     engine: "sa.engine.Engine | None" = None,
 ) -> "uuid.UUID | None":
-    """Convenience one-shot resolution (builds a fresh resolver each call).
+    """One-shot resolution; builds a fresh resolver on every call.
 
-    Batch callers (e.g. a loader processing hundreds of rows per run) should
-    build a ``CommodityAliasResolver`` once instead and call ``.resolve()``
-    per row — this function is for call sites that only need a single
-    lookup and don't want to manage the resolver's lifetime themselves.
+    Batch callers should build one CommodityAliasResolver and call .resolve() per row.
     """
     eng = engine if engine is not None else get_engine()
     return CommodityAliasResolver(eng).resolve(label, source)
@@ -250,30 +137,18 @@ def heal_price_observation_crops(
     source: "str | None" = None,
     dry_run: bool = False,
 ) -> dict:
-    """Back-fill CropId on PriceObservations rows where CropId IS NULL and
-    an active CommodityAlias now resolves ExternalCommodityName (+ Source).
+    """Back-fill CropId on PriceObservations rows where it is still NULL.
 
-    Idempotent: only touches CropId IS NULL rows (WHERE guard below), so a
-    second run over already-healed rows is a no-op — it never re-examines,
-    let alone re-maps, a row that already carries a CropId. This mirrors the
-    .NET AssignCrop contract in spirit: the heal path is the "no overwrite"
-    call, never the explicit ``overwrite: true`` re-map path.
-
-    Respects IsActive: resolution only considers active aliases (identical
-    resolver to resolve_crop_id/CommodityAliasResolver), so a deactivated
-    alias cannot heal a row.
+    Idempotent: only CropId IS NULL rows are touched, so an already-assigned row is
+    never re-mapped. Only active aliases can heal a row.
 
     Args:
         engine:   SQLAlchemy engine; created from config if None.
-        source:   If given, only heal rows for this Source (e.g. "HARTI").
-                  If None, heal across all sources.
-        dry_run:  If True, resolve and report counts but do not write.
+        source:   Only heal rows for this Source (e.g. 'HARTI'); None heals all.
+        dry_run:  Resolve and report counts without writing.
 
     Returns:
-        Dict with counts: candidates (NULL-CropId rows examined), healed
-        (rows that got a CropId), unresolved (still NULL — no active alias
-        matched; logged as WARN, one per distinct unresolved label so a
-        large backlog doesn't flood the log).
+        Counts of candidates examined, rows healed and rows left unresolved.
     """
     eng = engine if engine is not None else get_engine()
     resolver = CommodityAliasResolver(eng)
@@ -321,9 +196,8 @@ def heal_price_observation_crops(
 
     with eng.begin() as conn:
         for row in to_heal:
-            # Guard belt-and-braces at the SQL level too: only ever flips a
-            # NULL CropId to a value, never re-maps an already-assigned row,
-            # even under concurrent writers.
+            # The SQL repeats the guard: only NULL -> value, never a re-map, even under
+            # concurrent writers.
             conn.execute(sa.text(
                 """UPDATE PriceObservations
                    SET CropId = :crop_id
@@ -336,39 +210,24 @@ def heal_price_observation_crops(
     return counters
 
 
-# --------------------------------------------------------------------------
-# Market-resolution dedup rule (the S2 trap)
-# --------------------------------------------------------------------------
 
-# MarketType=3 -- NationalAggregate (see AgriForecast.Domain.Enums.MarketType).
-# A synthetic pseudo-market carrying an already-averaged national figure
-# (e.g. CBSL national average); not a location, must never be mixed into
-# location-level cross-market aggregation.
+# MarketType 3 = NationalAggregate (mirrors AgriForecast.Domain.Enums.MarketType):
+# an already-averaged figure, never mixed into location-level aggregation.
 _NATIONAL_AGGREGATE_MARKET_TYPE = 3
 
-# ECOMAP-coded twin markets are synthetic demo/seed rows for the Economic-
-# Center-Map UI feature -- not real HARTI/DEC trading locations.
+# ECOMAP-coded markets are synthetic demo rows, not real trading locations.
 _ECOMAP_MARKET_CODE_PREFIX = "ECOMAP-"
 
 
 def get_feature_safe_market_ids(
     engine: "sa.engine.Engine | None" = None,
 ) -> set[uuid.UUID]:
-    """Return Market IDs eligible for cross-market aggregation in future
-    feature-builds.
+    """Market IDs that are safe to use for cross-market aggregation.
 
-    Excludes:
-      - MarketType = 3 (NationalAggregate): an already-averaged pseudo-market
-        (e.g. CBSL national average). Including it in a cross-market
-        aggregate alongside the real markets it was itself derived from
-        double-counts the same underlying price signal (the Pettah
-        double-count trap this whole function exists to prevent).
-      - MarketCode LIKE 'ECOMAP-%': synthetic demo/seed twin markets for the
-        Economic-Center-Map UI feature, not real trading locations.
-
-    Any code that aggregates "the market" as a set of independent physical
-    trading locations MUST filter through this function rather than
-    re-deriving the WHERE clause ad hoc.
+    Excludes MarketType 3 (NationalAggregate), which is already an average and would
+    double-count the same prices, and MarketCode LIKE 'ECOMAP-%', which are synthetic
+    demo markets. Any code aggregating across markets must filter through this rather
+    than writing its own WHERE clause.
     """
     eng = engine if engine is not None else get_engine()
     with eng.connect() as conn:
@@ -392,15 +251,9 @@ def resolve_market_id_by_code(
     *,
     market_code: str,
 ) -> uuid.UUID:
-    """Resolve a Markets.Id at runtime BY CODE (never a hardcoded GUID — GUIDs
-    are per-DB). Generic counterpart to harti/loader.py's
-    ``_dambulla_market_id`` (same contract, same fail-closed behaviour),
-    promoted here so any future source writer (dec_mirror.py today; CBSL/DEC
-    Python writers later) resolves a market row through one shared function
-    instead of re-deriving the lookup per module.
+    """Resolve a Markets.Id by MarketCode - never a hardcoded GUID, GUIDs are per-DB.
 
-    Raises RuntimeError if no Markets row has this MarketCode — fails loudly
-    rather than writing NULL/a guessed GUID.
+    Raises RuntimeError if no market has this code, rather than writing a guess.
     """
     eng = engine if engine is not None else get_engine()
     with eng.connect() as conn:

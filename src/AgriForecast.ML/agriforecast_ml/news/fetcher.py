@@ -48,9 +48,7 @@ class RawArticle(TypedDict):
 
 def _truncate(text: str, max_chars: int = SUMMARY_MAX_CHARS) -> str:
     """Strip HTML tags, collapse whitespace, and truncate to max_chars."""
-    # Remove HTML tags
     text = re.sub(r"<[^>]+>", " ", text)
-    # Collapse whitespace
     text = re.sub(r"\s+", " ", text).strip()
     return text[:max_chars]
 
@@ -106,13 +104,10 @@ def fetch_feed(
     url = feed_spec["url"]
     now_utc = datetime.now(timezone.utc)
 
-    # SSRF guard (S1): feedparser fetches the URL internally (and follows
-    # redirects) with no host restriction. Validate the feed URL's scheme + host
-    # against the ingestion allowlist before handing it to feedparser, so a
-    # stale/poisoned feed entry can't point the fetch at an off-allowlist host.
-    # (Host-only check — feedparser owns the socket, so we cannot re-validate its
-    # redirect chain; the allowlist on the configured URL is the enforceable
-    # control here.) A disallowed URL is skipped like any other bad feed.
+    # feedparser fetches the URL itself, following redirects, with no host restriction, so
+    # validate the feed URL against the ingestion allowlist first. This is a host-only check:
+    # feedparser owns the socket, so its redirect chain cannot be re-validated. A disallowed
+    # URL is skipped like any other bad feed.
     try:
         assert_host_allowed(url)
     except DisallowedUrlError as exc:

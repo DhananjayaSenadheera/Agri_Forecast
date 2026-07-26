@@ -114,9 +114,7 @@ def _run(monkeypatch, table: pd.DataFrame, *, source="HARTI") -> pd.DataFrame:
 _UNSET = object()
 
 
-# ===========================================================================
 # 1. Identity proof: simulated mirror (in-memory union) does not move output.
-# ===========================================================================
 
 class TestFakeRelationalReadSql:
     def test_mirrored_dec_rows_at_dambulla_do_not_change_output(self, monkeypatch):
@@ -173,9 +171,7 @@ class TestFakeRelationalReadSql:
         pd.testing.assert_frame_equal(out_pre.reset_index(drop=True), out_post.reset_index(drop=True))
 
 
-# ===========================================================================
 # 2. Regression guard: proves the harness is not vacuously passing.
-# ===========================================================================
 
 class TestRegressionGuard:
     def test_without_the_source_filter_the_mirror_WOULD_have_changed_output(self, monkeypatch):

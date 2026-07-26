@@ -33,9 +33,7 @@ from agriforecast_ml.news.sentiment import (  # noqa: E402
 )
 
 
-# ---------------------------------------------------------------------------
 # Helpers / fixtures
-# ---------------------------------------------------------------------------
 
 def _make_articles() -> pd.DataFrame:
     """Small in-memory NewsArticles-shaped DataFrame for aggregation tests."""
@@ -69,9 +67,7 @@ def _make_articles() -> pd.DataFrame:
     )
 
 
-# ===========================================================================
 # TestVaderSign
-# ===========================================================================
 
 class TestVaderSign:
     def test_positive_sentence(self):
@@ -92,9 +88,7 @@ class TestVaderSign:
             assert -1.0 <= s <= 1.0
 
 
-# ===========================================================================
 # TestTopicFlags
-# ===========================================================================
 
 class TestTopicFlags:
     def test_pest_matches(self):
@@ -134,10 +128,8 @@ class TestTopicFlags:
         assert set(flags.keys()) == set(TOPIC_NAMES)
 
 
-# ===========================================================================
 # TestTopicsCsv -- the string persisted to NewsArticles.Topics (admin News feed
 # contract: '' = scored/no topic; stable TOPIC_NAMES order; FE splits on ',').
-# ===========================================================================
 
 class TestTopicsCsv:
     def test_no_flags_is_empty_string(self):
@@ -165,9 +157,7 @@ class TestTopicsCsv:
         assert csv == "flood,drought"
 
 
-# ===========================================================================
 # TestScoreArticles
-# ===========================================================================
 
 class TestScoreArticles:
     def test_adds_expected_columns(self):
@@ -189,9 +179,7 @@ class TestScoreArticles:
         assert row["flood"] == True  # noqa: E712
 
 
-# ===========================================================================
 # TestCoalesceDate
-# ===========================================================================
 
 class TestCoalesceDate:
     def test_uses_published_when_present(self):
@@ -206,9 +194,7 @@ class TestCoalesceDate:
         assert str(row["EffectiveDate"]) == "2026-06-03"
 
 
-# ===========================================================================
 # TestAggregateDaily
-# ===========================================================================
 
 class TestAggregateDaily:
     def test_one_row_per_date(self):
@@ -250,9 +236,7 @@ class TestAggregateDaily:
         assert list(daily.columns) == expected
 
 
-# ===========================================================================
 # TestIdempotency
-# ===========================================================================
 
 class TestIdempotency:
     def test_rebuild_deterministic(self):
@@ -269,9 +253,7 @@ class TestIdempotency:
         assert dates == sorted(dates)
 
 
-# ===========================================================================
 # TestEmpty
-# ===========================================================================
 
 class TestEmpty:
     def test_empty_articles_no_crash(self):
@@ -293,9 +275,7 @@ class TestEmpty:
             assert f"{_pascal(topic)}Count" in daily.columns
 
 
-# ===========================================================================
 # TestPascal
-# ===========================================================================
 
 class TestPascal:
     def test_snake_to_pascal(self):

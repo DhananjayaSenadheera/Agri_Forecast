@@ -37,21 +37,10 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------- #
-# Topic keyword lists -- ONE place, easy to extend.
-#
-# Matching rule (see _make_topic_matcher):
-#   - case-insensitive
-#   - WORD-BOUNDARY aware: r"\bpest\b" matches "pest"/"Pest"/"a pest." but NOT
-#     "pesticide".  This is deliberate -- "pesticide" is a different concept
-#     (an input/treatment) from "pest" (the threat), and conflating them muddies
-#     the signal.  We add explicit substring-bearing keywords where we DO want
-#     the wider net (e.g. "pest control" still hits the pest flag via "pest").
-#   - a topic fires if ANY of its keywords match.
-#
-# Each value is a list of keyword phrases.  Multi-word phrases are matched as a
-# phrase with word boundaries on each end (e.g. "import ban").
-# --------------------------------------------------------------------------- #
+# Topic keyword lists - one place, easy to extend. A topic fires if ANY of its keywords
+# match, case-insensitively and on word boundaries, so 'pest' does not match 'pesticide'
+# (a different concept - conflating them muddies the signal). Multi-word phrases are
+# matched as a phrase with boundaries at each end.
 TOPIC_KEYWORDS: dict[str, list[str]] = {
     "pest": ["pest", "pests", "infestation", "armyworm", "locust", "locusts"],
     "flood": ["flood", "floods", "flooding", "flooded", "inundation"],
@@ -71,8 +60,7 @@ TOPIC_KEYWORDS: dict[str, list[str]] = {
     "import_ban": ["import ban", "import bans", "import restriction", "import restrictions"],
 }
 
-# Public ordering of topics so callers (aggregation, table schema, Chunk D) see
-# a stable, documented column order.
+# Public ordering of topics, so callers and the table schema see a stable column order.
 TOPIC_NAMES: list[str] = list(TOPIC_KEYWORDS.keys())
 
 

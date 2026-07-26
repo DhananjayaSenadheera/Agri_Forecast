@@ -33,14 +33,11 @@ def main():
 
     print("=== TC1: table sanity ===")
     check("row count > 0", len(feats) > 0, f"{len(feats)} rows")
-    # CONTRACT check, not a magic count: assert every column the feature build is
-    # DECLARED to emit is actually present. Sourced from features.py's own shared
-    # constants (CALENDAR_FEATURE_COLS, FESTIVAL_FEATURE_COLS, and the private-but-
-    # importable *_FEATURES lists) plus the per-market spread columns generated
-    # from the live feature-safe market slugs, so this list is derived from the
-    # SAME source of truth build_features.py uses -- never re-typed by hand -- and
-    # still fails loudly if an expected column is ever dropped. A hardcoded total
-    # (the old "51 columns") goes stale every time a feature lands; this does not.
+    # A contract check, not a magic count: every column the feature build is DECLARED to emit
+    # must be present. The expected list is derived from features.py's own shared constants
+    # plus the per-market spread columns generated from the live market slugs, so it comes
+    # from the same source of truth as the build and never goes stale the way a hardcoded
+    # column count did.
     market_slugs = load.feature_safe_market_slugs()
     market_cols = [f"Mkt{slug}AvgPrice" for slug in market_slugs] + \
                   [f"Mkt{slug}Lag7" for slug in market_slugs]
@@ -63,14 +60,11 @@ def main():
         + features._SPREAD_DERIVED_COLS
         + market_cols
     )
-    # SYMMETRIC: missing columns are the obvious risk, but EXTRA columns are the
-    # dangerous one -- train/dataset.py selects model inputs by DENYLIST
-    # (`[c for c in df.columns if c not in _EXCLUDE]`), so any stray column that
-    # lands in CropFeatureDaily (a merge_asof _x/_y suffix leftover, a raw joined
-    # date, a leftover helper column) becomes a MODEL INPUT automatically, and
-    # store.write_features uses if_exists="replace" so it propagates on the very
-    # next daily run. The old hardcoded "51 columns" total caught both directions
-    # by accident; this check catches both directions on purpose.
+    # The check is SYMMETRIC. Missing columns are the obvious risk, but extra ones are the
+    # dangerous ones: train/dataset.py selects model inputs by DENYLIST, so any stray column
+    # that lands in CropFeatureDaily (a merge_asof _x/_y leftover, a raw joined date) becomes
+    # a model input automatically, and the store is rebuilt with if_exists='replace' so it
+    # propagates on the very next daily run.
     db_cols = set(feats.columns)
     missing_cols = expected_cols - db_cols
     extra_cols = db_cols - expected_cols
@@ -82,7 +76,7 @@ def main():
     check("no duplicate (crop,date) keys",
           not feats.duplicated(["CropId", "ObservationDate"]).any())
 
-    # --- Brinjal as the worked example ---
+    # Brinjal as the worked example.
     brinjal = prices[prices["CropName"] == "Brinjal"]
     bcrop = brinjal["CropId"].iloc[0]
     dp = daily_price(brinjal)
@@ -113,10 +107,8 @@ def main():
         got_label = fb.loc[d, "LabelHarvestPrice"]
         ok = (pd.isna(got_label) and pd.isna(exp_label)) or (pd.notna(got_label) and abs(got_label - exp_label) < 0.01)
         check(f"Label @ {d.date()} -> {hd.date()}", ok, f"db={got_label} exp={exp_label}")
-    # Teeth guard: the both-NaN branch above auto-passes with no real comparison.
-    # If the sample dates ever drift into the unlabelled tail (no trading day
-    # exists gp days ahead yet), every TC3 check would silently go vacuous. At
-    # least one sample must carry a real, independently-recomputed label.
+    # Teeth guard: the both-NaN branch above would auto-pass without comparing anything, so
+    # at least one sample must carry a real, independently recomputed label.
     check("TC3 has a non-NaN expected label (test has teeth, not vacuous both-NaN)",
           any(pd.notna(v) for v in exp_labels),
           f"{sum(pd.notna(v) for v in exp_labels)}/{len(exp_labels)} samples labelled")
@@ -124,12 +116,9 @@ def main():
     print("\n=== TC4: weather point-in-time (uses last COMPLETE month M-1) ===")
     weather = load.load_weather()
     wmap = {r.Month: (r.AvgTemperature, r.TotalRainfall) for r in weather.itertuples()}
-    # Sample selection: fb.index[[100, 200, 300]] (used by TC2/TC3) lands in
-    # 2017-2023 -- long before WxAvgTempC coverage starts (weather is only
-    # loaded from 2025-02 onward). Comparing both-NaN there auto-passes without
-    # testing anything (measured: 48,230/83,914 store rows have NULL
-    # WxAvgTempC). Pick samples the STORE itself flags as weather-covered, then
-    # independently verify the recompute agrees -- a real, non-vacuous check.
+    # The TC2/TC3 sample dates land years before weather coverage starts, where comparing
+    # NaN to NaN proves nothing. Pick samples the store itself flags as weather-covered and
+    # then check the recompute agrees.
     wx_covered = fb.index[fb["WxAvgTempC"].notna()]
     assert len(wx_covered) > 0, (
         "no Brinjal rows have WxAvgTempC populated -- TC4 cannot select any "
@@ -143,39 +132,29 @@ def main():
         got_t = fb.loc[d, "WxAvgTempC"]
         ok = (pd.isna(got_t) and pd.isna(exp_t)) or (pd.notna(got_t) and abs(got_t - exp_t) < 0.01)
         check(f"WxAvgTempC @ {d.date()} = wx[{cur}]", ok, f"db={got_t} exp={exp_t}")
-    # Teeth guard: mirrors TC3's -- at least one sample must have a real,
-    # independently-recomputed (non-NaN) expected temperature, or this whole
-    # test block is comparing NaN to NaN and proving nothing.
+    # Teeth guard, mirroring TC3: at least one sample must have a real, non-NaN expected
+    # temperature, or this block is comparing NaN to NaN.
     check("TC4 has a non-NaN expected temperature (test has teeth, not vacuous both-NaN)",
           any(pd.notna(v) for v in exp_temps),
           f"{sum(pd.notna(v) for v in exp_temps)}/{len(exp_temps)} samples had weather")
 
     print("\n=== TC5: LEAKAGE-BY-TRUNCATION — Beans, policy-transition era ===")
-    # Why Beans, not Brinjal: policy features are a NATIONAL signal (identical
-    # across crops for a given date -- see _attach_policy), so per se either
-    # crop's history overlaps the same 2020-2024 policy-transition window. The
-    # real reason is DATA DENSITY in the safe window: measured as of 2026-07,
-    # Brinjal has only 380 trading rows before the cutoff with 10 gaps > 30 days
-    # (its early-history coverage is thin/sparse), vs Beans' 1782 rows with just
-    # 1 such gap -- Beans gives a near-continuous, much larger safe-window sample,
-    # which is the stronger leakage guard. Beans has 11 years of history
-    # (2015-06-22 onward) and the cutoff 2023-06-15 falls inside the 2020-2024
-    # policy-transition window, giving 4 distinct ActivePolicyNetDirection values
-    # in the safe window alone. This makes TC5 a genuine guard for all 5 policy
-    # columns.
+    # Beans rather than Brinjal because of data density in the safe window: Brinjal has ~380
+    # trading rows before the cutoff with 10 gaps over 30 days, against Beans' 1782 rows with
+    # one. Beans also spans 11 years, and the 2023-06-15 cutoff sits inside the 2020-2024
+    # policy-transition window, giving 4 distinct policy states in the safe window alone.
     #
-    # Strategy: rebuild Beans features twice — (a) full data vs (b) data truncated
-    # at cutoff C. Features for dates in the safe window (>= 90 days before C)
-    # MUST be bit-identical; any deviation reveals that a feature read future data.
+    # Strategy: rebuild Beans features twice, on full data and on data truncated at cutoff C.
+    # Features for dates in the safe window (at least 90 days before C) MUST be bit-identical;
+    # any deviation means a feature read future data.
     #
-    # NewsSentimentDaily is currently empty in the DB, so _attach_sentiment's
-    # backward merge_asof is never executed in the real-data path. TC5b (below)
-    # exercises it with synthetic data.
+    # NewsSentimentDaily is empty in the DB, so the sentiment as-of merge is never exercised
+    # on real data; TC5b below covers it with synthetic data.
     wx = load.load_weather()
     fx = load.load_fx()
     policy = load.load_policy_flags()
 
-    # --- TC5 main: Beans with REAL policy data; NewsSentimentDaily is empty ---
+    # TC5 main: Beans with real policy data; NewsSentimentDaily is empty.
     beans = prices[prices["CropName"] == "Beans"]
     cutoff = pd.Timestamp("2023-06-15")   # inside 2020-2024 policy-transition window
     safe_end = cutoff - pd.Timedelta(days=90)
@@ -218,15 +197,10 @@ def main():
     )
 
     print("\n=== TC5b: LEAKAGE-BY-TRUNCATION — sentiment backward merge_asof ===")
-    # NewsSentimentDaily is empty in the live DB, so _attach_sentiment's
-    # backward merge_asof path is never exercised by TC5. This sub-case builds a
-    # SMALL synthetic sentiment frame in-memory (same columns that the real loader
-    # returns), spanning the TC5 cutoff, and re-runs the identity check for the 4
-    # sentiment columns specifically. Weekly rows are sufficient because
-    # merge_asof carries the last known value forward — 12 rows before the cutoff
-    # give 12 distinct values in the safe window.
-    #
-    # Seeded for determinism. Columns match _SENTIMENT_COLS / _SENTIMENT_FEATURES.
+    # NewsSentimentDaily is empty in the live DB, so TC5 never exercises the sentiment as-of
+    # merge. This sub-case builds a small synthetic sentiment frame spanning the cutoff and
+    # re-runs the identity check for the 4 sentiment columns. Weekly rows are enough because
+    # merge_asof carries the last value forward. Seeded for determinism.
     np.random.seed(42)
     # 30 weekly rows centred on the cutoff: 2023-01-01 to 2023-07-23
     n_sent = 30

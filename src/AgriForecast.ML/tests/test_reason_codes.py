@@ -31,9 +31,7 @@ _KNOWN_FACTOR_CODES = {
 }
 
 
-# ===========================================================================
 # 1. reasonCode per distinct prose branch + params
-# ===========================================================================
 
 # (kwargs to both _reason_for and _reason_code_for) -> expected code.
 _BRANCH_CASES = [
@@ -88,9 +86,7 @@ class TestReasonCodePerBranch:
                 assert params == {}
 
 
-# ===========================================================================
 # 2. raw feature -> factor code mapping table
-# ===========================================================================
 
 class TestFactorMapping:
     @pytest.mark.parametrize("col,expected", [
@@ -158,9 +154,7 @@ class TestFactorMapping:
             f"unexpected dropped columns: {sorted(dropped)}")
 
 
-# ===========================================================================
 # 3. top_factor_codes aggregation / direction / weight / determinism
-# ===========================================================================
 
 class TestTopFactorCodes:
     def _stub(self, monkeypatch, cols, sv):
@@ -235,9 +229,7 @@ class TestTopFactorCodes:
         assert explain.top_factor_codes({}, {}, top_n=4) == []
 
 
-# ===========================================================================
 # 4. predict_harvest wiring: fallback OMITS topFactors; model INCLUDES it
-# ===========================================================================
 
 def _served_payload(served):
     return {"served_on_crops": served, "beats_baseline": True,
@@ -299,9 +291,7 @@ class TestPredictWiring:
         assert "topFactors" not in r  # timeline never emits factor breakdown
 
 
-# ===========================================================================
 # 5. PROSE-UNCHANGED regression pins (additive change must not alter prose)
-# ===========================================================================
 
 class TestProseUnchanged:
     def test_confidence_reason_strings_byte_identical(self):
@@ -341,9 +331,7 @@ class TestProseUnchanged:
             "than this baseline at current data volume.)")
 
 
-# ===========================================================================
 # 6. Real promoted model (DB-gated): live SHAP factor codes are well-formed
-# ===========================================================================
 
 class TestRealModelFactorCodes:
     def _predict(self):

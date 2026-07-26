@@ -46,9 +46,7 @@ def _obs_frame(dates, unit: str) -> pd.DataFrame:
     })
 
 
-# ---------------------------------------------------------------------------
 # _as_canon_dt: the load-layer normalizer collapses every unit to [ns].
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("unit", ["s", "ms", "us", "ns"])
 def test_as_canon_dt_pins_ns_and_preserves_values(unit: str) -> None:
@@ -61,9 +59,7 @@ def test_as_canon_dt_pins_ns_and_preserves_values(unit: str) -> None:
     assert list(out) == list(pd.to_datetime(["2025-01-01", "2025-06-30", "2025-12-31"]))
 
 
-# ---------------------------------------------------------------------------
 # _attach_fx: mismatched resolutions must merge AND carry correct as-of values.
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("obs_unit,fx_unit", [("s", "us"), ("us", "s"), ("s", "ns")])
 def test_attach_fx_survives_mismatched_resolution(obs_unit: str, fx_unit: str) -> None:
@@ -93,9 +89,7 @@ def test_attach_fx_boundary_no_future_leak() -> None:
     assert merged["FxUsdLkr"].tolist() == [320.0]  # never the after-D value
 
 
-# ---------------------------------------------------------------------------
 # _attach_sentiment: identical pattern, same guarantees.
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("obs_unit,sent_unit", [("s", "us"), ("us", "s")])
 def test_attach_sentiment_survives_mismatched_resolution(obs_unit: str, sent_unit: str) -> None:

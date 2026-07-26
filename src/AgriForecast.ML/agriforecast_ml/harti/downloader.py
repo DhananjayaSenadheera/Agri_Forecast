@@ -52,11 +52,9 @@ _HEADERS = {
 
 _REQUEST_DELAY = 1.0   # seconds between requests
 
-# Security fix F-10: cap the size of any single downloaded PDF. HARTI daily-price
-# PDFs are a few hundred KB; 25 MB is a generous ceiling that still stops a
-# malicious/oversized response (decompression bomb, wrong file) from exhausting
-# memory or disk. The cap is enforced against streamed bytes, not just the
-# Content-Length header (which can lie or be absent).
+# Cap the size of any single downloaded PDF. Real bulletins are a few hundred KB, so 25 MB
+# is generous while still stopping an oversized or malicious response from exhausting
+# memory. Enforced against streamed bytes, not just the Content-Length header.
 _MAX_PDF_BYTES = 25 * 1024 * 1024   # 25 MB
 _STREAM_CHUNK_BYTES = 64 * 1024     # 64 KB read chunks
 _DOWNLOAD_TIMEOUT = 60              # seconds, per-request
@@ -67,19 +65,15 @@ class PdfTooLargeError(Exception):
 
 
 def _download_capped(session: requests.Session, url: str) -> bytes:
-    """Stream ``url`` into memory, aborting if it exceeds ``_MAX_PDF_BYTES``.
+    """Stream url into memory, aborting if it exceeds _MAX_PDF_BYTES.
 
-    Checks the Content-Length header up front (when present) AND the actual number
-    of streamed bytes, since the header is attacker-controllable / can be missing.
+    Checks the Content-Length header when present AND the actual streamed byte count, since
+    the header can lie or be missing.
 
-    SSRF guard (S1): the GET goes through ``guarded_get``, so the initial URL AND
-    every redirect ``Location`` are validated against the scheme+host allowlist
-    and the private/loopback/link-local IP block (resolve-then-check) before the
-    request is issued. Auto-redirects are disabled at the requests layer; a 3xx to
-    an off-allowlist or private-IP host raises ``DisallowedUrlError`` instead of
-    being followed. The caller (``download_pdfs``) additionally runs
-    ``assert_url_allowed`` as a pre-flight so a disallowed URL is rejected as a
-    per-URL failure without opening a socket.
+    The GET goes through guarded_get, so the initial URL and every redirect Location are
+    validated against the host allowlist and the private-IP block before the request is
+    issued. The caller also pre-flights with assert_url_allowed, so a disallowed URL fails
+    without opening a socket.
     """
     with guarded_get(
         session, url, headers=_HEADERS, timeout=_DOWNLOAD_TIMEOUT, stream=True
@@ -232,13 +226,9 @@ def download_pdfs(
         safe_path = quote(rel_url, safe="/")
         url = urljoin(HARTI_BASE, safe_path)
 
-        # SSRF guard (S1): the URL is built from a scraped listing link. Validate
-        # it against the scheme+host allowlist AND the private/loopback/link-local
-        # IP block (resolve-then-check) before we ever issue the request, so a
-        # poisoned absolute href that survived scraping is rejected here as a
-        # per-URL failure. _download_capped -> guarded_get re-runs the same
-        # validation on the request and on every redirect target, so a 3xx cannot
-        # escape it either.
+        # The URL comes from a scraped listing link, so validate it against the host allowlist and
+        # the private-IP block before issuing the request; a poisoned href fails here as a per-URL
+        # error. guarded_get re-runs the same validation on the request and every redirect target.
         try:
             assert_url_allowed(url)
         except DisallowedUrlError as exc:

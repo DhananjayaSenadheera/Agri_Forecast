@@ -1,15 +1,9 @@
-"""Minimal .env loader (stdlib-only; python-dotenv is intentionally not a
-dependency — see F-06 dependency trimming).
+"""Minimal .env loader (stdlib only; python-dotenv is deliberately not a dependency).
 
-Loads KEY=VALUE pairs from the gitignored ``src/AgriForecast.ML/.env`` so the
-service gets its secrets (ML_ADMIN_API_KEY, AGRI_DB_*) no matter how it is
-launched — run_ml.sh, an IDE run configuration, or plain ``python -m uvicorn``.
-
-Safety semantics:
-- Real environment variables always win; .env never overrides one already set.
-- No-op when the file is absent (e.g. Docker, where env vars are injected).
-- Only the fixed path next to this package is read — never the CWD.
-- Values are never logged.
+Loads KEY=VALUE pairs from the gitignored src/AgriForecast.ML/.env so the service
+gets its secrets however it is launched. Real environment variables always win, a
+missing file is a no-op, only the fixed path next to this package is read, and
+values are never logged.
 """
 from __future__ import annotations
 

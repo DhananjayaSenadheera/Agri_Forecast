@@ -42,10 +42,8 @@ from agriforecast_ml import dec_mirror as M  # noqa: E402
 DAMBULLA_ID = uuid.UUID("b2a20001-0000-0000-0000-000000000001")
 
 
-# ===========================================================================
 # Mock engine helper: sequenced connect()-scoped executes (scalar/fetchone),
 # plus an independent begin()-scoped execute (the INSERT) with a rowcount.
-# ===========================================================================
 
 def _mock_engine(connect_payloads: list, *, insert_rowcount: "int | None" = None) -> MagicMock:
     """`connect_payloads` is a list of dicts, one per successive
@@ -99,9 +97,7 @@ def _dry_run_payloads(*, eligible, would_insert, non_positive, null_crop, null_e
     ]
 
 
-# ===========================================================================
 # 1. Market resolution -- fail-closed
-# ===========================================================================
 
 class TestMarketResolution:
     def test_missing_dambulla_market_row_raises(self):
@@ -121,9 +117,7 @@ class TestMarketResolution:
         assert first_call_params == {"code": M.DAMBULLA_MARKET_CODE}
 
 
-# ===========================================================================
 # 2. SQL text pins
-# ===========================================================================
 
 class TestSqlTextContract:
     def test_eligible_where_rejects_non_positive_and_null_crop(self):
@@ -176,9 +170,7 @@ class TestSqlTextContract:
         assert "DATEADD(DAY, 1, mp.PriceDate)" in src
 
 
-# ===========================================================================
 # 3. dry_run_report()
-# ===========================================================================
 
 class TestDryRunReport:
     def test_report_shape_and_arithmetic(self):
@@ -230,9 +222,7 @@ class TestDryRunReport:
         assert "mp.ExternalProductId IS NULL" in sixth_call_sql
 
 
-# ===========================================================================
 # 4. Idempotency: nothing new -> no INSERT issued at all
-# ===========================================================================
 
 class TestMirrorIdempotency:
     def test_zero_would_insert_never_opens_a_write_transaction(self):
@@ -243,9 +233,7 @@ class TestMirrorIdempotency:
         begin_conn.execute.assert_not_called()
 
 
-# ===========================================================================
 # 5. Insert path
-# ===========================================================================
 
 class TestMirrorInsertPath:
     def test_insert_executes_with_source_and_unit_params_and_reports_rowcount(self):
@@ -288,9 +276,7 @@ class TestMirrorInsertPath:
         assert result["inserted"] == 7
 
 
-# ===========================================================================
 # 6. Passion by-design duplicate: two ext-ids, one CropId
-# ===========================================================================
 
 class TestPassionDualExtIdByDesign:
     def test_anti_join_and_insert_never_dedupe_on_cropid(self):

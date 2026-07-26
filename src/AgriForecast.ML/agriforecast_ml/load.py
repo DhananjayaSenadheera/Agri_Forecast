@@ -7,20 +7,9 @@ import pandas as pd
 
 from .db import get_engine
 
-# Canonical datetime resolution for EVERY datetime column that leaves this module.
-#
-# pandas 3.0 made pd.merge_asof strict about join-key dtype resolution, and
-# pd.read_sql now returns datetime columns at whatever unit the driver reports
-# (datetime64[s], datetime64[us], ...). pd.to_datetime PRESERVES that unit, so a
-# price series read as [s] and an FX series read as [us] have incompatible
-# datetime64 dtypes and the as-of merges in features.py raise
-# "incompatible merge keys ... must be the same type".
-#
-# Every loader normalizes its datetime columns to this single unit so all
-# downstream consumers (as-of merges, period conversions, festival windows) see
-# consistent dtypes. This is a PURE dtype normalization: same wall-clock dates,
-# same values, no timezone/logic change (ns has more than enough range for the
-# 2015+ agricultural date domain).
+# Every datetime column leaving this module is pinned to one unit. pd.read_sql returns
+# whatever unit the driver reports ([s], [us], ...) and merge_asof in features.py raises
+# if two join keys differ. Pure dtype normalisation: same wall-clock dates.
 _CANON_DT = "datetime64[ns]"
 
 
@@ -30,11 +19,10 @@ def _as_canon_dt(s: pd.Series) -> pd.Series:
 
 
 def _is_verified(is_verified) -> bool:
-    """True iff the agronomy profile is owner-VERIFIED (IsVerified == 1/True).
+    """True if the agronomy profile is owner-verified (IsVerified == 1).
 
-    NA-safe and dtype-tolerant: a missing profile (LEFT JOIN NULL), a Python
-    False, a numpy bool, or a 0/1 int all collapse to the right answer without
-    ever raising on ``pd.NA``. Anything that is not truthy-True => not verified.
+    NA-safe: a missing profile, a Python False, a numpy bool or a 0/1 int all give the
+    right answer without raising on pd.NA. Anything not truthy-True is not verified.
     """
     if is_verified is None or is_verified is pd.NA:
         return False
@@ -47,50 +35,32 @@ def _is_verified(is_verified) -> bool:
 
 
 def resolve_forecast_gp(is_verified, growth_period_days) -> int | None:
-    """R2 Step 5.3 exclusion predicate (IsVerified-STRICT) — single source of
-    truth for "does this crop get an ML harvest horizon at all?".
+    """Return the growth period a crop may be forecast with, or None.
 
-    A crop is forecastable ONLY IF its ``CropAgronomyProfiles`` row is
-    owner-verified (``IsVerified == 1``) AND still carries a usable
-    ``GrowthPeriodDays``. Returns the integer growth period when forecastable,
-    else ``None`` (the caller then degrades to the crop-mean fallback with NO
-    harvest horizon — no label at train time, no served horizon at serve time).
-
-    This is the POST-flip rule. Before Step 5.3 an unverified profile with a
-    legacy GrowthPeriodDays was honored (gp-only predicate); it is now EXCLUDED
-    exactly like a NULL-GrowthPeriodDays crop. Both the feature-build exclusion
-    path (features.build_crop_features) and the serving fallback resolver
-    (serving/predict._crop_meta) route through here so train/serve cannot skew.
+    Single source of truth for whether a crop gets an ML harvest horizon: its
+    CropAgronomyProfiles row must be owner-verified AND still carry a usable
+    GrowthPeriodDays. An unverified profile is excluded exactly like a NULL growth
+    period, and the caller degrades to the crop-mean fallback with no horizon. The
+    feature build and serving both call this, so train and serve cannot drift apart.
     """
     if not _is_verified(is_verified):
         return None
     if growth_period_days is None or pd.isna(growth_period_days):
         return None
     gp = int(growth_period_days)
-    # A non-positive growth period is not a usable horizon: price.shift(-gp)
-    # with gp<=0 yields a degenerate same-/future-day label, so treat it as
-    # unforecastable (defense-in-depth for bad/zero data — no gp<=0 rows today).
+    # gp <= 0 makes price.shift(-gp) a degenerate label, so treat it as unforecastable.
     if gp <= 0:
         return None
     return gp
 
 
 def load_prices() -> pd.DataFrame:
-    # SPLICE / DEDUP RULE (enforced here, not in the DB):
-    #
-    # HARTI is the preferred source for pre-DEC history.  DEC is authoritative
-    # from 2025-05-05 onward.  However, for Ridge Gourd and Beans, DEC data in
-    # the window 2025-05-05 -> 2025-06-30 is garbage (CV 49-58% in the overlap
-    # spike -- noisy DEC launch period).  For those two crops we use HARTI
-    # through 2025-06-30 and exclude DEC in that window.
-    #
-    # The HARTI loader already only inserted HARTI rows for:
-    #   - All 6 crops:        PriceDate < 2025-05-05
-    #   - Ridge Gourd/Beans:  PriceDate <= 2025-06-30  (exception)
-    #
-    # This WHERE clause excludes the noisy DEC rows for those two crops so that
-    # no (CropId, PriceDate) reaches the feature build from both sources.
-    # DEC rows are NOT deleted from the DB -- this filter is the only gate.
+    # Source splice: HARTI is preferred for pre-DEC history and DEC is authoritative from
+    # 2025-05-05. Ridge Gourd and Beans are the exception - DEC prices are too noisy in
+    # its launch window, so HARTI is used through 2025-06-30 for those two crops. The
+    # HARTI loader only inserted rows inside those windows and this WHERE clause drops
+    # the overlapping DEC rows, so no (CropId, PriceDate) reaches the build from both
+    # sources. Nothing is deleted from the DB; this filter is the only gate.
     sql = """
         SELECT mp.CropId, c.CropCode, c.Name AS CropName, mp.Source,
                mp.PriceDate, mp.MinPrice, mp.MaxPrice
@@ -108,31 +78,17 @@ def load_prices() -> pd.DataFrame:
     """
     df = pd.read_sql(sql, get_engine())
     df["CropId"] = df["CropId"].astype(str)
-    # PriceDate is the SOURCE of ObservationDate/HarvestDate downstream, so pin it
-    # to the canonical unit here — this is where the as-of merge's LEFT key dtype
-    # is decided.
+    # PriceDate becomes ObservationDate/HarvestDate downstream, so the as-of merge's
+    # left-key dtype is decided here.
     df["PriceDate"] = _as_canon_dt(df["PriceDate"])
     for col in ("MinPrice", "MaxPrice"):
         df[col] = df[col].astype(float)
-    # DEDUP (generic, not a Passion special-case): one crop can carry >1
-    # MarketPrices row for the SAME (Source, PriceDate) when the upstream feed
-    # lists the commodity under multiple ExternalProductIds that resolve to the
-    # same crop (e.g. Passion under Dambulla-DEC ids 43 & 76, deliberately merged
-    # into a single crop in step 8.2 -> 2 near-identical rows/date BY DESIGN).
-    # The per-crop feature build (build_crop_features) reindexes onto a unique
-    # daily grid and raises "cannot reindex on an axis with duplicate labels" if
-    # any (crop, date) is doubled. Collapse to one daily value = mean of
-    # MinPrice/MaxPrice per (CropId, Source, PriceDate).
-    #
-    # WHY GROUP WITHIN Source: the aggregation happens strictly inside a single
-    # source, so it NEVER blends HARTI with DAMBULLA_DEC. The cross-source
-    # HARTI/DEC precedence (the 2025-05-05 splice + the Ridge Gourd/Beans DEC-
-    # launch exclusion enforced by the WHERE clause above) is untouched. sort=True
-    # (default) makes the output order independent of DB row order -> deterministic.
-    # A strict no-op for already-unique (crop, source, date) data. Source is a
-    # grouping key only and is dropped so the returned schema is unchanged.
-    # dropna=False: a NULL in any group key must NOT silently delete the row
-    # (pandas' default dropna=True would) — keep it and let downstream fail loud.
+    # One crop can have several MarketPrices rows for the same (Source, PriceDate) when
+    # the feed lists it under more than one external id (Passion has two Dambulla ids).
+    # The per-crop feature build reindexes onto a unique daily grid and would raise on
+    # duplicate labels, so collapse to one value per (CropId, Source, PriceDate).
+    # Grouping inside Source keeps the HARTI/DEC splice above intact, and dropna=False
+    # stops a NULL key silently dropping the row.
     df = (df.groupby(["CropId", "CropCode", "CropName", "Source", "PriceDate"],
                      as_index=False, sort=True, dropna=False)[["MinPrice", "MaxPrice"]]
             .mean())
@@ -141,77 +97,46 @@ def load_prices() -> pd.DataFrame:
     return df
 
 
-# Empty-frame schema for load_price_observations so a missing/empty
-# PriceObservations table (or an unreachable Markets set) degrades to all-NaN
-# spread features rather than failing the build (mirrors the policy/macro
-# empty-frame degrade contract).
+# Empty-frame schema so a missing PriceObservations table degrades to all-NaN spread
+# features instead of failing the build.
 _PRICE_OBS_COLS = ["MarketSlug", "CropId", "ObservedDate", "AvgPrice"]
 
 
 def _market_slug(name: str) -> str:
-    """Stable, human-readable column token for a market Name.
+    """Stable, readable column token for a market Name.
 
-    'Dambulla Dedicated Economic Centre' -> 'Dambulla';
-    'Pettah (HARTI wholesale)' -> 'Pettah'. We take the first word of the Name
-    (all 5 feature-safe markets have a distinct leading word), stripped of
-    non-alphanumerics, so the emitted feature-column names are farmer-legible
-    ('MktDambullaAvgPrice') and stable across DB row-order changes.
+    'Dambulla Dedicated Economic Centre' -> 'Dambulla'. Takes the first word, stripped
+    of non-alphanumerics, so column names like MktDambullaAvgPrice stay stable across
+    DB row-order changes.
     """
     first = (name or "").strip().split()[0] if (name or "").strip() else ""
     return re.sub(r"[^0-9A-Za-z]", "", first)
 
 
-# R2 Step 2 (DEC -> PriceObservations mirror, ClickUp 86cajtx2k): HARTI already
-# writes Dambulla rows into PriceObservations, and the mirror additively writes
-# Source='DAMBULLA_DEC' rows at the SAME Dambulla market -- a source-agnostic
-# per-(market,date) aggregation here would silently BLEND the two sources'
-# prices the moment the mirror backfill runs (live-measured 8,096 overlapping
-# (crop, date) pairs at Dambulla alone). This constant freezes today's exact
-# training-frame identity (only HARTI has ever fed CropFeatureDaily's spread
-# features) so the mirror is provably additive to PriceObservations without
-# moving v16's feature frame. Widening this to include DEC is a DELIBERATE,
-# SEPARATE future decision (more market-spread coverage), never an accidental
-# side effect of the mirror landing. See dec_mirror.py + the R2 Step 2 task
-# report's identity proof (tests/test_load_price_observations_source_guard.py).
+# HARTI is the only source that has ever fed the spread features. The DEC mirror
+# additively writes DAMBULLA_DEC rows at the same Dambulla market, so a
+# source-agnostic aggregation here would silently blend two sources' prices.
+# Widening this to DEC is a deliberate decision plus a retrain, never a side effect.
 _MARKET_SPREAD_SOURCE = "HARTI"
 
 
 def load_price_observations(*, source: str = _MARKET_SPREAD_SOURCE) -> pd.DataFrame:
-    """Per-(market, crop, date) confirmed prices from PriceObservations, restricted
-    to the FEATURE-SAFE market set, for the cross-market spread features (P4).
+    """Per-(market, crop, date) confirmed prices for the cross-market spread features.
 
-    This is the ONLY source for the cross-market legs (owner decision D5,
-    2026-07-04): PriceObservations exclusively, NEVER mixed per-row with
-    MarketPrices (measured 12.6% exact-match disagreement between the two
-    tables). load_prices()/labels are untouched -- the harvest-price label still
-    reads MarketPrices; this loader only feeds the point-in-time spread context.
+    Reads PriceObservations only, never mixed row-by-row with MarketPrices (the two
+    tables disagree on 12.6% of exact matches). The harvest-price label still comes
+    from load_prices(); this loader only feeds point-in-time spread context.
 
-    Filters (leakage-/quality-safe):
-      - MarketId IN get_feature_safe_market_ids() -- excludes the CBSL
-        NationalAggregate pseudo-market (already an average -> double-count) and
-        the ECOMAP-% demo twins (canonical.py). "National" is later an UNWEIGHTED
-        mean over exactly these markets, never a raw AVG over PriceObservations.
-      - IsUnitConfirmed = 1 -- the fail-closed unit quarantine; unconfirmed rows
-        must never reach features.
-      - MaxPrice > 0 AND CropId IS NOT NULL -- mirrors load_prices()'s validity
-        gate; zero/NULL-price rows are absent signal, not a 0 observation.
-      - Source = source (default 'HARTI', i.e. _MARKET_SPREAD_SOURCE) -- R2 Step 2
-        identity guard: PriceObservations can legitimately hold MULTIPLE sources
-        at the same market (the DEC mirror is additive), but this loader freezes
-        the training frame to exactly what it has always read. A future,
-        deliberate decision to widen market-spread coverage to DEC would pass
-        source=None (not implemented here -- no caller does this today; adding it
-        requires a fresh gate/retrain, not a silent behaviour change).
+    Filters: feature-safe markets only (no NationalAggregate double-count, no ECOMAP
+    demo twins), IsUnitConfirmed = 1 for the fail-closed unit quarantine, MaxPrice > 0
+    and CropId NOT NULL, and a single Source (default HARTI) so the training frame
+    stays exactly what it has always read - widening it to DEC needs a deliberate
+    decision and a retrain, not a silent change.
 
-    Per-market AvgPrice = (MinPrice + MaxPrice) / 2 -- the SAME midpoint
-    convention load_prices() uses for MarketPrices (PriceObservations'
-    Wholesale/Retail columns are unpopulated here: all 0). Multiple rows for the
-    same (market, crop, date) are averaged so the series is one value per day.
-
-    Returns a LONG frame [MarketSlug, CropId(str), ObservedDate(ns), AvgPrice]
-    sorted by (MarketSlug, CropId, ObservedDate) -- ready for a per-market
-    backward merge_asof. Missing/empty source (or unreachable feature-safe set)
-    -> empty frame with the right columns (all-NaN spread features downstream).
+    AvgPrice is the (Min + Max) / 2 midpoint load_prices() also uses, averaged over any
+    duplicate rows. Returns a long frame [MarketSlug, CropId, ObservedDate, AvgPrice]
+    sorted ready for a per-market backward merge_asof; an empty frame if the source is
+    missing or unreachable.
     """
     from .canonical import get_feature_safe_market_ids
 
@@ -223,8 +148,7 @@ def load_price_observations(*, source: str = _MARKET_SPREAD_SOURCE) -> pd.DataFr
     if not safe_ids:
         return pd.DataFrame(columns=_PRICE_OBS_COLS)
 
-    # Parameterise the market-id IN-list. Cast to str so the driver binds the
-    # GUIDs uniformly regardless of uuid/str dtype in the set.
+    # Cast to str so the driver binds the GUIDs the same way whatever dtype they are.
     id_list = [str(i) for i in safe_ids]
     placeholders = ", ".join(f":m{i}" for i in range(len(id_list)))
     params = {f"m{i}": v for i, v in enumerate(id_list)}
@@ -264,11 +188,9 @@ def load_price_observations(*, source: str = _MARKET_SPREAD_SOURCE) -> pd.DataFr
 def feature_safe_market_slugs() -> list[str]:
     """The stable, sorted MarketSlug set for the feature-safe markets.
 
-    Drives which per-market spread columns _attach_market_spread emits (so a
-    market with zero PriceObservations today -- e.g. Narahenpita -- still gets an
-    explicit all-NaN column rather than a silently absent one). Sorted by
-    MarketCode so column ordering is deterministic across DB row order. Empty on
-    an unreachable DB (spread features then attach with no per-market columns).
+    Decides which per-market spread columns are emitted, so a market with no rows today
+    still gets an explicit all-NaN column instead of silently disappearing. Sorted by
+    MarketCode for deterministic column order; empty when the DB is unreachable.
     """
     try:
         import sqlalchemy as sa
@@ -297,44 +219,22 @@ def feature_safe_market_slugs() -> list[str]:
 
 
 def load_crops() -> pd.DataFrame:
-    """Crop identity + agronomy (growth period / harvest window / planting season).
+    """Crop identity plus agronomy (growth period, harvest window, planting season).
 
-    R2 Step 2.3 CUT-OVER: agronomy now comes from ``CropAgronomyProfiles`` (the
-    source of truth per R2 Step 2.1), NOT the legacy ``Crops.GrowthPeriodDays /
-    PlantingSeason / HarvestWindowDays`` columns (those are dropped in 2.4 -- do
-    not read them again). ``Crops`` still owns crop IDENTITY (Id/CropCode/Name);
-    the profile is joined 1:1 for the three agronomy values.
+    Agronomy comes from CropAgronomyProfiles, not the legacy Crops columns, which were
+    dropped - do not read them again. Crops still owns identity, and the profile is
+    joined 1:1 with a LEFT JOIN so a crop with no profile still appears with NULL
+    agronomy and is then excluded from forecasting by the label gate.
 
-    LEFT JOIN so a crop that somehow lacks a profile row still appears with NULL
-    agronomy (it is then excluded from forecasting by the label/exclusion gate,
-    exactly like a NULL GrowthPeriodDays -- see build_features / features.py).
+    PlantingSeason is a reconstructed legacy-compatible string, kept only so the
+    downstream encoder reproduces today's per-crop values exactly: the legacy encoder
+    mapped 'Year-round' to 0 but NULL to -1, and the profile month columns cannot tell
+    those two apart. All months NULL plus a known growth period means 'Year-round';
+    all months NULL and no growth period means None. Once real months are populated,
+    Yala/Maha win regardless.
 
-    SEASON ENCODING (binding R2 convention): PlantingSeasonEnc is derived
-    downstream (features.py) from the profile month columns -- Yala populated => 1,
-    Maha populated => 2, all-NULL => Year-round/unknown. We emit the four month
-    columns + IsPerennial so features.py can derive it; ``PlantingSeason`` is a
-    RECONSTRUCTED legacy-compatible string kept ONLY so the encoder reproduces
-    today's exact per-crop values bit-for-bit (QA acceptance pin): the legacy
-    encoder mapped 'Year-round' -> 0 but NULL -> -1, and the 2.1 copy collapsed
-    both to all-NULL month columns, so the profile alone cannot separate them.
-    The one surviving discriminator is GrowthPeriodDays (the legacy 'Year-round'
-    crops are exactly the ones with a non-NULL growth period). Reconstruction:
-    all months NULL AND gp known => 'Year-round' (enc 0); all months NULL AND gp
-    NULL => None (enc -1, the legacy "unknown" state, and these crops are excluded
-    from training anyway). Once Step 5 populates real months, Yala/Maha win here
-    regardless of gp.
-
-    IsVerified is loaded and is now PART OF the exclusion predicate (R2 Step 5.3,
-    IsVerified-strict): a crop is forecastable ONLY IF its profile is
-    ``IsVerified == 1`` AND still carries a usable ``GrowthPeriodDays``. An
-    unverified profile — even one holding a legacy GrowthPeriodDays — is EXCLUDED
-    from ML forecasting exactly like a NULL-GrowthPeriodDays crop; the caller
-    degrades to the crop-mean fallback with no harvest horizon. This loader still
-    returns the RAW DB agronomy values (audit/visibility); the strict predicate
-    itself lives in ``resolve_forecast_gp`` and is applied by the feature-build
-    exclusion path (features.build_crop_features) and the serving fallback
-    resolver (serving/predict._crop_meta), the single shared gate for train/serve
-    skew safety.
+    IsVerified is returned raw for audit; the strict exclusion predicate itself lives
+    in resolve_forecast_gp().
     """
     sql = """
         SELECT c.Id AS CropId, c.CropCode, c.Name AS CropName,
@@ -347,17 +247,16 @@ def load_crops() -> pd.DataFrame:
     """
     df = pd.read_sql(sql, get_engine())
     df["CropId"] = df["CropId"].astype(str)
-    # Reconstruct the legacy-compatible PlantingSeason string so the downstream
-    # encoder stays bit-identical (see docstring). Month columns take precedence
-    # (future-proof for Step 5); today all months are NULL so this collapses to
-    # the gp-based Year-round/None split that matches legacy exactly.
+    # Rebuild the legacy PlantingSeason string so the encoder stays bit-identical.
+    # Month columns take precedence; today they are all NULL, so this collapses to the
+    # growth-period-based Year-round/None split.
     yala_cols = ["YalaPlantingStartMonth", "YalaPlantingEndMonth"]
     maha_cols = ["MahaPlantingStartMonth", "MahaPlantingEndMonth"]
     has_yala = df[yala_cols].notna().any(axis=1)
     has_maha = df[maha_cols].notna().any(axis=1)
     season = pd.Series([None] * len(df), index=df.index, dtype=object)
-    # all-NULL months + a known growth period => legacy 'Year-round' (enc 0);
-    # all-NULL months + NULL gp => leave None (legacy NULL -> enc -1).
+    # All months NULL plus a known growth period => legacy 'Year-round' (enc 0);
+    # all months NULL and no growth period => None (legacy enc -1).
     season = season.mask(df["GrowthPeriodDays"].notna() & ~has_yala & ~has_maha,
                          "Year-round")
     season = season.mask(has_maha, "Maha")   # Maha months populated (Step 5+)
@@ -371,27 +270,15 @@ _CROP_CATEGORY_COLS = ["crop_id", "category_id", "category_code",
 
 
 def load_crop_categories() -> pd.DataFrame:
-    """Crop taxonomy: one row per crop with its category (and parent category).
+    """Crop taxonomy: one row per crop with its category and parent category.
 
-    The DB ``CropCategories`` table is the SOURCE OF TRUTH for crop taxonomy
-    (R2 Step 1). Consumers must NOT hardcode category maps in Python -- read this
-    loader (or the DB table) instead. The retired 11-GUID / 4-family static maps
-    are dead; do not resurrect them.
+    The DB CropCategories table is the source of truth - never hardcode a category map
+    in Python. Joins Crops -> CropCategories -> parent category (LEFT, so a top-level
+    category has parent_code None); a crop with no category is dropped by the inner
+    join. A missing table degrades to an empty frame, like load_policy_flags().
 
-    Joins Crops -> CropCategories -> parent CropCategories (LEFT, so a top-level
-    category has ``parent_code = None``). ``Crops.CropCategoryId`` is FK-backfilled
-    for all live crops; a crop whose category is somehow unmapped is dropped by the
-    inner join (it has no taxonomy to serve).
-
-    Mirrors load_policy_flags()/load_fx(): same engine, try/except -> typed
-    empty-frame degrade so a missing/empty CropCategories table yields an empty
-    taxonomy frame rather than failing the caller. GUID columns are lowercased so
-    the .NET<->Python boundary never misses on case (uppercase-GUID fallback miss
-    was a real bug).
-
-    Returns [crop_id, category_id, category_code, category_name, parent_code]:
-    crop_id/category_id lowercase str GUIDs, parent_code None for top-level
-    categories.
+    GUID columns are lowercased because a mixed-case miss at the .NET boundary was a
+    real bug. Returns [crop_id, category_id, category_code, category_name, parent_code].
     """
     sql = """
         SELECT c.Id           AS crop_id,
@@ -420,11 +307,10 @@ def load_crop_categories() -> pd.DataFrame:
 
 
 def load_fx() -> pd.DataFrame:
-    """USD->LKR exchange-rate series for a point-in-time (as-of) join.
+    """USD to LKR exchange-rate series for a point-in-time (as-of) join.
 
-    open.er-api.com is latest-only, so historical FX is not backfilled --
-    expect this to be sparse (one row today). Returns [date, fx_usd_lkr]
-    sorted ascending so it can be consumed by pd.merge_asof.
+    open.er-api.com is latest-only, so historical FX is not backfilled and the series
+    is sparse. Returns [date, fx_usd_lkr] sorted ascending for pd.merge_asof.
     """
     sql = "SELECT Date, Value FROM EconomicIndicators WHERE IndicatorCode = 'USD_LKR'"
     df = pd.read_sql(sql, get_engine())
@@ -442,8 +328,8 @@ def load_weather() -> pd.DataFrame:
     return df.sort_values("Month").reset_index(drop=True)
 
 
-# Empty-frame schemas so a missing/empty source degrades to all-NaN features
-# (mirrors load_fx returning a sparse series) rather than failing the build.
+# Empty-frame schemas so a missing source degrades to all-NaN features instead of
+# failing the build.
 _POLICY_COLS = ["Id", "PolicyType", "Title", "EffectiveFrom", "EffectiveTo",
                 "Direction", "Source", "ReferenceUrl"]
 _SENTIMENT_COLS = ["Date", "MeanSentiment", "ArticleCount",
@@ -454,17 +340,12 @@ _MACRO_COLS = ["SeriesCode", "ReferenceDate", "PublishedAt", "Value",
 
 
 def load_policy_flags() -> pd.DataFrame:
-    """Government-policy flags as date ranges for a point-in-time (active-as-of)
-    join.
+    """Government-policy flags as date ranges, for an active-as-of join.
 
-    A flag is active on date D iff EffectiveFrom <= D AND (EffectiveTo IS NULL OR
-    D <= EffectiveTo). Knowledge date = EffectiveFrom (the policy is publicly in
-    effect from then), so attaching it at D is leakage-safe. CreatedAtUtc is an
-    audit field and is deliberately NOT loaded -- it must never become a feature.
-
-    Returns columns [Id, PolicyType, Title, EffectiveFrom, EffectiveTo,
-    Direction, Source, ReferenceUrl] with EffectiveFrom/EffectiveTo as
-    datetimes (EffectiveTo NaT = still active), sorted by EffectiveFrom.
+    A flag is active on date D when EffectiveFrom <= D and (EffectiveTo IS NULL or
+    D <= EffectiveTo). The knowledge date is EffectiveFrom, so attaching it at D is
+    leakage-safe. CreatedAtUtc is an audit field and is deliberately not loaded.
+    EffectiveTo NaT means still active. Sorted by EffectiveFrom.
     """
     sql = """
         SELECT Id, PolicyType, Title, EffectiveFrom, EffectiveTo,
@@ -485,29 +366,20 @@ def load_policy_flags() -> pd.DataFrame:
 
 
 def load_festivals() -> pd.DataFrame:
-    """National festival calendar as point-in-time date rows for the feature build.
+    """National festival calendar for the feature build.
 
-    Reads FestivalCalendarEntries -- the SINGLE SOURCE OF TRUTH for festival dates
-    (mirrors load_policy_flags()/load_fx(): same engine, try/except -> empty-frame
-    degrade so a missing/empty table attaches all-zero festival features rather than
-    failing the build). There is deliberately NO static festival_days.py twin.
+    FestivalCalendarEntries is the single source of truth for festival dates; there is
+    deliberately no static Python twin. A missing or empty table degrades to an empty
+    frame, which attaches all-zero festival features rather than failing the build.
 
-    ASYMMETRY WITH POYA (deliberate): the Poya calendar stays Python-static
-    (agriforecast_ml/data/poya_days.py) because its ONLY consumer is data-quality
-    gap-suppression (is_poya / expected_market_closed) -- a QA concern that must run
-    with no DB and is not a model feature. Festivals ARE model features that as-of-
-    join against price history, so they live in the DB where the .NET seed/gazette-
-    update path owns them. Two consumers, two lifecycles => two homes.
+    The Poya calendar stays Python-static (data/poya_days.py) on purpose: its only
+    consumer is data-quality gap suppression, which has to run with no DB. Festivals
+    are model features, so they live in the DB where the .NET seed path owns them.
 
-    Date is stored date-only (no time) so it can never carry a hidden "now" leakage.
-    CreatedAtUtc is an audit field and is deliberately NOT loaded -- it must never
-    become a feature. IsProvisional is passed through untouched (never upgraded).
-    LeadUpDays comes straight from the row so the Avurudu Apr-13-anchored / Apr-14=0
-    window convention is preserved without Python re-deriving it.
-
-    Returns columns [FestivalKey, Date, LeadUpDays, IsProvisional, Source] with Date
-    as datetime, sorted by Date ascending (ready for merge_asof and for
-    to_prophet_holidays()).
+    Date is date-only, so it can never carry a hidden 'now'. CreatedAtUtc is not
+    loaded. LeadUpDays comes straight from the row, which preserves the Avurudu
+    Apr-13-anchored / Apr-14=0 window convention. Returns [FestivalKey, Date,
+    LeadUpDays, IsProvisional, Source] sorted by Date.
     """
     sql = """
         SELECT FestivalKey, Date, LeadUpDays, IsProvisional, Source
@@ -527,17 +399,11 @@ def load_festivals() -> pd.DataFrame:
 
 
 def to_prophet_holidays(festivals: pd.DataFrame) -> pd.DataFrame:
-    """Reshape load_festivals() output into a Prophet-native holidays frame.
+    """Reshape load_festivals() output into a Prophet holidays frame.
 
-    Pure calendar function (no DB, no wall-clock). Prophet expects
-    [holiday, ds, lower_window, upper_window] where the effect spans
-    [ds + lower_window, ds + upper_window]. Our lead-up window is
+    Prophet spans [ds + lower_window, ds + upper_window] and our lead-up window is
     [Date - LeadUpDays, Date], so lower_window = -LeadUpDays and upper_window = 0.
-
-    This helper exists purely to prove Prophet-readiness of the calendar; NO
-    Prophet integration is wired here (XGBoost Model A is the only live consumer).
-
-    Empty in -> empty out with the right columns.
+    Nothing wires Prophet up yet; this only proves the calendar is Prophet-ready.
     """
     cols = ["holiday", "ds", "lower_window", "upper_window"]
     if festivals is None or festivals.empty:
@@ -554,32 +420,17 @@ def to_prophet_holidays(festivals: pd.DataFrame) -> pd.DataFrame:
 def load_macro_series() -> pd.DataFrame:
     """CBSL macro-series vintages (MacroSeriesPoints) for a point-in-time join.
 
-    Mirrors load_policy_flags()/load_fx()/load_news_sentiment(): same engine,
-    try/except -> empty-frame degrade so a missing/empty table attaches all-NaN
-    macro features rather than failing the build.
+    Every row carries two dates. PublishedAt is the vintage date - the first date the
+    world could know the value - and is the ONLY leakage-safe join key. ReferenceDate
+    is the period the value describes and is audit-only: a monthly index published
+    weeks after its reference month is a classic lookahead if joined on it.
 
-    EACH ROW CARRIES TWO DATES:
-      - PublishedAt   = the vintage / KnowledgeDate: the first date the world
-                        could know this value. This is the ONLY leakage-safe
-                        join key (features.py _attach_macro merges as-of on it).
-      - ReferenceDate = the period the value describes (audit-only). A monthly
-                        index published weeks after its reference month is a
-                        classic lookahead trap if joined on ReferenceDate, so
-                        _attach_macro NEVER joins on it and drops it before the
-                        model frame. It is loaded here only for provenance.
-
-    IsPublishedAtImputed flags vintages whose PublishedAt was imputed from a
-    per-series publication-lag prior (real release date not scrapeable). Loaded
-    for audit; not itself a feature.
-
-    Both date columns are pinned to the canonical [ns] unit (like every other
-    loader) so the downstream as-of merge sees a consistent datetime64 dtype.
-    RetrievedAtUtc / Source are deliberately NOT loaded -- audit fields that must
-    never become features.
+    IsPublishedAtImputed marks vintages whose PublishedAt came from a per-series
+    publication-lag prior. Both date columns are pinned to [ns]. A missing table
+    degrades to an empty frame (all-NaN macro features).
 
     Returns [SeriesCode, ReferenceDate, PublishedAt, Value, IsPublishedAtImputed]
-    sorted by (SeriesCode, PublishedAt) ascending -- ready for a per-series
-    backward merge_asof on PublishedAt.
+    sorted by (SeriesCode, PublishedAt) for a per-series backward merge_asof.
     """
     sql = """
         SELECT SeriesCode, ReferenceDate, PublishedAt, Value, IsPublishedAtImputed
@@ -592,8 +443,8 @@ def load_macro_series() -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=_MACRO_COLS)
     df["SeriesCode"] = df["SeriesCode"].astype(str)
-    # BOTH date columns pinned to [ns] (the [ns] invariant): PublishedAt is the
-    # join key, ReferenceDate travels alongside for the two-date tripwire tests.
+    # Both date columns pinned to [ns]: PublishedAt is the join key, ReferenceDate only
+    # travels alongside for the two-date tripwire tests.
     df["ReferenceDate"] = _as_canon_dt(df["ReferenceDate"])
     df["PublishedAt"] = _as_canon_dt(df["PublishedAt"])
     df["Value"] = df["Value"].astype(float)
@@ -604,15 +455,13 @@ def load_macro_series() -> pd.DataFrame:
 def load_news_sentiment() -> pd.DataFrame:
     """National daily news-sentiment signal for a point-in-time (as-of) join.
 
-    NewsSentimentDaily is a Python-owned ML table (built by score_news.py). The
-    live news fetch may not have run yet, so the table can be MISSING or EMPTY --
-    in that case we return an empty frame with the right columns so the sentiment
-    features attach as all-NaN (exactly like load_fx with a sparse FX series). No
-    article means a date is ABSENT, so the backward as-of join carries the last
-    known reading forward without ever using a Date after the observation date.
+    NewsSentimentDaily is written by score_news.py and can be missing or empty, in
+    which case the sentiment features attach as all-NaN. A day with no article is
+    simply absent, so the backward join carries the last reading forward and never
+    reads a date after the observation date.
 
-    Returns [Date, MeanSentiment, ArticleCount, DroughtRatio, FloodRatio,
-    PolicyRatio] sorted by Date ascending.
+    Returns [Date, MeanSentiment, ArticleCount, DroughtRatio, FloodRatio, PolicyRatio]
+    sorted by Date.
     """
     sql = """
         SELECT Date, MeanSentiment, ArticleCount,

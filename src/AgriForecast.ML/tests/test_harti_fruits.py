@@ -1,46 +1,13 @@
-"""
-AgriForecast ML — HARTI fruits ingestion tests (R2 fruits step 1,
-2026-07-16/17 pre-build analysis; owner-approved scope: Ambul, Kolikuttu,
-Seeni, Papaya only).
+"""HARTI fruits ingestion tests (Ambul, Kolikuttu, Seeni and Papaya only).
 
-All non-live tests are hermetic: synthetic in-memory table fixtures (list-
-of-lists, matching pdfplumber's extract_tables() shape) or mocked
-SQLAlchemy engines — no network, no DB. Mirrors the style of
-test_harti_multimarket.py / test_canonical.py / test_harti_splice.py.
+Non-live tests are hermetic: synthetic table fixtures shaped like pdfplumber's
+extract_tables() output, or mocked engines.
 
-Coverage:
-  TestFruitUnitDetection        — per-kg label variants accepted (both bare
-                                   and explicit "(Rs/Kg)" forms); the
-                                   per-FRUIT "(Rs/Fruits)" Kolikuttu variant
-                                   is skipped, never stored; out-of-scope
-                                   fruit rows (Anamalu, Passion Fruits,
-                                   Pineapple, Mango, Woodapple, Avocado,
-                                   Orange) never emit a row; no key
-                                   collision with the vegetable
-                                   _TARGET_CROPS dict.
-  TestFruitRealCachedPDFs       — real cached PDFs across both eras
-                                   (2015-07-01/2019-06-03 pre-flip,
-                                   2023-12-28/2026-07-15 post-flip) parsed
-                                   end-to-end, pinning exact values against
-                                   the raw PDF cell text.
-  TestFruitMarketPricesIsolation — fruits are absent from loader.
-                                   _HARTI_TO_DB_NAME / _HARTI_PRODUCT_IDS;
-                                   upsert_harti_prices() (legacy MarketPrices
-                                   path) can therefore never insert a fruit
-                                   row even for a Dambulla-column fruit row.
-  TestFruitAliasResolution      — CommodityAliasResolver resolves the 4
-                                   seeded HARTI-scoped fruit aliases; a
-                                   same-name alias scoped to a different
-                                   source does not leak.
-  TestFruitPriceObservationsUpsert — upsert_harti_price_observations()
-                                   treats fruit rows exactly like vegetable
-                                   rows (no special-casing): market
-                                   resolution + crop resolution both fire.
-  TestFruitLivePins              — live-DB pins for CommodityAliases seed
-                                   rows and backfilled PriceObservations
-                                   counts; skip (never fail) when the DB is
-                                   unreachable, mirroring
-                                   test_market_spread.py::_db_or_skip.
+Covers unit detection (per-kg labels accepted, the per-fruit Kolikuttu variant skipped,
+out-of-scope fruit rows never emitted), end-to-end parses of real cached PDFs from both
+label eras, isolation from the legacy MarketPrices path, HARTI-scoped alias resolution,
+the PriceObservations upsert treating fruits like any other row, and live-DB pins that
+skip rather than fail when the DB is unreachable.
 """
 from __future__ import annotations
 
@@ -52,9 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 import sqlalchemy as sa
 
-# ---------------------------------------------------------------------------
 # Path setup
-# ---------------------------------------------------------------------------
 ML_ROOT = Path(__file__).resolve().parents[1]
 if str(ML_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_ROOT))
@@ -67,11 +32,9 @@ from agriforecast_ml.harti.parser import ParsedPrice  # noqa: E402
 HARTI_CACHE = ML_ROOT / "harti_cache"
 
 
-# ===========================================================================
 # DB-gated helper (mirrors test_market_spread.py::_db_or_skip /
 # test_festivals.py convention: skip, never fail, when the live DB is
 # unreachable)
-# ===========================================================================
 
 def _db_or_skip():
     try:
@@ -87,12 +50,10 @@ def _db_or_skip():
     return engine
 
 
-# ===========================================================================
 # Synthetic table fixture helper (mirrors test_harti_multimarket.py's
 # _standard_table, minimal single-market version — fruit unit detection is
 # a row-label property, independent of the multi-market column machinery
 # already covered by test_harti_multimarket.py)
-# ===========================================================================
 
 def _fruit_table(rows: list[list]):
     """A minimal single-market (Dambulla) table: header rows + crop rows."""
@@ -126,9 +87,7 @@ def _parse_rows(monkeypatch, tmp_path, table, *, creation_date="D:20200101101632
     return harti_parser.parse_pdf(fake_pdf_path, "2020-01-01")
 
 
-# ===========================================================================
 # 1. Fruit unit detection — per-kg accepted, per-fruit skipped
-# ===========================================================================
 
 class TestFruitUnitDetection:
     def test_ambul_bare_label_accepted_per_kg(self, monkeypatch, tmp_path):
@@ -259,9 +218,7 @@ class TestFruitUnitDetection:
         assert fruit_keys.isdisjoint(harti_parser._TARGET_CROPS.keys())
 
 
-# ===========================================================================
 # 2. Real cached PDFs — both eras
-# ===========================================================================
 
 @pytest.mark.skipif(not HARTI_CACHE.is_dir(), reason="harti_cache/ not present")
 class TestFruitRealCachedPDFs:
@@ -342,9 +299,7 @@ class TestFruitRealCachedPDFs:
         assert by_market[("Kandy", "Papaya")] == (90.0, 110.0)
 
 
-# ===========================================================================
 # 3. MarketPrices isolation — fruits can NEVER reach the legacy path
-# ===========================================================================
 
 class TestFruitMarketPricesIsolation:
     _FRUIT_LABELS = ("Ambul", "Kolikuttu", "Seeni", "Papaya")
@@ -401,9 +356,7 @@ class TestFruitMarketPricesIsolation:
         assert result["skipped_non_dambulla"] == 1  # Papaya (Pettah, filtered before crop-map check)
 
 
-# ===========================================================================
 # 4. Alias resolution (mirrors test_canonical.py::TestResolverPrecedence)
-# ===========================================================================
 
 def _mock_engine_returning(rows: list[tuple]) -> MagicMock:
     engine = MagicMock()
@@ -460,9 +413,7 @@ class TestFruitAliasResolution:
         assert resolver.resolve("Passion Fruits", "HARTI") is None
 
 
-# ===========================================================================
 # 5. PriceObservations upsert — fruits behave exactly like vegetables
-# ===========================================================================
 
 class TestFruitPriceObservationsUpsert:
     def _fake_market_map(self):
@@ -516,9 +467,7 @@ class TestFruitPriceObservationsUpsert:
         assert any("Ambul" in rec.message and "no active CommodityAlias" in rec.message for rec in caplog.records)
 
 
-# ===========================================================================
 # 6. Live-DB pins (skip, never fail, when DB unreachable)
-# ===========================================================================
 
 class TestFruitLivePins:
     _FRUIT_ALIAS_TO_CROPCODE = {

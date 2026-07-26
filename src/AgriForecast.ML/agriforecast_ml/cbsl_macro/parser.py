@@ -1,59 +1,30 @@
-"""CBSL macro PDF parser — labeled-line regex extractor, NOT table extraction.
+"""CBSL macro PDF parser: labeled-line regexes, NOT table extraction.
 
-Step-0 probe finding (2026-07-04, 3 real CCPI releases + MEI_202605 pack,
-extracted with this project's pdfplumber): pdfplumber's ``extract_tables()``
-detects ~18 fragmented layout "tables" per CCPI press release, and MEI
-interest-rate/trade numbers interleave with chart-caption text on the same
-page. Table extraction is therefore the WRONG tool here (fine for HARTI's
-strict grid bulletins, wrong for these prose-plus-inset-table press
-releases). This parser instead runs regexes over ``page.extract_text()``
-against known, stable label phrases:
+pdfplumber's extract_tables() finds about 18 fragmented layout 'tables' per CCPI press
+release, and MEI numbers interleave with chart captions on the same page. Table extraction
+is the right tool for HARTI's strict grids and the wrong one for these press releases, so
+this parser runs regexes over page.extract_text() against known, stable label phrases.
 
-  CCPI press release (2 pages, ~4.8k chars):
-    - "Index Value <prev> <curr>"           -> CCPI_BASE2021 level (curr)
-    - "Monthly Change (%) <prev> <curr>"     -> not persisted as its own
-                                                series (spec keeps only the
-                                                4 series below); parsed only
-                                                for the drop-counter sanity
-                                                check that both numbers exist.
-    - "Y-o-Y Inflation (%) <prev> <curr>"    -> CCPI_HEADLINE_YOY_BASE2021
-    - "Food inflation (Y-o-Y) ... to/at X%" (verbatim prose, verb varies:
-       accelerated/decelerated/moderated/remained unchanged -- the numeric
-       capture is anchored ONLY on "Food inflation (Y-o-Y) ... to/at X%",
-       decoupled from any trailing month/year) -> CCPI_FOOD_YOY_BASE2021.
-       ReferenceDate for this series (like index/headline) always comes
-       from the shared column-header/filename resolution below, NEVER from
-       text following the food sentence -- pdfplumber's linear extraction
-       interleaves inset-chart caption text (which can itself contain a
-       stray "2021" from the "CCPI (2021=100)" base-year caption) between
-       the food sentence's month and its year on a real release (reviewer
-       finding 2026-07-04, F1) -- capturing a trailing "<Month> <Year>" here
-       risked reading that stray "2021" as the reference year.
-    - Base year: "CCPI, 2021=100" (or "(CCPI 2021=100)" variants) confirms
-       the base-year token embedded in every SeriesCode this parser emits.
-    - Reference month: the LATTER of the two column headers in the
-       "Inflation <PrevMonth> <PrevYear> <CurrMonth> <CurrYear>" line (the
-       release's OWN reference period), cross-checked against the filename.
+CCPI press release (2 pages):
+  'Index Value <prev> <curr>'        -> the CCPI index level (current column).
+  'Monthly Change (%) ...'           -> not persisted; parsed only as a sanity check.
+  'Y-o-Y Inflation (%) <prev> <curr>' -> headline YoY.
+  'Food inflation (Y-o-Y) ... to/at X%' -> food YoY. The verb varies, so the capture is
+  anchored on the label and percentage only.
+  The reference month comes from the release's own column-header line, cross-checked
+  against the filename - never from text following the food sentence, because pdfplumber
+  can interleave a chart caption (which contains the base year 2021) between that
+  sentence's month and its year.
 
-  MEI pack (25 pages; page found by header search, NOT a fixed index):
-    - "Food and Beverages" Rs.Mn monthly line -> FOOD_IMPORTS_YOY. The pack's
-      EXTERNAL TRADE table carries the CURRENT and PRIOR YEAR figures for a
-      single calendar month labelled by the table's OWN column header (e.g.
-      "April"), which is ONE MONTH BEHIND the pack's own YYYYMM (a May pack
-      carries April trade data) — the reference month is read from the table
-      header text, never assumed to be the pack month.
-    - "Overnight Policy Rate (OPR)" line in the "21. INTEREST RATES" section
-      -> policy_rate (POLICY_RATE_OPR). Adjudicated IN (not dropped): the
-      probe shows this specific line is a clean two-column labeled row
-      ("Overnight Policy Rate (OPR)  Per cent  <prevMonth> <currMonth>"),
-      located by searching for the literal label text (not a fixed page
-      index, since the TOC on page 1 also contains the string
-      "INTEREST RATES" and must not be mistaken for the data page).
+MEI pack (25 pages; the page is found by header search, never a fixed index):
+  'Food and Beverages' Rs.Mn monthly line -> food-imports YoY. The trade table is ONE
+  MONTH BEHIND the pack's own month, and the reference month is read from the table's own
+  column header rather than assumed.
+  'Overnight Policy Rate (OPR)' in the interest-rates section -> the policy rate. Located
+  by its own label, since the table of contents on page 1 also contains the section name.
 
-Throw-don't-guess: any of the above anchors not found in a given PDF is a
-WARN + skip for THAT SERIES in THAT ARTIFACT (drop-counter), never a
-fabricated/interpolated value and never a hard failure that aborts the whole
-batch — mirrors harti/parser.py's per-market skip contract.
+Throw-don't-guess: an anchor that is not found is a WARN and a skip for that series in
+that artifact, never a fabricated value and never a hard failure for the batch.
 """
 from __future__ import annotations
 
@@ -67,9 +38,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------
-# Parser DoS guard (mirrors harti/parser.py's wall-clock timeout).
-# --------------------------------------------------------------------------
+# Parser DoS guard, mirroring harti/parser.py's wall-clock timeout.
 import os
 
 _DEFAULT_PARSE_TIMEOUT_SECONDS = 120.0
@@ -85,10 +54,8 @@ def _parse_timeout_seconds() -> float:
         return _DEFAULT_PARSE_TIMEOUT_SECONDS
 
 
-# Post-open page-count cap (spec item: reject beyond ~50 pages). CCPI releases
-# are 2 pages; MEI packs are ~25 pages -- 50 gives comfortable headroom while
-# still bounding a pathological/oversized PDF that slipped past the 25MB
-# download cap (small-on-disk, expensive/huge-to-parse).
+# Page-count cap after opening. CCPI releases are 2 pages and MEI packs about 25, so 50
+# gives headroom while still bounding a PDF that is small on disk but huge to parse.
 _MAX_PAGES = 50
 
 SERIES_CCPI_INDEX = "CCPI_BASE2021"
@@ -116,9 +83,7 @@ class ParsedMacroPoint:
     extra: dict = field(default_factory=dict)  # e.g. {"base_year": "2021"}
 
 
-# ---------------------------------------------------------------------------
-# CCPI press release
-# ---------------------------------------------------------------------------
+# CCPI press release.
 
 # "Index Value 203.4 207.7" -- two numbers, prev then curr.
 _CCPI_INDEX_RE = re.compile(r"Index Value\s+([\d.]+)\s+([\d.]+)")
@@ -129,37 +94,17 @@ _CCPI_HEADLINE_YOY_RE = re.compile(r"Y-o-Y Inflation \(%\)\s+([\-\d.]+)\s+([\-\d
 # "Monthly Change (%) 0.9 2.1" -- parsed only for the sanity/drop-counter check.
 _CCPI_MONTHLY_CHANGE_RE = re.compile(r"Monthly Change \(%\)\s+([\-\d.]+)\s+([\-\d.]+)")
 
-# Verbatim prose: "Food inflation (Y-o-Y) accelerated to 2.8% in April 2026"
-# / "... moderated further to 1.5% in July 2025 ..." / "... remained
-# unchanged at 3.0% in December 2025 ..." (verb varies: accelerated /
-# decelerated / moderated / remained unchanged -- and the preposition before
-# the number varies too: "to" for a changing rate, "at" for "remained
-# unchanged at X%" -- both are covered below).
+# Matches prose like 'Food inflation (Y-o-Y) accelerated to 2.8%' or '... remained
+# unchanged at 3.0%': the verb varies, and so does the preposition before the number.
 #
-# DELIBERATELY DECOUPLED from month/year (reviewer F1, 2026-07-04): an
-# earlier version of this regex captured a trailing "<Month> <Year>" right
-# after the percentage, using it to derive ReferenceDate. That silently
-# failed recall on releases where pdfplumber's linear text extraction
-# interleaves an inset chart's caption between the month and the year, e.g.
-# (cbsl_ccpi_20250731.pdf, verbatim):
-#   "Food inflation (Y-o-Y) moderated further to 1.5% in July\n
-#    % CCPI (2021=100)\n2025 from 4.3% recorded in June 2025, ..."
-# The month ("July") and year ("2025") are on DIFFERENT lines, separated by
-# the chart caption "% CCPI (2021=100)" -- which itself contains the digits
-# "2021". A naive widened month/year capture window here reproduced a real
-# failure: it read "2021" (the BASE year from the interleaved caption) as
-# the reference YEAR, writing a wrong ReferenceDate. The value capture is
-# therefore anchored ONLY on the label + verb + percentage; ReferenceDate
-# for every series in this release (index, headline, food) is resolved
-# uniformly from the release's own column-header line
-# (_CCPI_COLUMN_MONTHS_RE, cross-checked against the filename date) --
-# see _parse_ccpi_pdf_impl, which no longer branches on this match at all.
+# Deliberately decoupled from the month and year. An earlier version captured a trailing
+# '<Month> <Year>' to derive ReferenceDate, but pdfplumber can interleave an inset chart
+# caption between them, and that caption contains '2021' from the base-year label - which
+# was then read as the reference year. ReferenceDate now always comes from the release's
+# own column-header line instead.
 #
-# Non-Food trap (still present, unchanged): "Non-Food inflation (Y-o-Y)" is
-# a superstring match for a naive "Food inflation (Y-o-Y)" pattern -- MUST
-# exclude it with a negative lookbehind, or a Non-Food figure silently gets
-# written under the Food SeriesCode (wrong number, no error raised --
-# exactly the guessing-parser anti-pattern this build must avoid).
+# 'Non-Food inflation (Y-o-Y)' is a superstring of this label and MUST stay excluded by
+# the negative lookbehind, or a Non-Food figure lands under the Food series with no error.
 _CCPI_FOOD_YOY_RE = re.compile(
     r"(?<!Non-)(?<!Non )Food inflation \(Y-o-Y\)[^.]{0,60}?(?:to|at)\s+([\-\d.]+)%",
     re.IGNORECASE,
@@ -213,26 +158,20 @@ def _parse_ccpi_pdf_impl(
         logger.error("[%s] CCPI parse error: %s", label, exc, exc_info=True)
         return results
 
-    # --- reference month (from the release's own column-header line) -----
-    # Single source of truth for EVERY series in this release (index,
-    # headline YoY, food YoY): the "Inflation <prevMonth> <currMonth>"
-    # column-header line, with the year inferred from filename_pub_date.
-    # Deliberately NEVER derived from the food-inflation sentence itself
-    # (reviewer F1, 2026-07-04) -- see _CCPI_FOOD_YOY_RE's docstring for why
-    # that coupling was unsafe (a stray "2021" base-year caption could be
-    # read as the reference year on some releases).
+    # Reference month, from the release's own 'Inflation <prevMonth> <currMonth>' column
+    # header, with the year inferred from the filename date. This is the single source for
+    # EVERY series in the release, and is never derived from the food-inflation sentence.
     ref_date = None
     m_cols = _CCPI_COLUMN_MONTHS_RE.search(full_text)
     m_food = _CCPI_FOOD_YOY_RE.search(full_text)
     if m_cols and filename_pub_date is not None:
-        # Current column = the release's own reference month; the year is
-        # inferred from filename_pub_date (release always publishes within
-        # the reference month or the following days).
+        # The current column is the release's own reference month; the year comes from the
+        # filename date, since a release publishes within the reference month or just after.
         curr_month_name = m_cols.group(2)
         curr_month_num = _MONTH_TO_NUM[curr_month_name.title()]
         year = filename_pub_date.year
-        # If the release month rolls back past December -> January boundary
-        # relative to the filename's month, adjust the year down by one.
+        # If the release month rolls back past the December/January boundary relative to the
+        # filename's month, drop the year by one.
         if curr_month_num > filename_pub_date.month:
             year -= 1
         ref_date = date(year, curr_month_num, 1)
@@ -323,17 +262,12 @@ def _parse_ccpi_pdf_impl(
     return results
 
 
-# ---------------------------------------------------------------------------
-# MEI pack: food-imports YoY + policy rate
-# ---------------------------------------------------------------------------
+# MEI pack: food-imports YoY and the policy rate.
 
-# EXTERNAL TRADE section: the "Food and Beverages" Rs.Mn block. The monthly
-# line is the FIRST numeric line under the "Food and Beverages" header (the
-# "January - April" cumulative line follows immediately after and must NOT be
-# confused with it) -- anchored on the immediately-preceding month-name token
-# from the table's OWN column, not the pack's own month.
-#
-# Structure observed (verbatim, see cbsl_macro parser probe):
+# The 'Food and Beverages' Rs.Mn block. The monthly line is the FIRST numeric line under
+# the header; the 'January - April' cumulative line follows immediately and must not be
+# confused with it. Anchored on the month-name token from the table's own column, not the
+# pack's month. The structure is:
 #   Food and Beverages
 #   April 47,682 74,600 56.5
 #   January - April 235,652 232,993 (1.1)
@@ -343,25 +277,21 @@ _MEI_FOOD_IMPORTS_BLOCK_RE = re.compile(
     r"\(?(-?[\d.]+)\)?"
 )
 
-# "21. INTEREST RATES" section header (used only to bound the search window;
-# the OPR line itself is located directly by its own label so a TOC mention
-# of the same phrase on page 1 is never mistaken for the data page).
+# Section header, used only to bound the search window. The OPR line itself is located by
+# its own label, so the table of contents on page 1 is never mistaken for the data page.
 _MEI_INTEREST_RATES_HEADER_RE = re.compile(r"^\s*21\.\s*INTEREST RATES", re.MULTILINE)
 
-# "Overnight Policy Rate (OPR) Per cent 7.75 8.75 1 00" -- capture the two
-# rate values (prev, curr); the trailing "1 00"/"100" basis-point change is
-# NOT captured (redundant with curr-prev, and its own spacing is unstable).
+# 'Overnight Policy Rate (OPR) Per cent 7.75 8.75 1 00': capture the two rate values.
+# The trailing basis-point change is not captured - it is redundant and its spacing is
+# unstable.
 _MEI_OPR_RE = re.compile(
     r"Overnight Policy Rate \(OPR\)\s+Per cent\s+([\d.]+)\s+([\d.]+)"
 )
 
-# MEI trade table's own reference-month column header, e.g. "April 2025 April 2026(a)"
-# or "Item Unit 2025 2026(a)" + the monthly row's leading month name (captured
-# directly by _MEI_FOOD_IMPORTS_BLOCK_RE group 1 already) -- year is inferred
-# from the pack's own YYYYMM (the trade table's current-year column always
-# matches the pack's year, since the 1-month lag never crosses a year AND a
-# month boundary simultaneously in the observed corpus; see parser tests for
-# the boundary case of a January pack referencing December of the prior year).
+# The trade table's reference month comes from the monthly row's own leading month name;
+# the year is inferred from the pack's YYYYMM, since the one-month lag never crosses a
+# year and a month boundary at once in the observed corpus. See the tests for the January
+# pack referencing December of the prior year.
 
 
 def parse_mei_pdf(
@@ -376,15 +306,12 @@ def parse_mei_pdf(
 
 
 def _mei_reference_month(pack_yyyymm: str, month_name: str) -> date:
-    """Resolve a trade-table row's reference month/year.
+    """Resolve a trade-table row's reference month and year.
 
-    The MEI pack's OWN month is 1 month AHEAD of the trade table's data (a May
-    pack = pack_yyyymm '202605' carries April data). We derive the reference
-    year by: start from the pack's (year, month), step back one calendar
-    month, and if the row's month name does not match that stepped-back month
-    exactly, fall back to matching the row's month within +/- 1 month of the
-    stepped-back month (never silently wrong across a year boundary, e.g. a
-    January pack -> December of the PRIOR year).
+    The MEI pack's own month is one month AHEAD of the trade table's data, so we step back one
+    calendar month from the pack month. If the row's month name does not match that exactly,
+    we allow a match within one month either side, which keeps a January pack pointing at
+    December of the prior year rather than silently guessing.
     """
     pack_year = int(pack_yyyymm[:4])
     pack_month = int(pack_yyyymm[4:6])
@@ -398,8 +325,8 @@ def _mei_reference_month(pack_yyyymm: str, month_name: str) -> date:
     if row_month_num == expected_month:
         return date(expected_year, expected_month, 1)
 
-    # Defensive fallback (should not trigger on well-formed packs): if the
-    # row's month is one further back, adjust the year the same way.
+    # Defensive fallback for a malformed pack: if the row's month is one further back,
+    # adjust the year the same way.
     if row_month_num == 12 and expected_month == 1:
         return date(expected_year - 1, 12, 1)
     if row_month_num == expected_month - 1 and expected_month > 1:
@@ -434,10 +361,8 @@ def _parse_mei_pdf_impl(
                         label, n_pages, _MAX_PAGES,
                     )
                     return results
-                # MEI packs have NO /CreationDate (probe-confirmed absent on
-                # MEI_202605_e.pdf) -- pdf_creation_date_raw stays None, and
-                # the loader's vintage resolution falls back to listing-date
-                # or lag-prior imputation for this source.
+                # MEI packs have no /CreationDate, so this stays None and the loader's
+                # vintage resolution falls back to the listing date or lag-prior imputation.
                 pdf_creation_date_raw = pdf.metadata.get("CreationDate")
                 full_text = "\n".join((pg.extract_text() or "") for pg in pdf.pages)
     except Exception as exc:
@@ -478,8 +403,8 @@ def _parse_mei_pdf_impl(
     if m_opr:
         try:
             value = float(m_opr.group(2))  # current-month column
-            # Policy rate's reference period is the pack's OWN month (an
-            # end-of-month snapshot rate), unlike the 1-month-lagged trade data.
+            # The policy rate's reference period is the pack's OWN month (an end-of-month
+            # snapshot), unlike the one-month-lagged trade data.
             ref_date = date(int(pack_yyyymm[:4]), int(pack_yyyymm[4:6]), 1)
             results.append(ParsedMacroPoint(
                 series_code=SERIES_POLICY_RATE,
@@ -499,9 +424,7 @@ def _parse_mei_pdf_impl(
     return results
 
 
-# ---------------------------------------------------------------------------
-# Wall-clock timeout wrapper (shared by both parse entry points).
-# ---------------------------------------------------------------------------
+# Wall-clock timeout wrapper, shared by both parse entry points.
 
 def _run_with_timeout(fn, *args, **kwargs):
     timeout = _parse_timeout_seconds()
