@@ -1,4 +1,5 @@
 using System.Globalization;
+using AgriForecast.Application.common;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Interfaces;
 using AgriForecast.Infrastructure.ExternalSources.DTOs;
@@ -8,6 +9,9 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Infrastructure.Services.WeatherIngestion;
 
+// Fail-safe, not fail-silent: a provider outage returns Outcome=Failed on the stats rather than an early
+// void return that the audit wrapper would record as a green Succeeded row (the same false-green shape
+// found in NEWS). "Nothing to do yet" and "every month already stored" remain genuine successes.
 public class WeatherIngestionService : IWeatherIngestionService
 {
     private readonly IWeatherClient _client;
@@ -27,7 +31,7 @@ public class WeatherIngestionService : IWeatherIngestionService
         _unitOfWork = unitOfWork;
     }
 
-    public async Task IngestAsync(CancellationToken ct)
+    public async Task<IngestionRunStats> IngestAsync(CancellationToken ct)
     {
         var lat = ParseDouble(_config["WeatherSource:OpenMeteo:Latitude"] ?? _config["WeatherSource:OpenWeather:Latitude"], 7.8742);   // Dambulla
         var lon = ParseDouble(_config["WeatherSource:OpenMeteo:Longitude"] ?? _config["WeatherSource:OpenWeather:Longitude"], 80.6511);
@@ -39,8 +43,10 @@ public class WeatherIngestionService : IWeatherIngestionService
         var lastCompleteMonth = new DateOnly(today.Year, today.Month, 1).AddMonths(-1);
         if (lastCompleteMonth < startMonth)
         {
+            // A genuine success: monthly aggregates are only ingested once a month is fully elapsed, so
+            // there is nothing to do yet. Stays green.
             _logger.LogInformation("Weather ingestion: no complete months to ingest yet.");
-            return;
+            return new IngestionRunStats(RowsInserted: 0);
         }
 
         // Months already stored — skip them.
@@ -58,10 +64,18 @@ public class WeatherIngestionService : IWeatherIngestionService
         {
             daily = await _client.GetDailyAsync(lat, lon, startMonth, rangeEnd, ct);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // An admin stop, not a provider outage. Let it propagate so the audit wrapper records the
+            // distinct "cancelled" reason instead of blaming the weather provider.
+            throw;
+        }
         catch (Exception ex)
         {
+            // THE false-green path: this used to `return` and the run row went green while no weather
+            // landed at all.
             _logger.LogError(ex, "Weather ingestion failed while fetching daily data.");
-            return;
+            return Failed("Fetching daily weather data from the provider failed.");
         }
 
         // Group the daily readings by calendar month.
@@ -90,7 +104,19 @@ public class WeatherIngestionService : IWeatherIngestionService
         _logger.LogInformation(
             "Weather ingestion completed. MonthsAdded={MonthsAdded}, MonthsSkipped={MonthsSkipped}, MonthsNoData={MonthsNoData}, DaysFetched={DaysFetched}",
             monthsAdded, monthsSkipped, monthsNoData, daily.Count);
+
+        // Months, not rows: this source's unit of work is the monthly aggregate. monthsSkipped are the
+        // already-stored months, so a pass with nothing new is Succeeded with 0 inserted.
+        return new IngestionRunStats(
+            CoveredFromDate: startMonth,
+            CoveredToDate: lastCompleteMonth,
+            RowsFetched: daily.Count,
+            RowsInserted: monthsAdded,
+            RowsSkipped: monthsSkipped);
     }
+
+    private static IngestionRunStats Failed(string reason) =>
+        new(Outcome: IngestionRunOutcome.Failed, FailureReason: reason);
 
     private static double ParseDouble(string? value, double fallback) =>
         double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var d) ? d : fallback;

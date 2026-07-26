@@ -67,6 +67,20 @@ public class UserActivityAudit : IUserActivityAudit
         WriteAsync(UserActivityEvent.MarketChanged(
             actingAdminId, RenderDetails(action, identifier), DateTime.UtcNow), ct);
 
+    public Task RecordIngestionServiceStartedAsync(
+        Guid actingAdminId, Guid batchId, CancellationToken ct = default) =>
+        WriteAsync(UserActivityEvent.IngestionServiceStarted(
+            actingAdminId, RenderBatchDetails(batchId), DateTime.UtcNow), ct);
+
+    public Task RecordIngestionServiceStopRequestedAsync(
+        Guid actingAdminId, Guid batchId, CancellationToken ct = default) =>
+        WriteAsync(UserActivityEvent.IngestionServiceStopRequested(
+            actingAdminId, RenderBatchDetails(batchId), DateTime.UtcNow), ct);
+
+    // The one place a pipeline-control Details note is rendered: "batch <guid>". Guid.ToString() is
+    // lowercase, matching the casing every other batchId is written and searched in.
+    public static string RenderBatchDetails(Guid batchId) => $"batch {batchId}";
+
     // The one place the content Details note is rendered: "<verb> '<identifier>'". Rendering it here rather
     // than at the thirteen call sites keeps the format identical everywhere and greppable by the Logs page.
     // The identifier is trimmed and capped to IdentifierMaxLength, well under the 500-char Details column.

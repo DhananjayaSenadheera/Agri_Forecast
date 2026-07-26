@@ -34,8 +34,16 @@ public class IngestionRunAuditTests
         // commit). 0 = never throw. Simulates an audit-write DB failure at each phase.
         public int ThrowOnSaveIndex { get; init; }
 
+        // The token each write was actually handed, so a test can prove the terminal write does not
+        // observe the pass's (cancelled) token.
+        public CancellationToken LastUpdateToken { get; private set; }
+
         public Task AddAsync(IngestionRun run, CancellationToken ct = default)
         {
+            // HONOURS ct, like the real store. A fake that ignores it is exactly why the stranded-row bug
+            // survived the first round of tests: SqlConnection.OpenAsync throws on a cancelled token
+            // before any I/O, so a ct-blind fake can never reproduce it.
+            ct.ThrowIfCancellationRequested();
             AddCount++;
             Added.Add(run); // mint-captured even if the "commit" then fails, so tests can inspect it
             if (ThrowOnSaveIndex == 1)
@@ -45,6 +53,8 @@ public class IngestionRunAuditTests
 
         public Task UpdateAsync(IngestionRun run, CancellationToken ct = default)
         {
+            LastUpdateToken = ct;
+            ct.ThrowIfCancellationRequested();
             UpdateCount++;
             if (ThrowOnSaveIndex == 2)
                 throw new InvalidOperationException("simulated DB failure on the terminal transition");
@@ -285,5 +295,86 @@ public class IngestionRunAuditTests
                 "the audited source's run row is persisted through the audit's own context");
         persisted.Should().NotContain(r => r.Source == "BOGUS_UNSAVED",
             "the audit write uses its OWN context — the ingestion context's unsaved entity must never be flushed by it");
+    }
+
+    // Cancellation: the admin stop path.
+    //
+    // The bug this class of test exists for: the terminal write used to be handed the pass's own token.
+    // After a stop that token is cancelled, the store throws before doing any I/O, the swallow-and-log
+    // hides it, and the row is stranded at Running with FinishedUtc NULL. One stranded row then reads as
+    // "ingestion is running" for the whole 120-minute staleness window, so Start answers 409
+    // already_running and Stop answers 409 not_stoppable for two hours after a stop that looked like it
+    // worked. The terminal write must therefore use CancellationToken.None.
+
+    [Fact]
+    public async Task CancelledSource_StillPersistsTheTerminalRow()
+    {
+        var runs = new FakeIngestionRunRepository();
+        using var cts = new CancellationTokenSource();
+
+        await IngestionRunAudit.RunTrackedAsync(
+            runs, NullLogger.Instance, Guid.NewGuid(), "NEWS",
+            _ =>
+            {
+                // The source is mid-flight when the admin presses stop.
+                cts.Cancel();
+                throw new TaskCanceledException("the pass was stopped");
+            },
+            cts.Token);
+
+        runs.UpdateCount.Should().Be(1, "the terminal transition must be persisted even after a stop");
+        runs.LastUpdateToken.CanBeCanceled.Should().BeFalse(
+            "the terminal write must use CancellationToken.None, or it dies on the cancelled pass token");
+
+        var run = runs.Single!;
+        run.FinishedUtc.Should().NotBeNull("a stranded Running row reads as a live pass for two hours");
+        run.Status.Should().Be(IngestionRunStatus.Failed);
+    }
+
+    // The reason is distinct so an operator is not sent hunting for an outage that never happened.
+    // Failed, NOT Skipped: the status roll-up counts Skipped as part of "succeeded", so mapping a stopped
+    // source to Skipped would make a halted pass report a green lastRunStatus.
+    [Fact]
+    public async Task CancelledSource_IsRecordedAsCancelled_NotAsAGenericFailure()
+    {
+        var runs = new FakeIngestionRunRepository();
+        using var cts = new CancellationTokenSource();
+
+        // Cancel from INSIDE the body, as a real stop does: the Running row is already committed by then.
+        // (Pre-cancelling would fail the Running insert too, so no row would exist to assert on — itself a
+        // safe outcome, but not the one under test.)
+        await IngestionRunAudit.RunTrackedAsync(
+            runs, NullLogger.Instance, Guid.NewGuid(), "HARTI",
+            _ =>
+            {
+                cts.Cancel();
+                throw new OperationCanceledException(cts.Token);
+            },
+            cts.Token);
+
+        var run = runs.Single!;
+        run.Status.Should().Be(IngestionRunStatus.Failed,
+            "a cancelled source did not succeed, and Skipped would roll up as green");
+        run.ErrorSummary.Should().Contain("Cancelled",
+            "the run row must say it was stopped, not imply an outage");
+        run.ErrorSummary.Should().Be(IngestionRunAudit.CancelledReason);
+    }
+
+    // A cancellation that is NOT ours (no stop requested) is still a genuine failure — most often an
+    // HttpClient timeout, which surfaces as TaskCanceledException with an untripped token.
+    [Fact]
+    public async Task TimeoutStyleCancellation_WithNoStopRequested_StaysAGenericFailure()
+    {
+        var runs = new FakeIngestionRunRepository();
+
+        await IngestionRunAudit.RunTrackedAsync(
+            runs, NullLogger.Instance, Guid.NewGuid(), "CBSL",
+            _ => throw new TaskCanceledException("HttpClient timeout"),
+            CancellationToken.None);
+
+        var run = runs.Single!;
+        run.Status.Should().Be(IngestionRunStatus.Failed);
+        run.ErrorSummary.Should().NotBe(IngestionRunAudit.CancelledReason,
+            "no admin stop was requested, so this is a real timeout and must not be excused as a stop");
     }
 }

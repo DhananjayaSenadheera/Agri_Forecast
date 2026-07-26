@@ -74,9 +74,14 @@ spec:
             - name: Cors__AllowedOrigins__2
               value: "http://localhost:5173"
             # Label echoed by GET /api/admin/ingestion/status so the admin UI
-            # can tell WHICH process runs ingestion (no secret, cosmetic).
+            # can tell WHICH process normally runs ingestion (no secret,
+            # cosmetic). It names the SCHEDULED host: the nightly CronJob
+            # still runs the pass. Since the admin start button landed this
+            # API can also host a pass itself, so this label is the usual
+            # owner, not the only one — the status card's canStop field is
+            # what says whether the pass in flight belongs to this process.
             - name: Ingestion__ServiceAddress
-              value: "k8s cronjob/daily-pipeline (agriforecast)"
+              value: "k8s cronjob/daily-pipeline (agriforecast); admin-triggered passes run on this API"
           # KNOWN LIMITATION (F-08 corollary): through Docker Desktop's
           # NodePort forwarding every host client presents the same source
           # IP, so the per-IP rate limiter effectively shares ONE bucket

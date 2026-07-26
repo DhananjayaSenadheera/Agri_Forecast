@@ -115,8 +115,20 @@ public class UserActivityEvent
         Guid actorUserId, string? details, DateTime occurredUtc) =>
         ContentChanged(UserActivityEventType.MarketChanged, actorUserId, details, occurredUtc);
 
-    // Private so a content row can only be built through the intent-named factories above.
-    // An empty actor id is stored as NULL rather than an all-zeros GUID, so a mutation that reached the
+    // Pipeline-control actions: an admin started, or asked to stop, the ingestion service. Same shape as a
+    // content event (acting admin, no target, a short Details note) — here the note is the pass's batchId,
+    // so a control action can be joined to the IngestionRuns rows it produced.
+
+    public static UserActivityEvent IngestionServiceStarted(
+        Guid actorUserId, string? details, DateTime occurredUtc) =>
+        ContentChanged(UserActivityEventType.IngestionServiceStarted, actorUserId, details, occurredUtc);
+
+    public static UserActivityEvent IngestionServiceStopRequested(
+        Guid actorUserId, string? details, DateTime occurredUtc) =>
+        ContentChanged(UserActivityEventType.IngestionServiceStopRequested, actorUserId, details, occurredUtc);
+
+    // Private so a content or pipeline row can only be built through the intent-named factories above.
+    // An empty actor id is stored as NULL rather than an all-zeros GUID, so an action that reached the
     // handler without a JWT-stamped admin is recorded honestly instead of looking like a real account.
     private static UserActivityEvent ContentChanged(
         UserActivityEventType type, Guid actorUserId, string? details, DateTime occurredUtc) => new()

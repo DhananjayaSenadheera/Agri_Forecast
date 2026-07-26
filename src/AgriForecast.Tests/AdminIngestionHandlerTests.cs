@@ -131,8 +131,13 @@ public class AdminIngestionHandlerTests
         public int RunningStalenessMinutes { get; set; } = 120;
     }
 
-    private static GetIngestionStatusQueryHandler StatusHandler(FakeStore s, FakeSettings? cfg = null)
-        => new(s, cfg ?? new FakeSettings());
+    // A real (empty) hosted-pass registry: these tests never start a pass, so canStop is always false and
+    // the existing state/roll-up assertions are unaffected. The canStop behaviour itself is covered in
+    // IngestionServiceControlTests.
+    private static GetIngestionStatusQueryHandler StatusHandler(
+        FakeStore s, FakeSettings? cfg = null, IApiHostedIngestionPasses? hostedPasses = null)
+        => new(s, cfg ?? new FakeSettings(),
+            hostedPasses ?? new AgriForecast.Infrastructure.Services.IngestionControl.ApiHostedIngestionPasses());
 
     private static GetIngestionRunsQueryHandler RunsHandler(FakeStore s) => new(s);
 

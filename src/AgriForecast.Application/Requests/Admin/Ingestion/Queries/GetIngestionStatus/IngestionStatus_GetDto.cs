@@ -18,6 +18,16 @@ public class IngestionStatus_GetDto
     // runs exist. An in-flight batch reports "partial" until it resolves.
     public string? LastRunStatus { get; set; }
 
+    // True only when a pass started by THIS API process is in flight, i.e. when POST service/stop would be
+    // accepted rather than answered 409 not_stoppable. Lets the admin UI disable Stop up front instead of
+    // discovering after the click that the running pass belongs to the scheduled worker.
+    //
+    // ADVISORY, not a guarantee: the pass can finish between the poll and the click, so stop may still
+    // answer not_running. And because the registry behind it is per-PROCESS, a multi-replica API would
+    // report false on the replicas that are not hosting the pass (the deployment runs replicas: 1 today).
+    // The endpoint remains the authority; this only shapes the button.
+    public bool CanStop { get; set; }
+
     // Latest verification summary, or null while the verifications table is empty.
     public IngestionVerificationSummary_GetDto? LastVerification { get; set; }
 

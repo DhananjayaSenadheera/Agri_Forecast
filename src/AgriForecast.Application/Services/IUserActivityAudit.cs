@@ -54,4 +54,18 @@ public interface IUserActivityAudit
     // adding an update or delete needs no interface change.
     Task RecordMarketChangedAsync(
         Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default);
+
+    // Pipeline control. Called AFTER the action has been accepted (the pass was started / the cancellation
+    // was signalled) and fail-open, like everything above — an unwritable audit row must never turn an
+    // accepted start into an error the admin sees.
+    // batchId ties the control action to the IngestionRuns rows of the pass it governs.
+
+    // An admin started an ingestion pass on this API host.
+    Task RecordIngestionServiceStartedAsync(
+        Guid actingAdminId, Guid batchId, CancellationToken ct = default);
+
+    // An admin asked to stop the pass hosted here. Recorded as REQUESTED, not "stopped": the API signals
+    // cancellation between sources and never witnesses the pass end.
+    Task RecordIngestionServiceStopRequestedAsync(
+        Guid actingAdminId, Guid batchId, CancellationToken ct = default);
 }

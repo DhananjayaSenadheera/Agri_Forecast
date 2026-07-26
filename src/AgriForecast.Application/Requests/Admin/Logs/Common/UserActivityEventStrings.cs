@@ -22,6 +22,10 @@ public static class UserActivityEventStrings
     public const string CropChanged = "cropChanged";
     public const string MarketChanged = "marketChanged";
 
+    // Pipeline-control events: an admin used the ingestion start/stop control.
+    public const string IngestionServiceStarted = "ingestionServiceStarted";
+    public const string IngestionServiceStopRequested = "ingestionServiceStopRequested";
+
     // Ordered so KnownTypes (and therefore the validator's error message) reads in enum order.
     private static readonly (UserActivityEventType Type, string Wire)[] Pairs =
     {
@@ -34,7 +38,9 @@ public static class UserActivityEventStrings
         (UserActivityEventType.FestivalChanged, FestivalChanged),
         (UserActivityEventType.NewsEventChanged, NewsEventChanged),
         (UserActivityEventType.CropChanged, CropChanged),
-        (UserActivityEventType.MarketChanged, MarketChanged)
+        (UserActivityEventType.MarketChanged, MarketChanged),
+        (UserActivityEventType.IngestionServiceStarted, IngestionServiceStarted),
+        (UserActivityEventType.IngestionServiceStopRequested, IngestionServiceStopRequested)
     };
 
     private static readonly Dictionary<UserActivityEventType, string> ByType =

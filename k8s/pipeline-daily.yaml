@@ -106,6 +106,18 @@ spec:
                 # reaches the host-level sql_server_container (port 1434).
                 - name: ConnectionStrings__DefaultConnection
                   value: "Server=host.docker.internal,$(AGRI_DB_PORT);Database=$(AGRI_DB_NAME);User Id=$(AGRI_DB_USER);Password=$(AGRI_DB_PASSWORD);Encrypt=True;TrustServerCertificate=True;MultipleActiveResultSets=True;"
+                # --- ML service (mirrors forecast-api.yaml) ---
+                # Three of this worker's seven sources (NEWS, HARTI, CBSL) are
+                # thin clients over the Python ML service's /admin/* routes.
+                # Without these the container falls back to the image-baked
+                # 127.0.0.1:8077 and an empty admin key, so those sources
+                # cannot reach ml-serving at all — and now that they report
+                # honest outcomes, that lands as three Failed rows a night.
+                - name: MlService__BaseUrl
+                  value: "http://ml-serving:8077" # in-cluster ClusterIP service
+                - name: MlService__AdminApiKey
+                  valueFrom:
+                    secretKeyRef: { name: agri-ml-key, key: ML_ADMIN_API_KEY }
               volumeMounts:
                 - { name: shared, mountPath: /shared, readOnly: true }
             # [2] Mirror DAMBULLA_DEC MarketPrices -> PriceObservations.
