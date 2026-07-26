@@ -1,3 +1,5 @@
+using AgriForecast.Domain.Enums;
+
 namespace AgriForecast.Application.Services;
 
 // Fire-safe audit seam for security-relevant account events (Logs hub PR A). Called from the five
@@ -32,4 +34,36 @@ public interface IUserActivityAudit
 
     // An admin deleted a user.
     Task RecordUserDeletedAsync(Guid actorUserId, Guid targetUserId, CancellationToken ct = default);
+
+    // ── Admin CONTENT mutations ───────────────────────────────────────────────────────────────────
+    // One method per mutable entity kind; the VERB is a parameter (create/update/delete share the
+    // event type and are told apart by the rendered Details, "created 'X'"). Every one is called
+    // AFTER a successful commit and is fail-open, exactly like the account events above.
+    //
+    // `identifier` is a SHORT human-recognisable handle the admin already sees in the UI — a title,
+    // festival key + date, or crop code — never a request body, description, URL or free-form blob.
+    // The implementation trims + caps it well under the Details column, so an over-long title can
+    // never turn an audit write into a failure. Pass the entity's id as a last resort when no
+    // friendlier handle exists.
+
+    // A policy flag was created/updated/deleted (identifier = its Title).
+    Task RecordPolicyFlagChangedAsync(
+        Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default);
+
+    // A festival-calendar entry was created/updated/deleted (identifier = "<FestivalKey> yyyy-MM-dd").
+    Task RecordFestivalChangedAsync(
+        Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default);
+
+    // A news event was created/updated/deleted (identifier = its Title).
+    Task RecordNewsEventChangedAsync(
+        Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default);
+
+    // A crop was created/updated/deleted (identifier = its CropCode, e.g. "VEG000071").
+    Task RecordCropChangedAsync(
+        Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default);
+
+    // A market / economic centre was registered (identifier = its Name). Markets have no update or
+    // delete command today — the verb parameter is kept so adding one needs no interface change.
+    Task RecordMarketChangedAsync(
+        Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default);
 }

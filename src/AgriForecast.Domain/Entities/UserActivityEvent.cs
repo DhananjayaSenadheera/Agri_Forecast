@@ -2,9 +2,12 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Domain.Entities;
 
-// One row per security-relevant account event -> table UserActivityLog (Logs hub PR A). WRITTEN by
-// the .NET side via IUserActivityAudit at the five existing auth/user-management call sites; READ by
-// the admin Logs hub (AdminLogsController). An audit failure must NEVER break the operation being
+// One row per security-relevant account event OR admin content mutation -> table UserActivityLog
+// (Logs hub PR A; content events added later). WRITTEN by the .NET side via IUserActivityAudit at the
+// auth/user-management call sites and at every admin content-mutation handler (policy flags,
+// festivals, news events, crops, markets); READ by the admin Logs hub (AdminLogsController). Content
+// rows carry the acting admin as ActorUserId and NO TargetUserId — the content's short identifier
+// lives in Details. An audit failure must NEVER break the operation being
 // audited, so the write side (UserActivityAudit) isolates every insert in its own service scope and
 // swallows-and-logs — this entity just guarantees a row can never be built into an inconsistent or
 // leaky state.
@@ -105,6 +108,43 @@ public class UserActivityEvent
         OccurredUtc = occurredUtc,
         ActorUserId = actorUserId,
         TargetUserId = targetUserId
+    };
+
+    // ── Admin CONTENT mutations (one factory per entity kind) ─────────────────────────────────────
+    // Shape shared by all five: ActorUserId = the acting admin (stamped from the JWT sub claim by the
+    // controller, never the request body), TargetUserId = NULL (these act on CONTENT, not on a user),
+    // UsernameAttempted = NULL. The content's short identifier travels in Details ("created 'X'"),
+    // rendered by UserActivityAudit — NEVER the request body, and capped like every other note.
+
+    public static UserActivityEvent PolicyFlagChanged(
+        Guid actorUserId, string? details, DateTime occurredUtc) =>
+        ContentChanged(UserActivityEventType.PolicyFlagChanged, actorUserId, details, occurredUtc);
+
+    public static UserActivityEvent FestivalChanged(
+        Guid actorUserId, string? details, DateTime occurredUtc) =>
+        ContentChanged(UserActivityEventType.FestivalChanged, actorUserId, details, occurredUtc);
+
+    public static UserActivityEvent NewsEventChanged(
+        Guid actorUserId, string? details, DateTime occurredUtc) =>
+        ContentChanged(UserActivityEventType.NewsEventChanged, actorUserId, details, occurredUtc);
+
+    public static UserActivityEvent CropChanged(
+        Guid actorUserId, string? details, DateTime occurredUtc) =>
+        ContentChanged(UserActivityEventType.CropChanged, actorUserId, details, occurredUtc);
+
+    public static UserActivityEvent MarketChanged(
+        Guid actorUserId, string? details, DateTime occurredUtc) =>
+        ContentChanged(UserActivityEventType.MarketChanged, actorUserId, details, occurredUtc);
+
+    // Private so a content row can only be built through one of the five intent-named factories above
+    // (a caller can never pass an account event type here and forge a user-shaped row).
+    private static UserActivityEvent ContentChanged(
+        UserActivityEventType type, Guid actorUserId, string? details, DateTime occurredUtc) => new()
+    {
+        EventType = type,
+        OccurredUtc = occurredUtc,
+        ActorUserId = actorUserId,
+        Details = Cap(details, DetailsMaxLength)
     };
 
     // Trim then hard-cap to the column length; a blank/empty value stores null (never a fabricated
