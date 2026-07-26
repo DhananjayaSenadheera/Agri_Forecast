@@ -2,31 +2,24 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Application.Services;
 
-// Fire-safe audit seam for security-relevant account events (Logs hub PR A). Called from the five
-// auth/user-management handlers alongside their existing LogInformation calls; the implementation
-// (UserActivityAudit) writes one UserActivityLog row per call in its OWN service scope and
-// SWALLOWS-AND-LOGS any failure — an audit write must NEVER add a failure mode to login /
-// registration / an admin op (so these are awaited-but-guarded, never able to throw into the caller).
-//
-// The methods take only primitives the call sites already hold (ids, the attempted username, the new
-// role) — never a password, token, header, or request body. The implementation stamps the clock.
+// Fire-safe audit seam for security-relevant account events. The implementation writes one UserActivityLog
+// row per call in its own service scope and swallows-and-logs any failure — an audit write must never add
+// a failure mode to login, registration or an admin operation.
+// The methods take only primitives the call sites already hold; never a password, token, header or body.
 public interface IUserActivityAudit
 {
     // Successful credential check + token issue. actorUserId = the user who logged in.
     Task RecordLoginSucceededAsync(Guid actorUserId, CancellationToken ct = default);
 
-    // Failed credential check. usernameAttempted = the ATTEMPTED username (trimmed + capped by the
-    // entity) — the security signal, NEVER the password. No actor (the caller is unproven).
+    // Failed credential check. usernameAttempted is the attempted username — the security signal, never the
+    // password. No actor, because the caller is unproven.
     Task RecordLoginFailedAsync(string? usernameAttempted, CancellationToken ct = default);
 
     // A new account was self-registered. actorUserId = the new user's id.
     Task RecordUserRegisteredAsync(Guid actorUserId, CancellationToken ct = default);
 
-    // An admin provisioned an account from the admin console. Shares the UserRegistered event type
-    // (the wire set stays the frozen five the Logs hub filters on) but is told apart by its shape:
-    // the ACTOR is the acting admin and the TARGET is the new user, where a self-registration has an
-    // actor and no target. Without this the trail would credit an admin-created account to the new
-    // user themselves and lose the admin who actually created it.
+    // An admin provisioned an account. Shares the UserRegistered event type but is told apart by its shape:
+    // the actor is the admin and the target is the new user, where a self-registration has no target.
     Task RecordUserCreatedByAdminAsync(Guid actingAdminId, Guid newUserId, CancellationToken ct = default);
 
     // An admin changed a user's role. Details is rendered as "role -> <newRole>".
@@ -35,16 +28,11 @@ public interface IUserActivityAudit
     // An admin deleted a user.
     Task RecordUserDeletedAsync(Guid actorUserId, Guid targetUserId, CancellationToken ct = default);
 
-    // ── Admin CONTENT mutations ───────────────────────────────────────────────────────────────────
-    // One method per mutable entity kind; the VERB is a parameter (create/update/delete share the
-    // event type and are told apart by the rendered Details, "created 'X'"). Every one is called
+    // Content mutations: one method per mutable entity kind, with the verb as a parameter (create, update
+    // and delete share the event type and are told apart by the rendered Details). Every one is called
     // AFTER a successful commit and is fail-open, exactly like the account events above.
-    //
-    // `identifier` is a SHORT human-recognisable handle the admin already sees in the UI — a title,
-    // festival key + date, or crop code — never a request body, description, URL or free-form blob.
-    // The implementation trims + caps it well under the Details column, so an over-long title can
-    // never turn an audit write into a failure. Pass the entity's id as a last resort when no
-    // friendlier handle exists.
+    // identifier is a short handle the admin already sees in the UI — a title, festival key plus date, or
+    // crop code — never a request body, description or URL. The implementation trims and caps it.
 
     // A policy flag was created/updated/deleted (identifier = its Title).
     Task RecordPolicyFlagChangedAsync(
@@ -62,8 +50,8 @@ public interface IUserActivityAudit
     Task RecordCropChangedAsync(
         Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default);
 
-    // A market / economic centre was registered (identifier = its Name). Markets have no update or
-    // delete command today — the verb parameter is kept so adding one needs no interface change.
+    // A market or economic centre was registered (identifier = its Name). The verb parameter is kept so
+    // adding an update or delete needs no interface change.
     Task RecordMarketChangedAsync(
         Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default);
 }

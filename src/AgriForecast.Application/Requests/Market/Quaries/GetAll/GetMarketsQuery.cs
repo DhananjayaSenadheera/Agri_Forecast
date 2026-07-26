@@ -5,10 +5,8 @@ using MediatR;
 
 namespace AgriForecast.Application.Requests.Market.Quaries.GetAll;
 
-// GET /api/markets/get/all. Returns ALL markets by default (the admin registry needs
-// the full set of 12). When HasPrices is true the result is filtered to markets that
-// carry at least one CONFIRMED PriceObservation (the farmer Prices page only wants
-// price-carrying markets — 10 today).
+// GET /api/markets/get/all. Returns all markets by default (the admin registry needs the full set). With
+// HasPrices the result is limited to markets carrying at least one confirmed PriceObservation.
 public class GetMarketsQuery : IRequest<Result<List<Market_GetDto>>>
 {
     // ?hasPrices=true -> only markets with >=1 confirmed PriceObservation.

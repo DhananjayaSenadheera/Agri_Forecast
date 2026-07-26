@@ -8,9 +8,8 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Application.Requests.NewsEvents.Commands.Create;
 
-// Capture + storage only. NewsEvents are NOT yet ML feature inputs (the model will learn event
-// weights in a later, separate task), so — unlike PolicyFlag / FestivalCalendar — there is
-// deliberately NO training-data-warning here.
+// Capture and storage only. NewsEvents are not ML feature inputs yet, so — unlike PolicyFlag and
+// FestivalCalendar — there is deliberately no training-data warning here.
 public class NewsEventCreateCommandHandler : IRequestHandler<NewsEventCreateCommand, Result<bool>>
 {
     private readonly INewsEventRepository _newsEventRepository;
@@ -45,8 +44,7 @@ public class NewsEventCreateCommandHandler : IRequestHandler<NewsEventCreateComm
         _logger.LogInformation(
             "News event created. Id: {Id}, PublishedAt: {PublishedAt:yyyy-MM-dd}, Crops: {Crops}, Markets: {Markets}",
             entity.Id, entity.PublishedAt, entity.AffectedCrops.Count, entity.AffectedMarkets.Count);
-        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
-        // write can never turn a committed create into an error).
+        // Audited after the commit, and the audit swallows-and-logs, so it can never fail the create.
         await _activityAudit.RecordNewsEventChangedAsync(
             request.ActingUserId, ContentChangeAction.Created, entity.Title, cancellationToken);
 

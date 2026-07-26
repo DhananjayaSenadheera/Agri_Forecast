@@ -1,20 +1,13 @@
 namespace AgriForecast.Application.Requests.PolicyFlag;
 
-// Single source of truth for the "you are editing training history" warning.
+// The "you are editing training history" warning for policy flags.
 //
-// Policy flags are as-of-joined into the ML model's training features by EffectiveFrom/EffectiveTo.
-// A flag whose window has already STARTED (EffectiveFrom is before today) has therefore already been
-// baked into whatever the model last trained on. Editing or deleting such a flag changes that history
-// silently — so we WARN (never block: the owner wants the mutation to succeed and the admin to see it).
-//
-// Semantics (documented, load-bearing):
-//   * "Past" = EffectiveFrom is strictly before today's UTC date. (An open-ended flag with EffectiveTo
-//     null that started in the past is still past; EffectiveTo does not narrow this — once a window has
-//     begun it has touched history.)
-//   * On UPDATE we consider BOTH the incoming window and the previous (stored) window: moving a flag
-//     OUT of the past, or INTO the past, both change training history, so either being past warns.
-//   * A window that is entirely in the future (EffectiveFrom today or later, and no past previous
-//     window) has not yet fed any training run => no warning (null).
+// Flags are as-of-joined into ML training features by EffectiveFrom/EffectiveTo, so a flag whose window
+// has already started has been baked into whatever the model last trained on. Editing or deleting one
+// warns; it never blocks.
+// Past means EffectiveFrom is strictly before today's UTC date — EffectiveTo does not narrow this, since
+// once a window has begun it has touched history. On update both the incoming and the previous window
+// are considered. An entirely future window produces no warning.
 public static class PolicyFlagTrainingDataWarning
 {
     public const string Message =
@@ -22,8 +15,8 @@ public static class PolicyFlagTrainingDataWarning
         "into the forecasting model's training data, so editing or removing a past-dated flag changes " +
         "history the model has already learned from — a retrain may be required.";
 
-    // previousEffectiveFrom: the stored EffectiveFrom before the edit (pass the same value as
-    // effectiveFrom for a delete, or null when there is no prior window to consider).
+    // previousEffectiveFrom: the stored value before the edit. Pass the same value for a delete, or null
+    // when there is no prior window.
     public static string? For(DateTime effectiveFrom, DateTime? previousEffectiveFrom, DateTime nowUtc)
     {
         var today = nowUtc.Date;

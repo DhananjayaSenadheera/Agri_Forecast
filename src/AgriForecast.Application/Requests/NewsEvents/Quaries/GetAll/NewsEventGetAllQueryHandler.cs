@@ -26,9 +26,7 @@ public class NewsEventGetAllQueryHandler
     {
         var entries = await _newsEventRepository.GetAllAsync();
 
-        // Empty list is a normal state → 200 [] (deliberately NOT the legacy policy-flag
-        // 400-on-empty quirk — that was the API-10 review blocker; the admin News page renders
-        // an empty list from a Success result).
+        // An empty list is a normal state, so return 200 [] rather than the legacy 400-on-empty.
         var dtos = (entries ?? Enumerable.Empty<Domain.Entities.NewsEvent>()).ToGetDtoList();
         _logger.LogInformation("{Count} news events retrieved successfully.", dtos.Count);
         return Result<List<NewsEvent_GetDto>>.Success(dtos);

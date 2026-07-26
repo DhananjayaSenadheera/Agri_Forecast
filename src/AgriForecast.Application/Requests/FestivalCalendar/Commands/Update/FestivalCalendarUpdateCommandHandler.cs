@@ -46,8 +46,7 @@ public class FestivalCalendarUpdateCommandHandler
             return Result<FestivalCalendar_MutationResultDto>.Failure("Festival does not exist.");
         }
 
-        // Guard the UNIQUE (FestivalKey, Date) index — a move onto ANOTHER row's slot must not
-        // throw a raw DbUpdateException. excludeId lets the row keep its own (key, date).
+        // Guard the UNIQUE (FestivalKey, Date) index; excludeId lets the row keep its own key and date.
         if (await _festivalCalendarRepository.ExistsAsync(dto.FestivalKey, dto.Date.Date, dto.Id))
         {
             _logger.LogInformation(
@@ -71,8 +70,7 @@ public class FestivalCalendarUpdateCommandHandler
             "Festival {Id} updated. Date: {Date:yyyy-MM-dd}, TrainingDataWarning: {HasWarning}",
             existing.Id, existing.Date, warning is not null);
 
-        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
-        // write can never turn a committed update into an error).
+        // Audited after the commit, and the audit swallows-and-logs, so it can never fail the update.
         await _activityAudit.RecordFestivalChangedAsync(
             request.ActingUserId, ContentChangeAction.Updated, FestivalAuditIdentifier.For(existing.FestivalKey, existing.Date),
             cancellationToken);

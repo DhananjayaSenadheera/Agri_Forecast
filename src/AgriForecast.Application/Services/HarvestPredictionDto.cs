@@ -2,9 +2,8 @@ using System.Text.Json;
 
 namespace AgriForecast.Application.Services;
 
-// Mirrors the Python FastAPI POST /predict response contract verbatim.
-// confidence / activePredictor / explanation are passed straight through to the
-// farmer - never upgrade a Low / crop_mean_fallback into a confident number.
+// Mirrors the Python POST /predict response contract verbatim. confidence, activePredictor and
+// explanation pass straight through — never upgrade a Low or crop_mean_fallback into a confident number.
 public sealed class HarvestPredictionDto
 {
     public string CropId { get; set; } = string.Empty;
@@ -20,26 +19,22 @@ public sealed class HarvestPredictionDto
     public string? ModelVersion { get; set; }
     public string Explanation { get; set; } = string.Empty;
 
-    // --- Additive (API-5), all OPTIONAL so an older ML service without these keys
-    // still deserializes cleanly (nulls flow, nothing throws). ---
+    // Additive fields, all optional so an older ML service without these keys still deserializes.
 
-    // Machine-readable reason for the served path. ALWAYS present on a current ML
-    // service; snake_case (e.g. "model_served", "not_model_served"). Pass through.
+    // Machine-readable reason for the served path, snake_case (e.g. "model_served"). Passed through.
     public string? ReasonCode { get; set; }
 
-    // Loose bag of camelCase params keyed by reasonCode (usually {}). Kept as a raw
-    // JsonElement dictionary so new codes can add params without a .NET change and
-    // values (which may be ints) survive round-trip byte-for-byte. Do NOT model rigidly.
+    // Loose bag of params keyed by reasonCode. Kept as raw JsonElement so new codes can add params without
+    // a .NET change and the values survive round-trip unchanged. Do not model it rigidly.
     public Dictionary<string, JsonElement>? ReasonParams { get; set; }
 
-    // SHAP-derived drivers. Present ONLY on the model-served path; the ML OMITS the
-    // key entirely on any fallback path (and never emits it on /timeline). Stays
-    // null when omitted so the FE can tell "no breakdown" (null) from "empty list".
+    // SHAP-derived drivers, present only on the model-served path. Stays null when the ML omits the key,
+    // so the FE can tell "no breakdown" from an empty list.
     public List<TopFactorDto>? TopFactors { get; set; }
 }
 
-// One driver of the forecast. `direction` stays a plain string (no enum/converter) -
-// values are "up" | "down" | "neutral". `weight` is a 0..1 share.
+// One driver of the forecast. direction is a plain string ("up" | "down" | "neutral") and weight is a
+// 0..1 share.
 public sealed class TopFactorDto
 {
     public string Code { get; set; } = string.Empty;

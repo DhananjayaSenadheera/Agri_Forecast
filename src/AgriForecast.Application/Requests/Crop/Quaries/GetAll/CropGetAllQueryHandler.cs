@@ -11,9 +11,7 @@ namespace AgriForecast.Application.Requests.Crop.Quaries.GetAll;
 public class CropGetAllQueryHandler : IRequestHandler<CropGetAllQuery, Result<List<Crop_GetDto>>>
 {
     private readonly ICropRepository _cropRepository;
-    // The Crop entity has no navigation properties (deliberate), so API-3 enrichment loads the
-    // reference tables directly: CropCategories (4 rows) + CropAgronomyProfiles (1:1) via the
-    // open-generic repository. Loading them once and mapping in-memory avoids EF model/snapshot churn.
+    // Crop has no navigation properties, so the reference tables are loaded directly and joined in memory.
     private readonly IGenericRepository<CropCategory> _categoryRepository;
     private readonly IGenericRepository<CropAgronomyProfile> _profileRepository;
     private readonly ILogger<CropGetAllQueryHandler> _logger;

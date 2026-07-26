@@ -1,11 +1,8 @@
 namespace AgriForecast.Application.Requests.FestivalCalendar.DTOs;
 
-// Response for an update/delete. Same shape/naming as PolicyFlag_MutationResultDto so the FE
-// surfaces the warning identically: carries the id of the affected row plus an OPTIONAL
-// training-data warning. Festival dates are as-of-joined into the ML model's training features
-// (lead-up demand windows), so mutating a PAST-dated festival silently rewrites data the model
-// has already learned from. The mutation still SUCCEEDS (warn, not block); when
-// TrainingDataWarning is non-null the admin UI should surface it. Future-dated => null.
+// Response for an update or delete: the affected id plus an optional training-data warning. Festival
+// dates feed ML training features, so mutating a past-dated festival rewrites data the model already
+// learned from. The mutation still succeeds — the warning is for the admin UI to surface.
 public class FestivalCalendar_MutationResultDto
 {
     public Guid Id { get; set; }

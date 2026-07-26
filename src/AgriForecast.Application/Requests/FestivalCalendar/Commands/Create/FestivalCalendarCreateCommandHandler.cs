@@ -36,8 +36,7 @@ public class FestivalCalendarCreateCommandHandler : IRequestHandler<FestivalCale
             return Result<bool>.Failure("Festival details are required.");
         }
 
-        // Guard the DB's UNIQUE (FestivalKey, Date) index up-front so a duplicate returns a
-        // structured 400 rather than an unhandled DbUpdateException (generic 500).
+        // Guard the DB's UNIQUE (FestivalKey, Date) index up front so a duplicate is a 400, not a 500.
         if (await _festivalCalendarRepository.ExistsAsync(dto.FestivalKey, dto.Date.Date))
         {
             _logger.LogInformation(
@@ -50,8 +49,7 @@ public class FestivalCalendarCreateCommandHandler : IRequestHandler<FestivalCale
         await _unitofWorkRepository.CommitAsync();
         _logger.LogInformation("Festival created. Key: {Key}, Date: {Date:yyyy-MM-dd}",
             entry.FestivalKey, entry.Date);
-        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
-        // write can never turn a committed create into an error).
+        // Audited after the commit, and the audit swallows-and-logs, so it can never fail the create.
         await _activityAudit.RecordFestivalChangedAsync(
             request.ActingUserId, ContentChangeAction.Created, FestivalAuditIdentifier.For(entry.FestivalKey, entry.Date),
             cancellationToken);

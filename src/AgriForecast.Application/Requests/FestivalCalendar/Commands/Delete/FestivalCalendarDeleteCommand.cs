@@ -7,9 +7,8 @@ namespace AgriForecast.Application.Requests.FestivalCalendar.Commands.Delete;
 public class FestivalCalendarDeleteCommand : IRequest<Result<FestivalCalendar_MutationResultDto>>
 {
     /// <summary>
-    /// Admin-only deletion of a festival-calendar entry. <paramref name="actingUserId"/> is stamped by the
-    /// controller from the JWT <c>sub</c> claim (never the body/route) so the audit trail can name
-    /// who deleted the row; it is required rather than optional so a new call site cannot forget it.
+    /// Admin-only deletion of a festival-calendar entry. actingUserId is stamped by the controller from
+    /// the JWT sub claim (never the body or route) and is required so a new call site cannot forget it.
     /// </summary>
     public FestivalCalendarDeleteCommand(Guid id, Guid actingUserId)
     {

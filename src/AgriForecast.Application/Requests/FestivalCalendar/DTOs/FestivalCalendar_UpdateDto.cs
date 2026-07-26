@@ -1,7 +1,6 @@
 namespace AgriForecast.Application.Requests.FestivalCalendar.DTOs;
 
-// Full-object update: mirrors FestivalCalendar_CreateDto plus the Id of the row being edited.
-// The admin console sends the whole entry back (not a patch), so every field is replaced.
+// Full-object update: the create shape plus the Id. The admin console sends the whole entry back.
 public class FestivalCalendar_UpdateDto
 {
     public Guid Id { get; set; }

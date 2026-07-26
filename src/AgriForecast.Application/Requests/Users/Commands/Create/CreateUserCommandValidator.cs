@@ -4,11 +4,9 @@ using FluentValidation;
 namespace AgriForecast.Application.Requests.Users.Commands.Create;
 
 /// <summary>
-/// First-line, fail-closed guard for admin-created accounts. The username/email/password rules are
-/// kept IDENTICAL to <c>RegisterCommandValidator</c> on purpose — an account provisioned by an admin
-/// must satisfy exactly the same constraints as a self-registered one, so the two paths can never
-/// drift into producing differently-shaped users. The role whitelist is re-checked in the handler
-/// (defence in depth), as in the update-role command.
+/// First-line, fail-closed guard for admin-created accounts. The username, email and password rules are
+/// identical to RegisterCommandValidator so the two paths cannot drift into differently-shaped users.
+/// The role whitelist is re-checked in the handler as defence in depth.
 /// </summary>
 public class CreateUserCommandValidator : AbstractValidator<CreateUserCommand>
 {
@@ -30,8 +28,7 @@ public class CreateUserCommandValidator : AbstractValidator<CreateUserCommand>
 
         RuleFor(x => x.Role)
             .NotEmpty().WithMessage("Role is required.")
-            // Case-sensitive exact match against the closed set — "admin"/"ADMIN"/anything else is
-            // rejected so a role can only ever be one of the canonical values.
+            // Case-sensitive exact match against the closed set, so a role can only ever be canonical.
             .Must(UserRoles.IsAssignable)
             .WithMessage($"Role must be one of: {string.Join(", ", UserRoles.Assignable)}.");
 

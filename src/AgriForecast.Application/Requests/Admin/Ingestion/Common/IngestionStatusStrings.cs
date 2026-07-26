@@ -2,13 +2,10 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Application.Requests.Admin.Ingestion.Common;
 
-// Central enum -> wire-string mapping for the admin ingestion DTOs, so the exact strings the FE
-// consumes live in one place. Deliberate casing per the PR-3 contract:
-//   * IngestionRunStatus        -> LOWERCASE (running|succeeded|failed|skipped)
-//   * IngestionSourceStatus     -> LOWERCASE (ok|disabled|failed) — matches the run-status style
-//   * IngestionVerificationStatus -> TITLE-CASE (Pass|Warn|Fail), exactly as the contract spells it
-// The DTOs expose plain strings (never the enums) so System.Text.Json never emits an int and the
-// wire values are frozen here, not at the serializer's mercy.
+// Enum -> wire-string mapping for the admin ingestion DTOs, so the exact strings the FE consumes live in
+// one place. The casing is part of the contract: run and source statuses are lowercase
+// (running|succeeded|failed|skipped and ok|disabled|failed), verification status is title-case
+// (Pass|Warn|Fail). The DTOs expose plain strings so JSON never emits an enum int.
 public static class IngestionStatusStrings
 {
     public static string ToWire(IngestionRunStatus s) => s switch

@@ -12,9 +12,8 @@ public class CodeSettings: Result<string>
         _defaultSettingRepository = defaultSettingRepository;
     }
 
-    // R2 D-DF4: crops are coded per TOP-LEVEL category prefix (VEG######/FRT######), assign-once.
-    // The caller resolves the prefix from the crop's CropCategoryId via CropCategory.PrefixForCategory
-    // (Up/Low-country Vegetable roll up to VEG). Unknown prefixes default to the VEG counter.
+    // Crops are coded per top-level category prefix (VEG######/FRT######), assigned once. The caller
+    // resolves the prefix via CropCategory.PrefixForCategory; an unknown prefix uses the VEG counter.
     public async Task<string?> GetCropCode(string prefix)
     {
         var defaultSetting = await _defaultSettingRepository.GetDefaultSetting();
@@ -38,8 +37,6 @@ public class CodeSettings: Result<string>
         return cropCode;
     }
 
-    // R2 D-DF3: GetEcoCode() was removed with the EconomicCenters CRUD retirement. Economic-centre
-    // registration is now "create a Market with IsEconomicCenter=true", coded via GetMktCode().
     public async Task<string?> GetMktCode()
     {
         var defaultSetting = await _defaultSettingRepository.GetDefaultSetting();

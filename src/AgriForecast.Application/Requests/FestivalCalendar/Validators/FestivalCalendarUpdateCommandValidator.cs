@@ -3,10 +3,8 @@ using FluentValidation;
 
 namespace AgriForecast.Application.Requests.FestivalCalendar.Validators;
 
-// Mirrors FestivalCalendarCreateCommandValidator, plus the mutation-specific Id rule. Same
-// rationale for every field (see the create validator): FestivalKey uppercase [A-Z0-9_] to keep
-// the ML per-festival string match; Date date-only; LeadUpDays >= 0 (paired-day convention) and
-// <= 90 sanity cap; Source REQUIRED on every edit (a citation for as-of-joined training data).
+// Mirrors FestivalCalendarCreateCommandValidator plus the Id rule; see that file for the per-field
+// reasoning. Source is required on every edit.
 public class FestivalCalendarUpdateCommandValidator : AbstractValidator<FestivalCalendarUpdateCommand>
 {
     public FestivalCalendarUpdateCommandValidator()

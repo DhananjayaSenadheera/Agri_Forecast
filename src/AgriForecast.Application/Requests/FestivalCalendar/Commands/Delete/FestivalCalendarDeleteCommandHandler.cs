@@ -44,8 +44,7 @@ public class FestivalCalendarDeleteCommandHandler
             return Result<FestivalCalendar_MutationResultDto>.Failure("Festival does not exist.");
         }
 
-        // Deleting a festival whose Date is already in the past removes it from the lead-up windows
-        // the model trained on (pass the stored Date as both arguments).
+        // Deleting a past-dated festival removes it from the lead-up windows the model trained on.
         var warning = FestivalCalendarTrainingDataWarning.For(
             date: existing.Date,
             previousDate: existing.Date,
@@ -58,8 +57,7 @@ public class FestivalCalendarDeleteCommandHandler
             "Festival {Id} deleted. Date: {Date:yyyy-MM-dd}, TrainingDataWarning: {HasWarning}",
             existing.Id, existing.Date, warning is not null);
 
-        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
-        // write can never turn a committed delete into an error).
+        // Audited after the commit, and the audit swallows-and-logs, so it can never fail the delete.
         await _activityAudit.RecordFestivalChangedAsync(
             request.ActingUserId, ContentChangeAction.Deleted, FestivalAuditIdentifier.For(existing.FestivalKey, existing.Date),
             cancellationToken);

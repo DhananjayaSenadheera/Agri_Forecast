@@ -1,27 +1,25 @@
 namespace AgriForecast.Application.Services;
 
 /// <summary>
-/// Owns the persisted refresh-token (jti / token-family) revocation state machine that upgrades the
-/// refresh flow from stateless to revocable. Callers: the AuthController (issue on login/register,
-/// rotate on /refresh, revoke-family on logout) and the admin user handlers (revoke-all on
-/// delete/demote). Fail-CLOSED: if the backing store cannot be reached during a rotate, the rotation
-/// fails — there is no silent stateless fallback.
+/// Owns the persisted refresh-token (jti / token-family) revocation state machine. Called by the
+/// AuthController (issue on login or register, rotate on refresh, revoke the family on logout) and by the
+/// admin user handlers (revoke all on delete or demote). Fail-closed: if the store cannot be reached
+/// during a rotate the rotation fails — there is no silent stateless fallback.
 /// </summary>
 public interface IRefreshTokenService
 {
     /// <summary>
-    /// Issues a refresh token in a BRAND-NEW family (login / register) and persists its record.
-    /// Returns the raw token + expiry, or a null token when the record could not be persisted (the
-    /// caller then simply omits the cookie — access-token login still succeeds, and a token that was
-    /// never stored could never be honoured anyway).
+    /// Issues a refresh token in a brand-new family and persists its record. Returns a null token when the
+    /// record could not be persisted — the caller then omits the cookie, and a token that was never stored
+    /// could not be honoured anyway.
     /// </summary>
     Task<(string? token, DateTime expiresAtUtc)> IssueNewFamilyAsync(Guid userId, CancellationToken ct = default);
 
     /// <summary>
-    /// Validates a presented refresh token (crypto AND store: jti row must exist, be unexpired, not
-    /// revoked, not already used) and, on success, rotates it: marks the presented row Used and issues
-    /// a child token in the SAME family. Presenting an already-used/revoked token is a reuse/theft
-    /// signal and revokes the ENTIRE family. Fail-closed on any store error.
+    /// Validates a presented refresh token against both crypto and the store (the jti row must exist, be
+    /// unexpired, unrevoked and unused), then rotates it: the presented row is marked Used and a child token
+    /// is issued in the same family. Presenting an already-used or revoked token is a reuse signal and
+    /// revokes the entire family. Fail-closed on any store error.
     /// </summary>
     Task<RefreshRotationResult> RotateAsync(string? rawToken, CancellationToken ct = default);
 

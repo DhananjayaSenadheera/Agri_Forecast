@@ -5,10 +5,9 @@ using MediatR;
 namespace AgriForecast.Application.Requests.Users.Commands.UpdateRole;
 
 /// <summary>
-/// Admin-only change of a user's role. <see cref="TargetUserId"/> + <see cref="Role"/> come from the
-/// request body; <see cref="ActingUserId"/> is stamped by the controller from the JWT <c>sub</c>
-/// claim and is NEVER bound from the body. Fail-closed: only assignable roles are accepted, and the
-/// last remaining admin cannot be demoted.
+/// Admin-only change of a user's role. TargetUserId and Role come from the request body; ActingUserId is
+/// stamped by the controller from the JWT sub claim and is never bound from the body. Fail-closed: only
+/// assignable roles are accepted, and the last remaining admin cannot be demoted.
 /// </summary>
 public class UpdateUserRoleCommand : IRequest<Result<AdminUserDto>>
 {

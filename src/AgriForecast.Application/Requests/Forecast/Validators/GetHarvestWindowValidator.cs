@@ -5,18 +5,14 @@ namespace AgriForecast.Application.Requests.Forecast.Validators;
 
 public class GetHarvestWindowValidator : AbstractValidator<GetHarvestWindowQuery>
 {
-    // Mirrors the Python route's own bounds (HarvestWindowRequest.horizonDays).
-    // Below a week there is no window to speak of; above a year the frozen
-    // price/weather anchor is far too stale for the comparison to mean anything.
+    // Mirrors the Python route's own bounds. Below a week there is no window to speak of; above a year
+    // the frozen price/weather anchor is far too stale for the comparison to mean anything.
     private const int MinHorizonDays = 7;
     private const int MaxHorizonDays = 365;
 
-    // AsOf window, same numbers and same typo-guard reasoning as
-    // GetHarvestForecastValidator's PlantDate. AsOf now anchors the current-price
-    // query as well as the sweep, so an absurd date silently returns a window
-    // priced against nothing; reject it at the edge instead. The Python route
-    // leaves asOf unbounded — being stricter here is the same deliberate choice
-    // the forecast validator already makes.
+    // Same bounds and typo-guard reasoning as GetHarvestForecastValidator's PlantDate. AsOf anchors the
+    // current-price query as well as the sweep, so an absurd date is rejected here even though the Python
+    // route leaves it unbounded.
     private const int MaxPastDays = 730;
     private const int MaxFutureDays = 365;
 

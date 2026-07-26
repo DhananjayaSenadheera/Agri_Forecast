@@ -2,27 +2,22 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Application.Services;
 
-// Read-only projection over the Logs-hub audit tables (ModelTrainingRuns, UserActivityLog) for the
-// admin Logs page (AdminLogsController). Thin DB seam so the GetTrainingRuns / GetUserActivity
-// handlers are unit-testable with canned rows (mirrors IIngestionReadStore). Pure reads on the
-// normal request-scoped, AsNoTracking DbContext — no write-side isolation needed.
+// Read-only projection over the Logs-hub audit tables (ModelTrainingRuns, UserActivityLog) for the admin
+// Logs page. Thin DB seam so the handlers are unit-testable; pure reads, no write-side isolation needed.
 public interface ILogsReadStore
 {
-    // Page of model-training runs newest TrainedAtUtc first (Id DESC tiebreak), plus the total count
-    // (for the pager). page is 1-based; the store applies Skip/Take.
+    // Page of training runs newest TrainedAtUtc first (Id DESC tiebreak), plus the total count. 1-based.
     Task<TrainingRunsPage> GetTrainingRunsPageAsync(
         int page, int pageSize, CancellationToken ct = default);
 
-    // Page of user-activity events newest OccurredUtc first (Id DESC tiebreak), optionally filtered to
-    // a SET of EventTypes (OR-combined), plus the total count of matching rows. page is 1-based.
-    // A null/empty set means NO type filter — the handler collapses both ?type= (one member) and
-    // ?types= (many) into this single parameter, so there is exactly one filter code path.
+    // Page of user-activity events newest OccurredUtc first (Id DESC tiebreak), optionally filtered to a set
+    // of event types (OR-combined). A null or empty set means no type filter, so ?type= and ?types= collapse
+    // into one code path.
     Task<UserActivityPage> GetUserActivityPageAsync(
         int page, int pageSize, IReadOnlyCollection<UserActivityEventType>? types,
         CancellationToken ct = default);
 
-    // Page of system-error rows newest OccurredUtc first (Id DESC tiebreak), plus the total count. page
-    // is 1-based; the store applies Skip/Take.
+    // Page of system-error rows newest OccurredUtc first (Id DESC tiebreak), plus the total count.
     Task<SystemErrorsPage> GetSystemErrorsAsync(
         int page, int pageSize, CancellationToken ct = default);
 }
@@ -41,8 +36,8 @@ public sealed record TrainingRunRow(
     int? NTrainRows,
     int? NCrops);
 
-// One UserActivityLog row projected for the admin user-activity list. EventType stays the domain enum;
-// the handler maps it to the lowercase wire string.
+// One UserActivityLog row projected for the admin list. EventType stays the domain enum; the handler maps
+// it to the wire string.
 public sealed record UserActivityRow(
     DateTime OccurredUtc,
     UserActivityEventType EventType,

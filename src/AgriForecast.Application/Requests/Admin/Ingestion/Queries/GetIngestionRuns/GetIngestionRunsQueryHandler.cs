@@ -7,9 +7,8 @@ using MediatR;
 
 namespace AgriForecast.Application.Requests.Admin.Ingestion.Queries.GetIngestionRuns;
 
-// Server-paged run history. Validation (bounds + known source) already ran in the pipeline, so this
-// handler just canonicalizes the source casing, pages via the store, and joins each run's latest
-// verification by BatchId. The DB is behind IIngestionReadStore for unit-testability.
+// Server-paged run history: canonicalize the source casing, page via the store, then join each run's
+// latest verification by BatchId. The DB is behind IIngestionReadStore for unit-testability.
 public class GetIngestionRunsQueryHandler
     : IRequestHandler<GetIngestionRunsQuery, Result<IngestionRunsPage_GetDto>>
 {
@@ -74,9 +73,8 @@ public class GetIngestionRunsQueryHandler
 
     private static string Fmt(DateOnly d) => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 
-    // EF materializes datetime2 as DateTimeKind.Unspecified, so System.Text.Json emits no trailing
-    // "Z" and the FE's new Date(v) would treat these UTC instants as LOCAL. These columns are all
-    // written as UTC, so stamp Kind=Utc here for this endpoint (a LOCAL fix, not a global converter).
+    // EF materializes datetime2 as DateTimeKind.Unspecified, so JSON would omit the trailing "Z" and the
+    // FE would read these UTC instants as local. Stamp Kind=Utc here for this endpoint.
     private static DateTime AsUtc(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Utc);
 
     private static DateTime? AsUtc(DateTime? value) =>

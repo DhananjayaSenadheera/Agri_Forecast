@@ -5,9 +5,7 @@ public class Crop_CreateDto
     public string Name { get;  set; }
     public string? Source { get; set; }
 
-    // Required grouping under a CropCategory (Vegetable / Fruit + sub-categories).
-    // Validated NotEmpty AND must exist in CropCategories. A crop created here is a
-    // manual/curated entry, so the category is chosen explicitly (unlike the ingestion
-    // auto-provision path, which defaults to top-level Vegetable / Fruit-by-keyword).
+    // Required: a manual crop must be filed under an existing CropCategory (validated NotEmpty and must
+    // exist). The ingestion auto-provision path instead defaults the category.
     public Guid CropCategoryId { get; set; }
 }

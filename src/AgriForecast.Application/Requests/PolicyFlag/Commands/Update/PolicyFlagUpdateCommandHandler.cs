@@ -60,8 +60,7 @@ public class PolicyFlagUpdateCommandHandler
             "Policy flag {Id} updated. EffectiveFrom: {EffectiveFrom:yyyy-MM-dd}, TrainingDataWarning: {HasWarning}",
             existing.Id, existing.EffectiveFrom, warning is not null);
 
-        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
-        // write can never turn a committed update into an error).
+        // Audited after the commit, and the audit swallows-and-logs, so it can never fail the update.
         await _activityAudit.RecordPolicyFlagChangedAsync(
             request.ActingUserId, ContentChangeAction.Updated, existing.Title, cancellationToken);
 

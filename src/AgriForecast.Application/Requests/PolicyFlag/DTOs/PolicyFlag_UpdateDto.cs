@@ -2,8 +2,7 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Application.Requests.PolicyFlag.DTOs;
 
-// Full-object update: mirrors PolicyFlag_CreateDto plus the Id of the row being edited.
-// The admin console sends the whole flag back (not a patch), so every field is replaced.
+// Full-object update: the create shape plus the Id. The admin console sends the whole flag back.
 public class PolicyFlag_UpdateDto
 {
     public Guid Id { get; set; }
@@ -18,8 +17,7 @@ public class PolicyFlag_UpdateDto
 
     public PolicyDirection Direction { get; set; }
 
-    // Required on mutation (not just create): policy flags are as-of-joined into ML training
-    // data, so every edit must carry a citation for provenance. Enforced by the validator.
+    // Required on mutation, unlike create: every edit to training-relevant data carries a citation.
     public string? Source { get; set; }
     public string? ReferenceUrl { get; set; }
 }

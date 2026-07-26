@@ -6,9 +6,8 @@ using MediatR;
 
 namespace AgriForecast.Application.Requests.Indicators.Quaries.GetSeriesCatalog;
 
-// Series directory for the admin Indicators picker. Thin: the store does the per-series
-// grouping across both tables; this handler only shapes + deterministically orders the result
-// (indicators before macro, then by key). Empty DB -> 200 [] (never a failure).
+// Series directory for the admin Indicators picker. The store does the per-series grouping across both
+// tables; this handler only shapes and orders the result. An empty DB is a 200 [], never a failure.
 public class GetSeriesCatalogQueryHandler
     : IRequestHandler<GetSeriesCatalogQuery, Result<List<SeriesCatalog_GetDto>>>
 {

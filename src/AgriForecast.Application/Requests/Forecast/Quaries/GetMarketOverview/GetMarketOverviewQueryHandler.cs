@@ -7,9 +7,8 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Application.Requests.Forecast.Quaries.GetMarketOverview;
 
-// Read-only market snapshot for the farmer-app landing screen. Owns all business
-// logic (day clamp, price precedence, daily aggregation, movers, latest-prices +
-// sparklines); the DB is behind IMarketOverviewStore so this is unit-testable.
+// Read-only market snapshot for the farmer-app landing screen. Owns the day clamp, price precedence,
+// daily aggregation, movers and sparklines; the DB is behind IMarketOverviewStore for unit-testability.
 public class GetMarketOverviewQueryHandler
     : IRequestHandler<GetMarketOverviewQuery, Result<MarketOverview_GetDto>>
 {
@@ -53,21 +52,18 @@ public class GetMarketOverviewQueryHandler
         var asOfDate = asOf.Value;
         // Inclusive window of exactly windowDays calendar days ending at asOf.
         var windowFrom = asOfDate.AddDays(-(windowDays - 1));
-        // Sparklines need 14 days even when windowDays is clamped to 7, so fetch the
-        // wider of the two once and slice in memory.
+        // Sparklines need 14 days even when windowDays is clamped to 7, so fetch the wider window once.
         var fetchFrom = asOfDate.AddDays(-(Math.Max(windowDays, SparkDays) - 1));
 
         var rows = await _store.GetRowsAsync(fetchFrom, asOfDate, cancellationToken);
 
-        // Counts: distinct markets/crops with >=1 raw row in the window (a zero-price
-        // row still counts as "data present").
+        // Counts: distinct markets/crops with at least one raw row in the window.
         var windowRaw = rows.Where(r => r.Date >= windowFrom).ToList();
         var marketsWithData = windowRaw.Select(r => r.MarketId).Distinct().Count();
         var cropsWithData = windowRaw.Select(r => r.CropId).Distinct().Count();
 
-        // Daily aggregation per (crop, market, date): a day can carry multiple rows
-        // (e.g. DAMBULLA_DEC + HARTI mapped to the same market). Price = mean of the
-        // per-row unit prices; DayMin/DayMax retain the spread for the latest-price card.
+        // A day can carry several rows for the same (crop, market), so average the per-row unit prices and
+        // keep DayMin/DayMax for the latest-price card.
         var daily = rows
             .Select(r => new { Row = r, Unit = UnitPrice(r.MinPrice, r.MaxPrice, r.WholesalePrice, r.RetailPrice) })
             .Where(x => x.Unit.HasValue)
@@ -99,14 +95,8 @@ public class GetMarketOverviewQueryHandler
         });
     }
 
-    // Price precedence (documented). PriceObservations carries a Min/Max band plus
-    // optional Wholesale/Retail columns (0 == absent, coalesced by the store):
-    //   1. both Min & Max > 0 -> midpoint (Min+Max)/2   (HARTI bands; the common case)
-    //   2. Wholesale > 0      -> Wholesale
-    //   3. Retail > 0         -> Retail
-    //   4. only Max > 0       -> Max
-    //   5. only Min > 0       -> Min
-    //   6. none               -> no valid price (row skipped from price series/movers)
+    // Price precedence: both Min and Max > 0 -> midpoint; else Wholesale; else Retail; else whichever of
+    // Max or Min is > 0; otherwise no valid price and the row is skipped. 0 means absent here.
     private static decimal? UnitPrice(decimal min, decimal max, decimal wholesale, decimal retail)
     {
         if (min > 0m && max > 0m) return (min + max) / 2m;

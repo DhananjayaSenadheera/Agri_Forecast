@@ -3,10 +3,9 @@ using FluentValidation;
 
 namespace AgriForecast.Application.Requests.Admin.Logs.Queries.GetUserActivity;
 
-// Validates the user-activity query per the house posture (bad input -> 400 via ValidationBehavior ->
-// GlobalExceptionMiddleware). page >= 1; pageSize in [1,100] (validated, not silently clamped); type
-// optional but, when present, must be a known event-type wire string (case-insensitive) so a typo
-// never silently returns an unfiltered page.
+// page >= 1; pageSize in [1,100], validated rather than silently clamped; type optional but, when
+// present, must be a known event-type wire string (case-insensitive) so a typo never returns an
+// unfiltered page.
 public class GetUserActivityValidator : AbstractValidator<GetUserActivityQuery>
 {
     public const int MinPageSize = 1;
@@ -27,10 +26,8 @@ public class GetUserActivityValidator : AbstractValidator<GetUserActivityQuery>
             .WithMessage("type must be one of the known event types: "
                          + string.Join(", ", UserActivityEventStrings.KnownTypes) + ".");
 
-        // types: optional comma-separated list. EVERY token must be known — one bad token 400s the
-        // whole request rather than being dropped, so an admin can never mistake a silently-narrowed
-        // page for the complete one. The message names the offending token(s), because "one of these
-        // ten is wrong" is not an actionable error.
+        // Every token must be known: one bad token 400s the whole request rather than being dropped, and
+        // the message names the offending tokens so the error is actionable.
         RuleFor(q => q.Types)
             .Must(t => UnknownTokens(t).Count == 0)
             .WithMessage(q => "types contains unknown event type(s): "
@@ -39,8 +36,7 @@ public class GetUserActivityValidator : AbstractValidator<GetUserActivityQuery>
                               + string.Join(", ", UserActivityEventStrings.KnownTypes) + ".");
     }
 
-    // Tokens of a ?types= list that are not known event types. A null/blank list has none (absent
-    // filter), and blank tokens between commas are ignored by SplitTypes rather than rejected.
+    // Tokens of a ?types= list that are not known event types; blank tokens between commas are ignored.
     private static IReadOnlyList<string> UnknownTokens(string? types) =>
         UserActivityEventStrings.SplitTypes(types)
             .Where(t => !UserActivityEventStrings.IsKnown(t))

@@ -8,35 +8,18 @@ using MediatR;
 
 namespace AgriForecast.Application.Requests.Admin.Ingestion.Queries.GetIngestionStatus;
 
-// Builds the ingestion health snapshot. The DB is behind IIngestionReadStore and the config values
-// behind IIngestionStatusSettings, so the state-derivation and batch-outcome roll-up are
-// unit-testable with canned rows.
+// Builds the ingestion health snapshot. The DB is behind IIngestionReadStore and the config behind
+// IIngestionStatusSettings, so the state derivation and batch roll-up are unit-testable.
 //
-// STATE derivation (fail-safe — never a fake "running"):
-//   * no qualifying runs                                 -> "unknown"
-//   * a fresh unfinished run (StartedUtc within window)  -> "running"
-//   * otherwise (a stale unfinished row = crashed, or all runs finished) -> "stopped"
-// The staleness window is settings.RunningStalenessMinutes (default 120). "now" is DateTime.UtcNow
-// (house style — the same convention the validators use); tests drive freshness via the run's
-// StartedUtc relative to real now.
+// State: no qualifying runs -> "unknown"; a fresh unfinished run -> "running"; otherwise "stopped".
+// A stale unfinished row counts as crashed, never as a fake "running". The staleness window is
+// settings.RunningStalenessMinutes.
 //
-// SOURCE SCOPE — every one of state / lastRunAtUtc / lastRunStatus is derived from ingestion runs
-// ONLY, excluding IngestionSources.ExcludedFromServiceState (today: FEATURE_BUILD, the Python
-// feature-build step that reuses the IngestionRuns table). This card answers "is the ingestion
-// service healthy?", and the feature build is not that service.
-//
-// It is not cosmetic. The feature build runs LAST each day as a solo one-row batch, so unfiltered:
-//   * lastRunStatus would roll up that solo batch and sit at "succeeded" permanently, so the FE's
-//     red-dot alarm (lastRunStatus === 'failed') could NEVER fire for DAMBULLA_DEC / WEATHER /
-//     ECONOMIC / NEWS — the four sources with no watermark row, visible only through this card;
-//   * lastRunAtUtc would report the feature build's clock, not the ingestion pass's.
-// GetLatestUnfinishedStartedUtcAsync is EXCLUDED TOO (a deliberate choice, not an oversight): a hung
-// feature-build row would otherwise make the card read "Ingestion service is Running" while no
-// ingestion is running at all, and state must describe the same thing lastRunAtUtc describes.
-//
-// The "sources" list is NOT affected — it is built from IngestionWatermarks, a different table that
-// the feature build does not write. GET /runs is not affected either: FEATURE_BUILD rows are real
-// run rows and stay listed (and filterable via ?source=FEATURE_BUILD).
+// state, lastRunAtUtc and lastRunStatus are all derived from ingestion runs only, excluding
+// IngestionSources.ExcludedFromServiceState (today FEATURE_BUILD). The feature build runs last each day
+// as a solo one-row batch, so without the exclusion lastRunStatus would sit at "succeeded" forever and a
+// failed DAMBULLA_DEC / WEATHER / ECONOMIC / NEWS could never raise the FE's alarm; a hung feature build
+// would likewise make the card read "running". The sources list and GET /runs are unaffected.
 public class GetIngestionStatusQueryHandler
     : IRequestHandler<GetIngestionStatusQuery, Result<IngestionStatus_GetDto>>
 {
@@ -121,11 +104,8 @@ public class GetIngestionStatusQueryHandler
         return Result<IngestionStatus_GetDto>.Success(dto);
     }
 
-    // Roll-up of a batch's per-source statuses (PR-3 contract):
-    //   all Succeeded/Skipped                 -> "succeeded"
-    //   any Failed but not all                -> "partial"
-    //   all Failed                            -> "failed"
-    //   (a Running row present, no failures)  -> "partial" (in-flight, not yet cleanly succeeded)
+    // Batch roll-up: all Succeeded/Skipped -> "succeeded"; some Failed -> "partial"; all Failed ->
+    // "failed"; a Running row with no failures -> "partial", never a premature "succeeded".
     private static string? AggregateBatchStatus(IReadOnlyList<IngestionRunStatus> statuses)
     {
         if (statuses.Count == 0) return null;
@@ -141,10 +121,8 @@ public class GetIngestionStatusQueryHandler
 
     private static string Fmt(DateOnly d) => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 
-    // EF materializes datetime2 as DateTimeKind.Unspecified, so System.Text.Json emits no trailing
-    // "Z" and the FE's new Date(v) would treat these UTC instants as LOCAL. These columns are all
-    // written as UTC (the audit writers stamp UtcNow), so stamp Kind=Utc here for the two admin
-    // endpoints (a LOCAL fix, not a global converter — that stays out of scope).
+    // EF materializes datetime2 as DateTimeKind.Unspecified, so JSON would omit the trailing "Z" and the
+    // FE would read these UTC instants as local. Stamp Kind=Utc here for the admin endpoints.
     private static DateTime AsUtc(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Utc);
 
     private static DateTime? AsUtc(DateTime? value) =>

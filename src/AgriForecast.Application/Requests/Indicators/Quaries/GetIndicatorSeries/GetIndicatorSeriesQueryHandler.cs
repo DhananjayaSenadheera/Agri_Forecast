@@ -7,17 +7,11 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Application.Requests.Indicators.Quaries.GetIndicatorSeries;
 
-// Daily EconomicIndicators series (ADM-6 / API-11). Owns input validation (code required,
-// from<=to) and default-window resolution; the DB is behind IIndicatorReadStore so this is
-// unit-testable with canned rows.
-//
-// DEFAULT WINDOW: from/to are optional and inclusive. Resolution (documented, deterministic):
-//   * to   = request.To ?? the series' latest available Date (anchor at real data, not "today",
-//            matching the market-overview / price-history convention). If To is absent AND the
-//            series has no rows at all -> 200 [] (empty is honest, never a 404/failure).
-//   * from = request.From ?? to.AddDays(-(DefaultWindowDays - 1))  (last 365 inclusive days).
-// A from beyond the latest date simply yields an empty range (200 []); only an EXPLICIT
-// from>to pair is rejected as a bad request.
+// Daily EconomicIndicators series. Owns input validation and default-window resolution; the DB is behind
+// IIndicatorReadStore.
+// Default window: to = request.To or the series' latest Date (anchored on real data, not "today"); from
+// = request.From or 364 days before that. An absent To on a series with no rows returns 200 []. Only an
+// explicit from > to pair is rejected.
 public class GetIndicatorSeriesQueryHandler
     : IRequestHandler<GetIndicatorSeriesQuery, Result<List<DailyIndicatorPoint_GetDto>>>
 {

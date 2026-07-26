@@ -10,7 +10,7 @@ public static class ApplicationDependencyInjection
     public static IServiceCollection AddApplicationLayer(this IServiceCollection services)
     {
         services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(ApplicationDependencyInjection).Assembly));
-        // Mapping is now hand-written static mapper classes (Mapper/*Mapper.cs) — no DI registration needed.
+        // Mapping uses hand-written static mapper classes (Mapper/*Mapper.cs), so nothing to register.
         services.AddValidatorsFromAssembly(typeof(ApplicationDependencyInjection).Assembly);
         services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
         services.AddTransient<CodeSettings>();

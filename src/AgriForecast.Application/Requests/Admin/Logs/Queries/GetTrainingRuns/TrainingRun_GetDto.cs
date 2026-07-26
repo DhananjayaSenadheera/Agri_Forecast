@@ -1,9 +1,7 @@
 namespace AgriForecast.Application.Requests.Admin.Logs.Queries.GetTrainingRuns;
 
-// One model-training run for GET /api/admin/logs/training. promoted vs decisionPromoted DIFFER on a
-// manual override (e.g. v17: decisionPromoted=false, promoted=true) — both surfaced so the hub can
-// show "promoted despite the gate". MAE fields are nullable (a run may not report them). PascalCase
-// -> camelCase JSON per the API default policy.
+// One model-training run for GET /api/admin/logs/training. promoted and decisionPromoted differ on a
+// manual override, so both are surfaced. MAE fields are nullable — a run may not report them.
 public class TrainingRun_GetDto
 {
     public string Version { get; set; } = string.Empty;

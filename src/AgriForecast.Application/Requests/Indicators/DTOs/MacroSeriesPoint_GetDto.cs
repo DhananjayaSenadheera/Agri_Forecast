@@ -1,17 +1,10 @@
 namespace AgriForecast.Application.Requests.Indicators.DTOs;
 
-// Response element for GET /api/macro-series?key=&from=&to= (MacroSeriesPoints, e.g. CCPI).
-// Wire shape matches the FE proposal `MacroSeriesPoint` in ForecastUI src/api/types.ts, so
-// the FE flip off fixtures is a client-method swap. camelCase JSON: seriesKey, referenceDate,
-// publishedAt, value, source.
-//
-// NAMING: the JSON field is `seriesKey` (the FE's chosen name), mapped from the entity's
-// `SeriesCode`. This is a deliberate wire-name alignment, not a rename of the domain concept.
-//
-// LEAKAGE GUARD (LOAD-BEARING): referenceDate and publishedAt are ALWAYS both present and
-// distinct — the two-date discipline. `referenceDate` = the period the figure describes;
-// `publishedAt` = when it became knowable (the release vintage). NEVER collapse them onto one
-// field, and never map publishedAt onto referenceDate (that is lookahead / leakage).
+// Response element for GET /api/macro-series. Matches the FE MacroSeriesPoint interface.
+// The JSON field is seriesKey (the FE's chosen name), mapped from the entity's SeriesCode.
+// referenceDate and publishedAt are always both present and distinct: referenceDate is the period the
+// figure describes, publishedAt is when it became knowable. Never collapse them onto one field and never
+// map publishedAt onto referenceDate — that is lookahead.
 public class MacroSeriesPoint_GetDto
 {
     public string SeriesKey { get; set; } = string.Empty;     // e.g. "CCPI_BASE2021" (entity SeriesCode)

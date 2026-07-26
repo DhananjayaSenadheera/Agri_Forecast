@@ -1,11 +1,8 @@
 namespace AgriForecast.Application.Requests.Admin.Logs.Queries.GetSystemErrors;
 
-// One system error for GET /api/admin/logs/errors. Only the exception type/message/stack and the
-// request method/path (path ONLY — never a query string) plus the trace id are surfaced; no request
-// field (query string, header, body) is captured directly, but message/stackTrace are the verbatim
-// (length-capped) exception text and may carry whatever upstream code put in them — Admin-only by the
-// controller. message/path/method/traceId/stackTrace are nullable (blank -> null at write time).
-// PascalCase -> camelCase JSON per the API default policy.
+// One system error for GET /api/admin/logs/errors. Only the exception type/message/stack and the request
+// method and PATH (path only, never a query string) plus the trace id are surfaced. message and
+// stackTrace are verbatim exception text, which is why the endpoint is Admin-only.
 public class SystemError_GetDto
 {
     public long Id { get; set; }

@@ -2,17 +2,10 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Application.Requests.Admin.Logs.Common;
 
-// Central UserActivityEventType <-> wire-string mapping for the admin Logs DTOs + the ?type= /
-// ?types= filters, so the exact strings the FE consumes (and filters by) live in ONE place (mirrors
-// IngestionStatusStrings). Deliberate casing per the Logs-hub contract: LOWERCASE camelCase. The DTO
-// exposes a plain string (never the enum) so System.Text.Json never emits an int and the wire values
-// are frozen here.
-//
-// SINGLE SOURCE OF TRUTH: ToWire, KnownTypes and TryParse are all derived from the ordered Pairs
-// table below. Previously each was hand-maintained, so adding an event type and forgetting KnownTypes
-// silently produced a type that could be READ but never FILTERED (its own wire string would 400).
-// Adding a member is now exactly one Pairs row; EventStrings_MappingCoversEveryEnumMember pins that
-// the table stays total.
+// UserActivityEventType <-> wire-string mapping for the admin Logs DTOs and the ?type= / ?types= filters.
+// The wire strings are lowercase camelCase and frozen here, so JSON never emits an enum int.
+// ToWire, KnownTypes and TryParse are all derived from the Pairs table below, so adding an event type is
+// exactly one Pairs row — previously a new type could be readable but not filterable.
 public static class UserActivityEventStrings
 {
     // Account events (Logs hub PR A) — the original five.
@@ -22,8 +15,7 @@ public static class UserActivityEventStrings
     public const string RoleChanged = "roleChanged";
     public const string UserDeleted = "userDeleted";
 
-    // Admin CONTENT events — one per mutable entity kind (create/update/delete share the type and are
-    // told apart by Details). Appended, never reordered: the enum's ints are persisted.
+    // Content events, one per mutable entity kind. Appended, never reordered: the enum ints are persisted.
     public const string PolicyFlagChanged = "policyFlagChanged";
     public const string FestivalChanged = "festivalChanged";
     public const string NewsEventChanged = "newsEventChanged";
@@ -61,8 +53,7 @@ public static class UserActivityEventStrings
     public static readonly IReadOnlyCollection<string> KnownTypes =
         Pairs.Select(p => p.Wire).ToArray();
 
-    // True if the wire string is a known event type (case-insensitive so a lower/upper query is
-    // tolerated before it 400s on a genuine typo).
+    // Case-insensitive, so a lower/upper-case query is tolerated before a genuine typo 400s.
     public static bool IsKnown(string? type) =>
         type is not null && ByWire.ContainsKey(type.Trim());
 
@@ -73,9 +64,8 @@ public static class UserActivityEventStrings
         return ByWire.TryGetValue(type.Trim(), out var parsed) ? parsed : null;
     }
 
-    // Splits a comma-separated ?types= list into trimmed, non-blank tokens (order + duplicates
-    // preserved — the validator reports on the raw tokens, the handler de-duplicates). A null/blank
-    // list yields an empty array so "absent" and "blank" behave identically (= no types filter).
+    // Splits a comma-separated ?types= list into trimmed, non-blank tokens, preserving order and
+    // duplicates. A null or blank list yields an empty array, so absent and blank behave identically.
     public static IReadOnlyList<string> SplitTypes(string? types) =>
         string.IsNullOrWhiteSpace(types)
             ? Array.Empty<string>()

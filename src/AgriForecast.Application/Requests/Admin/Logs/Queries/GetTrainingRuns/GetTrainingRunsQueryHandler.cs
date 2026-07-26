@@ -4,10 +4,7 @@ using MediatR;
 
 namespace AgriForecast.Application.Requests.Admin.Logs.Queries.GetTrainingRuns;
 
-// Server-paged model-training history. Validation (bounds) already ran in the pipeline, so this
-// handler just pages via the store and maps each row to the DTO. The DB is behind ILogsReadStore for
-// unit-testability. Mirrors GetIngestionRunsQueryHandler (manual mapping — the house uses hand-written
-// mappers, not AutoMapper).
+// Server-paged model-training history. Pages via ILogsReadStore and maps each row to the DTO by hand.
 public class GetTrainingRunsQueryHandler
     : IRequestHandler<GetTrainingRunsQuery, Result<TrainingRunsPage_GetDto>>
 {
@@ -48,8 +45,6 @@ public class GetTrainingRunsQueryHandler
         return Result<TrainingRunsPage_GetDto>.Success(dto);
     }
 
-    // EF materializes datetime2 as DateTimeKind.Unspecified, so System.Text.Json emits no trailing
-    // "Z" and the FE's new Date(v) would treat these UTC instants as LOCAL. This column is written as
-    // UTC, so stamp Kind=Utc here (a LOCAL fix, not a global converter) — same as the ingestion reads.
+    // EF materializes datetime2 as DateTimeKind.Unspecified, so stamp Kind=Utc here for the trailing "Z".
     private static DateTime AsUtc(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Utc);
 }

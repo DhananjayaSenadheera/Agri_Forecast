@@ -1,11 +1,8 @@
 namespace AgriForecast.Application.Requests.Admin.Logs.Queries.GetUserActivity;
 
-// One account event for GET /api/admin/logs/user-activity. eventType is a pre-rendered frozen
-// lowercase wire string (never the enum, so JSON never emits an int). actorUserId/targetUserId are
-// the users' immutable GUID ids (nullable — a failed login has no proven actor, a login has no
-// target). usernameAttempted is populated for failed logins only (the security signal, never a
-// password); details is a short code-authored note (e.g. "role -> Admin"). PascalCase -> camelCase
-// JSON per the API default policy.
+// One event for GET /api/admin/logs/user-activity. eventType is a frozen lowercase wire string, so JSON
+// never emits an enum int. actorUserId/targetUserId are nullable (a failed login has no proven actor, a
+// login has no target). usernameAttempted is set for failed logins only and is never a password.
 public class UserActivity_GetDto
 {
     public DateTime OccurredUtc { get; set; }

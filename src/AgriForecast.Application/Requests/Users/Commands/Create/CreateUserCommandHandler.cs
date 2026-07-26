@@ -11,19 +11,12 @@ using Microsoft.Extensions.Logging;
 namespace AgriForecast.Application.Requests.Users.Commands.Create;
 
 /// <summary>
-/// Creates a user account on behalf of an admin. Guards (all fail-closed, all tested):
-///  - the requested role must be an assignable role (defence-in-depth re-check of the validator);
-///  - the username must not already be taken;
-///  - the email must not already be registered.
-/// The uniqueness checks and their wording are kept identical to <c>RegisterCommandHandler</c> so an
-/// admin sees exactly the constraint a self-registering farmer would hit.
-/// <para>
-/// NO TOKEN IS ISSUED. Self-registration returns an <c>AuthResponseDto</c> and the auth controller
-/// turns that into a refresh cookie for the caller; doing the same here would hand the ACTING ADMIN
-/// a cookie belonging to the account they just created. This handler returns only the
-/// <see cref="AdminUserDto"/> projection (no hash, no token), so the admin's own session is untouched
-/// and the new user signs in normally with the password they were given.
-/// </para>
+/// Creates a user account on behalf of an admin. Fail-closed guards: the role must be assignable (a
+/// re-check of the validator), the username must not be taken, and the email must not be registered.
+/// The uniqueness wording matches RegisterCommandHandler so an admin sees the same constraint a
+/// self-registering farmer would hit.
+/// <para>No token is issued: returning an AuthResponseDto here would hand the acting admin a cookie for
+/// the account they just created. Only the AdminUserDto projection is returned.</para>
 /// </summary>
 public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, Result<AdminUserDto>>
 {

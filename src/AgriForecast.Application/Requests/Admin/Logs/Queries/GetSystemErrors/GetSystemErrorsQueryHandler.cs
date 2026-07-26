@@ -4,10 +4,7 @@ using MediatR;
 
 namespace AgriForecast.Application.Requests.Admin.Logs.Queries.GetSystemErrors;
 
-// Server-paged system-error history. Validation (bounds) already ran in the pipeline, so this handler
-// just pages via the store and maps each row to the DTO. The DB is behind ILogsReadStore for
-// unit-testability. Mirrors GetTrainingRunsQueryHandler (manual mapping — the house uses hand-written
-// mappers, not AutoMapper).
+// Server-paged system-error history. Pages via ILogsReadStore and maps each row to the DTO by hand.
 public class GetSystemErrorsQueryHandler
     : IRequestHandler<GetSystemErrorsQuery, Result<SystemErrorsPage_GetDto>>
 {
@@ -46,8 +43,7 @@ public class GetSystemErrorsQueryHandler
         return Result<SystemErrorsPage_GetDto>.Success(dto);
     }
 
-    // EF materializes datetime2 as DateTimeKind.Unspecified, so System.Text.Json emits no trailing "Z"
-    // and the FE's new Date(v) would treat these UTC instants as LOCAL. This column is written as UTC, so
-    // stamp Kind=Utc here (a LOCAL fix, not a global converter) — same as the other Logs handlers.
+    // EF materializes datetime2 as DateTimeKind.Unspecified, so stamp Kind=Utc here for the trailing "Z"
+    // — the same local fix the other Logs handlers use.
     private static DateTime AsUtc(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Utc);
 }

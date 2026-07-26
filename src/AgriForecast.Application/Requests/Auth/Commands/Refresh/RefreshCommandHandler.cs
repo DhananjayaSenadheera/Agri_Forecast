@@ -25,8 +25,7 @@ public class RefreshCommandHandler : IRequestHandler<RefreshCommand, Result<Auth
 
     public async Task<Result<AuthResponseDto>> Handle(RefreshCommand request, CancellationToken cancellationToken)
     {
-        // Same generic failure message for every invalid case (missing / malformed / expired /
-        // wrong-type token, deleted user) so nothing leaks about why the refresh was rejected.
+        // One generic message for every invalid case so nothing leaks about why the refresh was rejected.
         const string invalidMessage = "Invalid or expired refresh token.";
 
         var subject = _jwtTokenGenerator.ValidateRefreshToken(request.RefreshToken);

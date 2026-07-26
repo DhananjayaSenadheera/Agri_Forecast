@@ -22,9 +22,8 @@ public class GetCropTimelineQueryHandler
     public async Task<Result<CropTimelineDto>> Handle(
         GetCropTimelineQuery request, CancellationToken cancellationToken)
     {
-        // Read-only: consume the Python ML service /timeline verbatim.
-        // Crops with no history come back with empty history + Low confidence -
-        // that is a valid response, not a failure; pass it straight through.
+        // Consume the ML /timeline response verbatim. A crop with no history returns empty history and Low
+        // confidence — a valid response, not a failure.
         var timeline = await _predictionClient.GetTimelineAsync(
             request.CropId, request.AsOf, request.Months, cancellationToken);
 

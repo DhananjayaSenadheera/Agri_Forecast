@@ -2,25 +2,17 @@ using AgriForecast.Domain.Interfaces;
 
 namespace AgriForecast.Application.common;
 
-// "Today's price" as EVERY farmer-facing screen must agree it is defined.
-//
-// Two screens put this number in front of the same farmer minutes apart: the
-// harvest forecast ("Not recommended: forecast below today's price") and the best
-// harvest window ("plant here, expect Rs X"). If each derived its own current
-// price they could disagree, and the app would recommend a window whose forecast
-// the other screen calls a loss. One definition, one query, both callers.
+// One definition of "today's price", shared by the harvest forecast and the best-harvest-window screens.
+// Both put the number in front of the same farmer minutes apart, so they must never disagree.
 public static class CurrentPriceRule
 {
-    // Trailing rows averaged for the current price (agri-ml-engineer: one noisy
-    // market day must not be able to flip a verdict). Not a per-caller choice.
+    // Trailing rows averaged, so one noisy market day cannot flip a verdict. Not a per-caller choice.
     public const int TrailingRows = 14;
 
-    // Average daily mid (Min+Max)/2 over the newest TrailingRows rows with
-    // PriceDate <= asOf. The asOf bound prevents lookahead leakage: a historical
-    // decision date must never see prices observed after it.
-    //
-    // Returns 0 when the crop has no recent prices. That is "unknown" — callers
-    // surface it as such; they must never invent a price nor turn it into an error.
+    // Average daily mid (Min+Max)/2 over the newest TrailingRows rows with PriceDate <= asOf. The asOf
+    // bound prevents lookahead: a historical decision date must never see prices observed after it.
+    // Returns 0 when the crop has no recent prices — that means "unknown", and callers must surface it
+    // as such rather than inventing a price.
     public static async Task<(decimal CurrentPrice, DateOnly? LatestObservation)> ComputeAsync(
         IMarketPriceRepository marketPriceRepository,
         Guid cropId,

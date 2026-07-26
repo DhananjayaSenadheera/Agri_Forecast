@@ -3,8 +3,8 @@ using FluentValidation;
 
 namespace AgriForecast.Application.Requests.Market.Validators;
 
-// Mirrors CropCreateValidator conventions. Name/District required; MarketType must be a defined
-// enum value (guards against an out-of-range int bound from the request body).
+// Name and District are required; MarketType must be a defined enum value, guarding an out-of-range int
+// bound from the request body.
 public class MarketCreateValidator : AbstractValidator<MarketCreateCommand>
 {
     public MarketCreateValidator()
