@@ -1,0 +1,9 @@
+# All AgriForecast cluster resources live in this namespace.
+# Delete the namespace to remove everything the manifests created
+# (the SQL Server database is OUTSIDE the cluster and is untouched).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agriforecast
+  labels:
+    app.kubernetes.io/part-of: agriforecast

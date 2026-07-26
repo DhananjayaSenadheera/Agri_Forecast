@@ -1,0 +1,50 @@
+# Monthly CBSL macro ingestion (CCPI + MEI) — the Kubernetes port of the
+# local run-monthly.sh. Unlike that script, NO password lives in this file:
+# credentials come from the agri-db secret. (The old run-monthly.sh hardcodes
+# the DB password and should be retired — and that password rotated — once
+# this CronJob is live.)
+#
+# "No new bulletin since watermark" is a legitimate SUCCESS with zero new
+# rows: CCPI/MEI publish monthly, so most runs between releases find nothing.
+#
+# SUSPENDED BY DEFAULT — same policy as the daily pipeline: unsuspend only
+# after one supervised manual run (see k8s/README.md).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: monthly-cbsl-macro
+  namespace: agriforecast
+  labels:
+    app: monthly-cbsl-macro
+    app.kubernetes.io/part-of: agriforecast
+spec:
+  schedule: "0 21 1 * *" # 1st of the month, 21:00 Colombo
+  timeZone: "Asia/Colombo"
+  suspend: true # unsuspend after a supervised run — see README
+  concurrencyPolicy: Forbid
+  # Monthly data is not perishable the way daily DEC prices are (the bulletin
+  # stays on the CBSL site), but a generous window still catches a sleeping
+  # machine.
+  startingDeadlineSeconds: 21600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            app: monthly-cbsl-macro
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: ingest-cbsl-macro
+              image: agriforecast-ml:latest
+              imagePullPolicy: IfNotPresent
+              command: ["python", "ingest_cbsl_macro.py"]
+              envFrom:
+                - secretRef: { name: agri-db }
+              env:
+                - name: AGRI_DB_HOST
+                  value: host.docker.internal # host-level sql_server_container

@@ -1,0 +1,93 @@
+# ML serving (FastAPI, agriforecast-ml:latest, uvicorn :8077).
+#
+# DELIBERATELY CLUSTER-INTERNAL: the /predict routes are unauthenticated by
+# design (only /admin/* checks X-API-Key), so network placement IS the
+# security boundary. ClusterIP only — no NodePort, no Ingress. The only
+# consumer is the forecast-api pod via http://ml-serving:8077.
+#
+# MODELS ARE NOT IN THE IMAGE. serving loads the promoted model at startup
+# (registry.load_promoted) from /app/models, mounted below via hostPath from
+# the repo working copy. CLOUD-PORTABILITY NOTE: hostPath only works because
+# this is single-node Docker Desktop with the repo on the same machine; in a
+# real cluster this becomes a PersistentVolumeClaim or object storage
+# (S3/Azure Blob) populated by the training job — swap the volume, nothing
+# else changes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-serving
+  namespace: agriforecast
+  labels:
+    app: ml-serving
+    app.kubernetes.io/part-of: agriforecast
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ml-serving
+  template:
+    metadata:
+      labels:
+        app: ml-serving
+    spec:
+      containers:
+        - name: ml-serving
+          image: agriforecast-ml:latest
+          imagePullPolicy: IfNotPresent # local image, no registry
+          ports:
+            - containerPort: 8077
+          envFrom:
+            - secretRef:
+                name: agri-db # AGRI_DB_* (host/port/name/user/password)
+            - secretRef:
+                name: agri-ml-key # ML_ADMIN_API_KEY (guards /admin/* routes)
+          env:
+            # Explicit env beats envFrom: the secret stores whatever the local
+            # .env has for the host (typically localhost); inside the cluster
+            # the host-level sql_server_container is reached via
+            # host.docker.internal (host port 1434 from AGRI_DB_PORT).
+            - name: AGRI_DB_HOST
+              value: host.docker.internal
+          volumeMounts:
+            - name: models
+              mountPath: /app/models
+              readOnly: true # serving only reads; training/promotion happen outside the cluster
+          # Startup can take a few seconds (model unpickle); give readiness a
+          # little slack before traffic, and be patient before restarting.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8077
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8077
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 3
+      volumes:
+        - name: models
+          hostPath:
+            # Docker Desktop shares /Users into its VM, so this resolves.
+            path: /Users/dhananjayasenadheera/Projects/Agri_Forecast/Project/Agri_Forecast/src/AgriForecast.ML/models
+            type: Directory # fail fast at scheduling if the path is missing
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-serving
+  namespace: agriforecast
+  labels:
+    app: ml-serving
+    app.kubernetes.io/part-of: agriforecast
+spec:
+  type: ClusterIP # internal-only on purpose — see header comment
+  selector:
+    app: ml-serving
+  ports:
+    - name: http
+      port: 8077
+      targetPort: 8077
