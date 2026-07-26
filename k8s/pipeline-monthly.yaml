@@ -7,8 +7,9 @@
 # "No new bulletin since watermark" is a legitimate SUCCESS with zero new
 # rows: CCPI/MEI publish monthly, so most runs between releases find nothing.
 #
-# SUSPENDED BY DEFAULT — same policy as the daily pipeline: unsuspend only
-# after one supervised manual run (see k8s/README.md).
+# LIVE SCHEDULE since the 2026-07-26 cutover. The manifest must say
+# suspend: false — `kubectl apply` overwrites any live patch, so a manifest
+# still saying true silently re-suspends the schedule on the next apply.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -20,7 +21,7 @@ metadata:
 spec:
   schedule: "0 21 1 * *" # 1st of the month, 21:00 Colombo
   timeZone: "Asia/Colombo"
-  suspend: true # unsuspend after a supervised run — see README
+  suspend: false # live since the 2026-07-26 cutover — see header
   concurrencyPolicy: Forbid
   # Monthly data is not perishable the way daily DEC prices are (the bulletin
   # stays on the CBSL site), but a generous window still catches a sleeping
