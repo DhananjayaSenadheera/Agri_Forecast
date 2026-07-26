@@ -1,6 +1,8 @@
 using AgriForecast.Application.common;
 using AgriForecast.Application.Mapper;
 using AgriForecast.Application.Requests.PolicyFlag.DTOs;
+using AgriForecast.Application.Services;
+using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
 using MediatR;
 using Microsoft.Extensions.Logging;
@@ -13,15 +15,18 @@ public class PolicyFlagUpdateCommandHandler
     private readonly IPolicyFlagRepository _policyFlagRepository;
     private readonly ILogger<PolicyFlagUpdateCommandHandler> _logger;
     private readonly IUnitofWorkRepository _unitofWorkRepository;
+    private readonly IUserActivityAudit _activityAudit;
 
     public PolicyFlagUpdateCommandHandler(
         IPolicyFlagRepository policyFlagRepository,
         ILogger<PolicyFlagUpdateCommandHandler> logger,
-        IUnitofWorkRepository unitofWorkRepository)
+        IUnitofWorkRepository unitofWorkRepository,
+        IUserActivityAudit activityAudit)
     {
         _policyFlagRepository = policyFlagRepository;
         _logger = logger;
         _unitofWorkRepository = unitofWorkRepository;
+        _activityAudit = activityAudit;
     }
 
     public async Task<Result<PolicyFlag_MutationResultDto>> Handle(
@@ -54,6 +59,11 @@ public class PolicyFlagUpdateCommandHandler
         _logger.LogInformation(
             "Policy flag {Id} updated. EffectiveFrom: {EffectiveFrom:yyyy-MM-dd}, TrainingDataWarning: {HasWarning}",
             existing.Id, existing.EffectiveFrom, warning is not null);
+
+        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
+        // write can never turn a committed update into an error).
+        await _activityAudit.RecordPolicyFlagChangedAsync(
+            request.ActingUserId, ContentChangeAction.Updated, existing.Title, cancellationToken);
 
         var data = new PolicyFlag_MutationResultDto { Id = existing.Id, TrainingDataWarning = warning };
         return warning is null

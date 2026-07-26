@@ -1,5 +1,6 @@
 using AgriForecast.Application.Services;
 using AgriForecast.Domain.Entities;
+using AgriForecast.Domain.Enums;
 using AgriForecast.Infrastructure.Database;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -43,6 +44,65 @@ public class UserActivityAudit : IUserActivityAudit
 
     public Task RecordUserDeletedAsync(Guid actorUserId, Guid targetUserId, CancellationToken ct = default) =>
         WriteAsync(UserActivityEvent.UserDeleted(actorUserId, targetUserId, DateTime.UtcNow), ct);
+
+    // ── Admin CONTENT mutations ───────────────────────────────────────────────────────────────────
+
+    public Task RecordPolicyFlagChangedAsync(
+        Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default) =>
+        WriteAsync(UserActivityEvent.PolicyFlagChanged(
+            actingAdminId, RenderDetails(action, identifier), DateTime.UtcNow), ct);
+
+    public Task RecordFestivalChangedAsync(
+        Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default) =>
+        WriteAsync(UserActivityEvent.FestivalChanged(
+            actingAdminId, RenderDetails(action, identifier), DateTime.UtcNow), ct);
+
+    public Task RecordNewsEventChangedAsync(
+        Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default) =>
+        WriteAsync(UserActivityEvent.NewsEventChanged(
+            actingAdminId, RenderDetails(action, identifier), DateTime.UtcNow), ct);
+
+    public Task RecordCropChangedAsync(
+        Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default) =>
+        WriteAsync(UserActivityEvent.CropChanged(
+            actingAdminId, RenderDetails(action, identifier), DateTime.UtcNow), ct);
+
+    public Task RecordMarketChangedAsync(
+        Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default) =>
+        WriteAsync(UserActivityEvent.MarketChanged(
+            actingAdminId, RenderDetails(action, identifier), DateTime.UtcNow), ct);
+
+    // The ONE place the content Details note is rendered: "<verb> '<identifier>'" (e.g.
+    // "updated 'GARLIC-IMPORT-BAN'"). Rendering here — not at the thirteen call sites — is what keeps
+    // the note format identical everywhere and greppable by the admin Logs page.
+    //
+    // The identifier is trimmed and hard-capped to IdentifierMaxLength, which keeps the whole note
+    // WELL under the 500-char Details column even before the entity's own cap (an admin can type a
+    // very long title; the audit trail only needs enough to recognise the row). A blank identifier
+    // renders the bare verb rather than an empty-quoted "created ''".
+    public static string RenderDetails(ContentChangeAction action, string? identifier)
+    {
+        var verb = action switch
+        {
+            ContentChangeAction.Created => "created",
+            ContentChangeAction.Updated => "updated",
+            ContentChangeAction.Deleted => "deleted",
+            _ => action.ToString().ToLowerInvariant()
+        };
+
+        if (string.IsNullOrWhiteSpace(identifier))
+            return verb;
+
+        var trimmed = identifier.Trim();
+        if (trimmed.Length > IdentifierMaxLength)
+            trimmed = trimmed[..IdentifierMaxLength];
+
+        return $"{verb} '{trimmed}'";
+    }
+
+    // Deliberately far below the Details column's 500: these are handles (titles/keys/codes), not
+    // content. Leaves ample headroom for the verb + quotes under any future note prefix.
+    private const int IdentifierMaxLength = 120;
 
     // Single isolated, swallow-and-log write path shared by every event. Never rethrows.
     private async Task WriteAsync(UserActivityEvent activityEvent, CancellationToken ct)

@@ -41,11 +41,19 @@ public class LogsReadStore : ILogsReadStore
     }
 
     public async Task<UserActivityPage> GetUserActivityPageAsync(
-        int page, int pageSize, UserActivityEventType? type, CancellationToken ct = default)
+        int page, int pageSize, IReadOnlyCollection<UserActivityEventType>? types,
+        CancellationToken ct = default)
     {
         var q = _db.UserActivityLog.AsNoTracking();
-        if (type.HasValue)
-            q = q.Where(e => e.EventType == type.Value);
+
+        // OR-combined type filter. A single type is just a one-member set, so ?type= and ?types=
+        // share this one predicate (EF renders it as EventType IN (...) against the int column).
+        // A null/empty set is NO filter — never an "IN ()" that would return zero rows.
+        if (types is { Count: > 0 })
+        {
+            var typeList = types.Distinct().ToList();
+            q = q.Where(e => typeList.Contains(e.EventType));
+        }
 
         var total = await q.CountAsync(ct);
 

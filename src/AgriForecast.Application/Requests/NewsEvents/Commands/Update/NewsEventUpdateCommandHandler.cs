@@ -1,5 +1,7 @@
 using AgriForecast.Application.common;
 using AgriForecast.Application.Mapper;
+using AgriForecast.Application.Services;
+using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
 using MediatR;
 using Microsoft.Extensions.Logging;
@@ -11,15 +13,18 @@ public class NewsEventUpdateCommandHandler : IRequestHandler<NewsEventUpdateComm
     private readonly INewsEventRepository _newsEventRepository;
     private readonly ILogger<NewsEventUpdateCommandHandler> _logger;
     private readonly IUnitofWorkRepository _unitofWorkRepository;
+    private readonly IUserActivityAudit _activityAudit;
 
     public NewsEventUpdateCommandHandler(
         INewsEventRepository newsEventRepository,
         ILogger<NewsEventUpdateCommandHandler> logger,
-        IUnitofWorkRepository unitofWorkRepository)
+        IUnitofWorkRepository unitofWorkRepository,
+        IUserActivityAudit activityAudit)
     {
         _newsEventRepository = newsEventRepository;
         _logger = logger;
         _unitofWorkRepository = unitofWorkRepository;
+        _activityAudit = activityAudit;
     }
 
     public async Task<Result<Guid>> Handle(NewsEventUpdateCommand request, CancellationToken cancellationToken)
@@ -48,6 +53,11 @@ public class NewsEventUpdateCommandHandler : IRequestHandler<NewsEventUpdateComm
 
         _logger.LogInformation("News event {Id} updated (PublishedAt preserved: {PublishedAt:yyyy-MM-dd}).",
             existing.Id, existing.PublishedAt);
+        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
+        // write can never turn a committed update into an error).
+        await _activityAudit.RecordNewsEventChangedAsync(
+            request.ActingUserId, ContentChangeAction.Updated, existing.Title, cancellationToken);
+
         return Result<Guid>.Success(existing.Id);
     }
 }

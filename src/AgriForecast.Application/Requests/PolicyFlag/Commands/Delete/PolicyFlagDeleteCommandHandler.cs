@@ -1,5 +1,7 @@
 using AgriForecast.Application.common;
 using AgriForecast.Application.Requests.PolicyFlag.DTOs;
+using AgriForecast.Application.Services;
+using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
 using MediatR;
 using Microsoft.Extensions.Logging;
@@ -12,15 +14,18 @@ public class PolicyFlagDeleteCommandHandler
     private readonly IPolicyFlagRepository _policyFlagRepository;
     private readonly ILogger<PolicyFlagDeleteCommandHandler> _logger;
     private readonly IUnitofWorkRepository _unitofWorkRepository;
+    private readonly IUserActivityAudit _activityAudit;
 
     public PolicyFlagDeleteCommandHandler(
         IPolicyFlagRepository policyFlagRepository,
         ILogger<PolicyFlagDeleteCommandHandler> logger,
-        IUnitofWorkRepository unitofWorkRepository)
+        IUnitofWorkRepository unitofWorkRepository,
+        IUserActivityAudit activityAudit)
     {
         _policyFlagRepository = policyFlagRepository;
         _logger = logger;
         _unitofWorkRepository = unitofWorkRepository;
+        _activityAudit = activityAudit;
     }
 
     public async Task<Result<PolicyFlag_MutationResultDto>> Handle(
@@ -51,6 +56,11 @@ public class PolicyFlagDeleteCommandHandler
         _logger.LogInformation(
             "Policy flag {Id} deleted. EffectiveFrom: {EffectiveFrom:yyyy-MM-dd}, TrainingDataWarning: {HasWarning}",
             existing.Id, existing.EffectiveFrom, warning is not null);
+
+        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
+        // write can never turn a committed delete into an error).
+        await _activityAudit.RecordPolicyFlagChangedAsync(
+            request.ActingUserId, ContentChangeAction.Deleted, existing.Title, cancellationToken);
 
         var data = new PolicyFlag_MutationResultDto { Id = existing.Id, TrainingDataWarning = warning };
         return warning is null

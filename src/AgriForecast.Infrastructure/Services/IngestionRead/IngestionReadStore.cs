@@ -1,4 +1,5 @@
 using AgriForecast.Application.Services;
+using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Enums;
 using AgriForecast.Infrastructure.Database;
 using Microsoft.EntityFrameworkCore;
@@ -19,26 +20,43 @@ public class IngestionReadStore : IIngestionReadStore
 
     public IngestionReadStore(AgriForecastDbContext db) => _db = db;
 
-    public Task<int> GetRunCountAsync(CancellationToken ct = default) =>
-        _db.IngestionRuns.AsNoTracking().CountAsync(ct);
-
-    public async Task<DateTime?> GetLatestUnfinishedStartedUtcAsync(CancellationToken ct = default)
+    // Applies the caller-supplied source exclusion (null/empty = no exclusion). The POLICY of WHICH
+    // sources are excluded is the handler's (IngestionSources.ExcludedFromServiceState) — this store
+    // only applies what it is given, so /runs can keep listing rows the status card ignores.
+    // Materialized to a List because EF translates List.Contains to a SQL IN, and negated to
+    // NOT IN (...). Source is never null (non-nullable column), so no null-handling branch is needed.
+    private IQueryable<IngestionRun> RunsExcluding(IReadOnlyCollection<string>? excludeSources)
     {
-        var q = _db.IngestionRuns.AsNoTracking().Where(r => r.FinishedUtc == null);
+        var q = _db.IngestionRuns.AsNoTracking();
+        if (excludeSources is not { Count: > 0 }) return q;
+
+        var excluded = excludeSources.ToList();
+        return q.Where(r => !excluded.Contains(r.Source));
+    }
+
+    public Task<int> GetRunCountAsync(
+        IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default) =>
+        RunsExcluding(excludeSources).CountAsync(ct);
+
+    public async Task<DateTime?> GetLatestUnfinishedStartedUtcAsync(
+        IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default)
+    {
+        var q = RunsExcluding(excludeSources).Where(r => r.FinishedUtc == null);
         if (!await q.AnyAsync(ct)) return null;
         return await q.MaxAsync(r => r.StartedUtc, ct);
     }
 
-    public Task<IngestionRunHeadRow?> GetLatestRunAsync(CancellationToken ct = default) =>
-        _db.IngestionRuns.AsNoTracking()
+    public Task<IngestionRunHeadRow?> GetLatestRunAsync(
+        IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default) =>
+        RunsExcluding(excludeSources)
             .OrderByDescending(r => r.StartedUtc)
             .ThenByDescending(r => r.Id)
             .Select(r => new IngestionRunHeadRow(r.BatchId, r.StartedUtc))
             .FirstOrDefaultAsync(ct);
 
     public async Task<IReadOnlyList<IngestionRunStatus>> GetRunStatusesForBatchAsync(
-        Guid batchId, CancellationToken ct = default) =>
-        await _db.IngestionRuns.AsNoTracking()
+        Guid batchId, IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default) =>
+        await RunsExcluding(excludeSources)
             .Where(r => r.BatchId == batchId)
             .Select(r => r.Status)
             .ToListAsync(ct);

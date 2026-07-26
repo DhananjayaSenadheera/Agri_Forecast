@@ -13,21 +13,34 @@ namespace AgriForecast.Application.Services;
 public interface IIngestionReadStore
 {
     // ── STATUS ──────────────────────────────────────────────────────────────────────
-    // Total number of IngestionRun rows. 0 => the "unknown" state (nothing has ever run).
-    Task<int> GetRunCountAsync(CancellationToken ct = default);
+    // The four status reads below take an `excludeSources` set (null/empty = exclude nothing). The
+    // POLICY of which sources are not part of the ingestion service lives with the caller
+    // (GetIngestionStatusQueryHandler passes IngestionSources.ExcludedFromServiceState); the store
+    // only applies the set it is handed. That keeps one authority for the rule and lets the handler's
+    // derivation be unit-tested against canned rows. GetRunsPageAsync below is deliberately NOT
+    // filtered — /runs lists every real run row, including the excluded ones.
+
+    // Number of IngestionRun rows outside excludeSources. 0 => the "unknown" state (nothing that
+    // counts as ingestion has ever run).
+    Task<int> GetRunCountAsync(
+        IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default);
 
     // Max StartedUtc among runs with FinishedUtc == null (an unfinished / in-flight or crashed
-    // row), or null if none is unfinished. The handler compares this to the staleness window: a
-    // FRESH unfinished row => "running"; a STALE one (older than the window) => crashed => "stopped".
-    Task<DateTime?> GetLatestUnfinishedStartedUtcAsync(CancellationToken ct = default);
+    // row) outside excludeSources, or null if none is unfinished. The handler compares this to the
+    // staleness window: a FRESH unfinished row => "running"; a STALE one (older than the window) =>
+    // crashed => "stopped".
+    Task<DateTime?> GetLatestUnfinishedStartedUtcAsync(
+        IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default);
 
-    // The most recent run by StartedUtc (its BatchId + StartedUtc), or null if the table is empty.
-    // BatchId is used to aggregate the latest pass's outcome.
-    Task<IngestionRunHeadRow?> GetLatestRunAsync(CancellationToken ct = default);
+    // The most recent run by StartedUtc outside excludeSources (its BatchId + StartedUtc), or null if
+    // there is none. BatchId is used to aggregate the latest pass's outcome.
+    Task<IngestionRunHeadRow?> GetLatestRunAsync(
+        IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default);
 
-    // The IngestionRunStatus of every source row in a batch (for the latest-batch outcome roll-up).
+    // The IngestionRunStatus of every source row in a batch outside excludeSources (for the
+    // latest-batch outcome roll-up). A batch containing ONLY excluded rows yields an empty list.
     Task<IReadOnlyList<IngestionRunStatus>> GetRunStatusesForBatchAsync(
-        Guid batchId, CancellationToken ct = default);
+        Guid batchId, IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default);
 
     // The latest IngestionVerification row by RunUtc, or null (the table can be empty until the
     // Python writer — PR 2 — lands).

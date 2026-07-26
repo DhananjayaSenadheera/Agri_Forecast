@@ -1,10 +1,11 @@
-using AgriForecast.Application.Requests.PolicyFlag;
 using AgriForecast.Application.Requests.PolicyFlag.Commands.Create;
 using AgriForecast.Application.Requests.PolicyFlag.Commands.Delete;
 using AgriForecast.Application.Requests.PolicyFlag.Commands.Update;
 using AgriForecast.Application.Requests.PolicyFlag.DTOs;
 using AgriForecast.Application.Requests.PolicyFlag.Quaries.GetAll;
 using AgriForecast.Application.Requests.PolicyFlag.Validators;
+using AgriForecast.Application.Requests.PolicyFlag;
+using AgriForecast.Application.Services;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
@@ -22,6 +23,10 @@ namespace AgriForecast.Tests;
 /// </summary>
 public class PolicyFlagTests
 {
+    // The acting admin the controller would stamp from the JWT; fixed so audit assertions can
+    // name the exact actor rather than matching any Guid.
+    private static readonly Guid ActingAdmin = Guid.Parse("11111111-2222-3333-4444-555555555555");
+
     // ──────────────────────────────────────────────────────────────────────────────
     // Validator
     // ──────────────────────────────────────────────────────────────────────────────
@@ -294,7 +299,7 @@ public class PolicyFlagTests
 
     private static PolicyFlagUpdateCommandHandler UpdateHandler(
         Mock<IPolicyFlagRepository> repo, Mock<IUnitofWorkRepository> uow)
-        => new(repo.Object, Mock.Of<ILogger<PolicyFlagUpdateCommandHandler>>(), uow.Object);
+        => new(repo.Object, Mock.Of<ILogger<PolicyFlagUpdateCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
     private static PolicyFlag_UpdateDto UpdateDto(Guid id, DateTime from, DateTime? to = null) => new()
     {
@@ -407,14 +412,14 @@ public class PolicyFlagTests
 
     private static PolicyFlagDeleteCommandHandler DeleteHandler(
         Mock<IPolicyFlagRepository> repo, Mock<IUnitofWorkRepository> uow)
-        => new(repo.Object, Mock.Of<ILogger<PolicyFlagDeleteCommandHandler>>(), uow.Object);
+        => new(repo.Object, Mock.Of<ILogger<PolicyFlagDeleteCommandHandler>>(), uow.Object, Mock.Of<IUserActivityAudit>());
 
     [Fact]
     public async Task Delete_EmptyId_ReturnsFailure()
     {
         var (repo, uow) = MutationMocks();
 
-        var result = await DeleteHandler(repo, uow).Handle(new PolicyFlagDeleteCommand(Guid.Empty), default);
+        var result = await DeleteHandler(repo, uow).Handle(new PolicyFlagDeleteCommand(Guid.Empty, ActingAdmin), default);
 
         result.IsSuccess.Should().BeFalse();
         repo.Verify(r => r.GetByIdAsync(It.IsAny<Guid>()), Times.Never);
@@ -428,7 +433,7 @@ public class PolicyFlagTests
         var id = Guid.NewGuid();
         repo.Setup(r => r.GetByIdAsync(id)).ReturnsAsync((PolicyFlag?)null);
 
-        var result = await DeleteHandler(repo, uow).Handle(new PolicyFlagDeleteCommand(id), default);
+        var result = await DeleteHandler(repo, uow).Handle(new PolicyFlagDeleteCommand(id, ActingAdmin), default);
 
         result.IsSuccess.Should().BeFalse();
         result.Error.Should().NotBeNullOrEmpty();
@@ -445,7 +450,7 @@ public class PolicyFlagTests
         existing.Id = id;
         repo.Setup(r => r.GetByIdAsync(id)).ReturnsAsync(existing);
 
-        var result = await DeleteHandler(repo, uow).Handle(new PolicyFlagDeleteCommand(id), default);
+        var result = await DeleteHandler(repo, uow).Handle(new PolicyFlagDeleteCommand(id, ActingAdmin), default);
 
         result.IsSuccess.Should().BeTrue();
         result.Data.Id.Should().Be(id);
@@ -461,7 +466,7 @@ public class PolicyFlagTests
         var id = Guid.NewGuid();
         repo.Setup(r => r.GetByIdAsync(id)).ReturnsAsync(Flag("old", new DateTime(2099, 1, 1), null));
 
-        var result = await DeleteHandler(repo, uow).Handle(new PolicyFlagDeleteCommand(id), default);
+        var result = await DeleteHandler(repo, uow).Handle(new PolicyFlagDeleteCommand(id, ActingAdmin), default);
 
         result.IsSuccess.Should().BeTrue();
         result.Data.TrainingDataWarning.Should().BeNull();

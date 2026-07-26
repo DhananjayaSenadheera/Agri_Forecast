@@ -1,6 +1,7 @@
 using AgriForecast.Application.Requests.Admin.Ingestion.Queries.GetIngestionRuns;
 using AgriForecast.Application.Requests.Admin.Ingestion.Queries.GetIngestionStatus;
 using AgriForecast.Application.Services;
+using AgriForecast.Domain.Constants;
 using AgriForecast.Domain.Enums;
 using AgriForecast.Infrastructure.Services.IngestionRead;
 using FluentAssertions;
@@ -33,18 +34,70 @@ public class AdminIngestionHandlerTests
         public string? CapturedSource;
         public List<Guid>? CapturedBatchIds;
 
-        public Task<int> GetRunCountAsync(CancellationToken ct = default) => Task.FromResult(RunCount);
+        // The source-exclusion set the handler asked for on the LAST status read (null = it asked for
+        // none). Lets a test prove the handler actually passes the policy down, not just that the
+        // numbers happen to work out.
+        public IReadOnlyCollection<string>? CapturedExcluded;
 
-        public Task<DateTime?> GetLatestUnfinishedStartedUtcAsync(CancellationToken ct = default)
-            => Task.FromResult(LatestUnfinishedStartedUtc);
+        // RAW run rows. When this list is non-empty the four status reads are computed from it,
+        // honestly applying excludeSources exactly as the SQL store does — that is what makes the
+        // handler's state / lastRun derivation testable end-to-end. When it is EMPTY the canned
+        // scalar fields above are returned instead, so the pre-existing tests are untouched.
+        public List<FakeRun> Runs = new();
 
-        public Task<IngestionRunHeadRow?> GetLatestRunAsync(CancellationToken ct = default)
-            => Task.FromResult(LatestRun);
+        public sealed record FakeRun(
+            string Source, Guid BatchId, DateTime StartedUtc, DateTime? FinishedUtc,
+            IngestionRunStatus Status, Guid Id);
+
+        private bool UseRawRows => Runs.Count > 0;
+
+        private IEnumerable<FakeRun> Visible(IReadOnlyCollection<string>? excludeSources)
+        {
+            CapturedExcluded = excludeSources;
+            return excludeSources is { Count: > 0 }
+                ? Runs.Where(r => !excludeSources.Contains(r.Source))
+                : Runs;
+        }
+
+        public Task<int> GetRunCountAsync(
+            IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default)
+            => Task.FromResult(UseRawRows ? Visible(excludeSources).Count() : Capture(excludeSources, RunCount));
+
+        public Task<DateTime?> GetLatestUnfinishedStartedUtcAsync(
+            IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default)
+        {
+            if (!UseRawRows) return Task.FromResult(Capture(excludeSources, LatestUnfinishedStartedUtc));
+            var unfinished = Visible(excludeSources).Where(r => r.FinishedUtc == null).ToList();
+            return Task.FromResult(unfinished.Count == 0 ? null : (DateTime?)unfinished.Max(r => r.StartedUtc));
+        }
+
+        public Task<IngestionRunHeadRow?> GetLatestRunAsync(
+            IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default)
+        {
+            if (!UseRawRows) return Task.FromResult(Capture(excludeSources, LatestRun));
+            var latest = Visible(excludeSources)
+                .OrderByDescending(r => r.StartedUtc).ThenByDescending(r => r.Id)
+                .FirstOrDefault();
+            return Task.FromResult(latest is null ? null : new IngestionRunHeadRow(latest.BatchId, latest.StartedUtc));
+        }
 
         public Task<IReadOnlyList<IngestionRunStatus>> GetRunStatusesForBatchAsync(
-            Guid batchId, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<IngestionRunStatus>>(
-                BatchStatuses.TryGetValue(batchId, out var s) ? s : new List<IngestionRunStatus>());
+            Guid batchId, IReadOnlyCollection<string>? excludeSources = null, CancellationToken ct = default)
+        {
+            if (!UseRawRows)
+                return Task.FromResult<IReadOnlyList<IngestionRunStatus>>(
+                    Capture(excludeSources, BatchStatuses.TryGetValue(batchId, out var s) ? s : new List<IngestionRunStatus>()));
+
+            return Task.FromResult<IReadOnlyList<IngestionRunStatus>>(
+                Visible(excludeSources).Where(r => r.BatchId == batchId).Select(r => r.Status).ToList());
+        }
+
+        // Records what the handler asked to exclude even on the canned-scalar path.
+        private T Capture<T>(IReadOnlyCollection<string>? excludeSources, T value)
+        {
+            CapturedExcluded = excludeSources;
+            return value;
+        }
 
         public Task<IngestionVerificationRow?> GetLatestVerificationAsync(CancellationToken ct = default)
             => Task.FromResult(LatestVerification);
@@ -97,6 +150,166 @@ public class AdminIngestionHandlerTests
             null, null, null, null, null, null, null);
 
     // ── STATE derivation ───────────────────────────────────────────────────────────
+    // ── FEATURE_BUILD is excluded from the service-state derivation ─────────────────
+    //
+    // The Python feature-build step writes IngestionRuns rows with Source=FEATURE_BUILD. It runs LAST
+    // each day as a SOLO one-row batch, so if it counted it would be the permanent "latest run":
+    // lastRunStatus would read "succeeded" forever and the FE red-dot alarm could never fire for the
+    // four sources with no watermark row. These tests drive the handler from RAW rows so the whole
+    // derivation — not a canned scalar — is exercised.
+
+    private static FakeStore.FakeRun FRun(
+        string source, Guid batchId, DateTime startedUtc, DateTime? finishedUtc,
+        IngestionRunStatus status, Guid? id = null)
+        => new(source, batchId, startedUtc, finishedUtc, status, id ?? Guid.NewGuid());
+
+    [Fact]
+    public async Task NewestFeatureBuildRow_DoesNotChange_StateOrLastRunStatus()
+    {
+        var ingestionBatch = Guid.NewGuid();
+        var featureBatch = Guid.NewGuid();
+        var ingestionStarted = DateTime.UtcNow.AddMinutes(-30);
+
+        var withoutFeatureBuild = new FakeStore
+        {
+            Runs =
+            {
+                FRun(IngestionSources.DambullaDec, ingestionBatch, ingestionStarted,
+                    ingestionStarted.AddMinutes(1), IngestionRunStatus.Failed),
+                FRun(IngestionSources.Weather, ingestionBatch, ingestionStarted,
+                    ingestionStarted.AddMinutes(1), IngestionRunStatus.Succeeded)
+            }
+        };
+
+        // Identical, PLUS a newest FEATURE_BUILD row in its own later solo batch.
+        var withFeatureBuild = new FakeStore
+        {
+            Runs =
+            {
+                FRun(IngestionSources.DambullaDec, ingestionBatch, ingestionStarted,
+                    ingestionStarted.AddMinutes(1), IngestionRunStatus.Failed),
+                FRun(IngestionSources.Weather, ingestionBatch, ingestionStarted,
+                    ingestionStarted.AddMinutes(1), IngestionRunStatus.Succeeded),
+                FRun(IngestionSources.FeatureBuild, featureBatch, DateTime.UtcNow.AddMinutes(-1),
+                    DateTime.UtcNow, IngestionRunStatus.Succeeded)
+            }
+        };
+
+        var before = await Status(withoutFeatureBuild);
+        var after = await Status(withFeatureBuild);
+
+        after.State.Should().Be(before.State);
+        after.LastRunAtUtc.Should().Be(before.LastRunAtUtc,
+            "lastRunAtUtc must report the ingestion pass, not the feature build that followed it");
+        after.LastRunStatus.Should().Be(before.LastRunStatus);
+
+        // And concretely: the failed DAMBULLA_DEC row must still surface.
+        after.LastRunStatus.Should().Be("partial",
+            "a green feature build must never mask a failed ingestion source");
+    }
+
+    [Fact]
+    public async Task FeatureBuildRow_CannotMakeAFailedBatchLookSucceeded()
+    {
+        var ingestionBatch = Guid.NewGuid();
+        var started = DateTime.UtcNow.AddMinutes(-20);
+        var store = new FakeStore
+        {
+            Runs =
+            {
+                FRun(IngestionSources.DambullaDec, ingestionBatch, started, started.AddMinutes(1),
+                    IngestionRunStatus.Failed),
+                // Same batch, so an unfiltered roll-up would soften "failed" into "partial".
+                FRun(IngestionSources.FeatureBuild, ingestionBatch, started.AddMinutes(2),
+                    started.AddMinutes(3), IngestionRunStatus.Succeeded)
+            }
+        };
+
+        var dto = await Status(store);
+
+        dto.LastRunStatus.Should().Be("failed");
+    }
+
+    [Fact]
+    public async Task HungFeatureBuildRow_DoesNotReportTheIngestionServiceAsRunning()
+    {
+        var store = new FakeStore
+        {
+            Runs =
+            {
+                // A finished ingestion pass...
+                FRun(IngestionSources.DambullaDec, Guid.NewGuid(), DateTime.UtcNow.AddMinutes(-40),
+                    DateTime.UtcNow.AddMinutes(-39), IngestionRunStatus.Succeeded),
+                // ...and a feature build still open (no FinishedUtc), well inside the staleness window.
+                FRun(IngestionSources.FeatureBuild, Guid.NewGuid(), DateTime.UtcNow.AddMinutes(-2),
+                    null, IngestionRunStatus.Running)
+            }
+        };
+
+        var dto = await Status(store);
+
+        dto.State.Should().Be("stopped",
+            "state describes the INGESTION service; a hung feature build is not it running");
+    }
+
+    [Fact]
+    public async Task OnlyFeatureBuildRunsEverRecorded_State_Unknown()
+    {
+        var store = new FakeStore
+        {
+            Runs =
+            {
+                FRun(IngestionSources.FeatureBuild, Guid.NewGuid(), DateTime.UtcNow.AddMinutes(-5),
+                    DateTime.UtcNow, IngestionRunStatus.Succeeded)
+            }
+        };
+
+        var dto = await Status(store);
+
+        dto.State.Should().Be("unknown", "no ingestion has ever run");
+        dto.LastRunAtUtc.Should().BeNull();
+        dto.LastRunStatus.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task StatusHandler_PassesTheExclusionPolicyToTheStore()
+    {
+        var store = new FakeStore { RunCount = 0 };
+
+        await Status(store);
+
+        store.CapturedExcluded.Should().BeEquivalentTo(IngestionSources.ExcludedFromServiceState);
+        store.CapturedExcluded.Should().Contain(IngestionSources.FeatureBuild);
+    }
+
+    // GET /runs is deliberately NOT filtered — these are real run rows and the admin must be able to
+    // see (and filter to) them.
+    [Fact]
+    public async Task RunsList_StillShowsFeatureBuildRows_AndTheSourceFilterAcceptsIt()
+    {
+        var store = new FakeStore();
+        store.AllRuns.Add(Run(Guid.NewGuid(), IngestionSources.FeatureBuild, DateTime.UtcNow));
+        store.AllRuns.Add(Run(Guid.NewGuid(), IngestionSources.DambullaDec, DateTime.UtcNow.AddMinutes(-5)));
+
+        var all = (await RunsHandler(store).Handle(new GetIngestionRunsQuery(), default)).Data;
+        all.Items.Should().HaveCount(2);
+
+        var filtered = (await RunsHandler(store).Handle(
+            new GetIngestionRunsQuery { Source = "feature_build" }, default)).Data;
+        filtered.Items.Should().ContainSingle()
+            .Which.Source.Should().Be(IngestionSources.FeatureBuild);
+    }
+
+    [Fact]
+    public async Task RunsValidator_AcceptsFeatureBuildAsAKnownSource()
+    {
+        var result = await new GetIngestionRunsValidator().ValidateAsync(
+            new GetIngestionRunsQuery { Page = 1, PageSize = 20, Source = IngestionSources.FeatureBuild });
+
+        result.IsValid.Should().BeTrue(
+            "the rows are listed by GET /runs, so they must also be filterable there");
+    }
+
     [Fact]
     public async Task EmptyRunsTable_State_Unknown()
     {

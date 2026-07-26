@@ -1,3 +1,4 @@
+using AgriForecast.API.Extensions;
 using AgriForecast.Application.Requests.PolicyFlag.Commands.Create;
 using AgriForecast.Application.Requests.PolicyFlag.Commands.Delete;
 using AgriForecast.Application.Requests.PolicyFlag.Commands.Update;
@@ -28,6 +29,13 @@ public class PolicyFlagController(IMediator mediator) : ControllerBase
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Create([FromBody] PolicyFlagCreateCommand command)
     {
+        // Stamp the acting admin from the JWT (never the body): the audit row must name who really
+        // made the change, and a body-supplied ActingUserId is discarded here.
+        var actingId = this.GetActingUserId();
+        if (actingId is null)
+            return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
+        command.ActingUserId = actingId.Value;
+
         var result = await mediator.Send(command);
         if (result.IsSuccess)
             return Ok(result.Data);
@@ -42,6 +50,13 @@ public class PolicyFlagController(IMediator mediator) : ControllerBase
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Update([FromBody] PolicyFlagUpdateCommand command)
     {
+        // Stamp the acting admin from the JWT (never the body): the audit row must name who really
+        // made the change, and a body-supplied ActingUserId is discarded here.
+        var actingId = this.GetActingUserId();
+        if (actingId is null)
+            return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
+        command.ActingUserId = actingId.Value;
+
         var result = await mediator.Send(command);
         if (result.IsSuccess)
             return Ok(result.Data);
@@ -54,7 +69,13 @@ public class PolicyFlagController(IMediator mediator) : ControllerBase
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Delete(Guid id)
     {
-        var result = await mediator.Send(new PolicyFlagDeleteCommand(id));
+        // Stamp the acting admin from the JWT, never the route: the audit row must name who really
+        // deleted the row.
+        var actingId = this.GetActingUserId();
+        if (actingId is null)
+            return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
+
+        var result = await mediator.Send(new PolicyFlagDeleteCommand(id, actingId.Value));
         if (result.IsSuccess)
             return Ok(result.Data);
 

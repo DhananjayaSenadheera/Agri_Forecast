@@ -1,5 +1,7 @@
 using AgriForecast.Application.common;
 using AgriForecast.Application.Mapper;
+using AgriForecast.Application.Services;
+using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
 using MediatR;
 using Microsoft.Extensions.Logging;
@@ -11,12 +13,14 @@ public class CropUpdateCommandHandler : IRequestHandler<CropUpdateCommand, Resul
     private readonly ICropRepository _cropRepository;
     private readonly IUnitofWorkRepository _unitOfWork;
     private ILogger <CropUpdateCommandHandler> _logger;
+    private readonly IUserActivityAudit _activityAudit;
 
-    public CropUpdateCommandHandler(ICropRepository cropRepository, IUnitofWorkRepository unitOfWork, ILogger<CropUpdateCommandHandler> logger)
+    public CropUpdateCommandHandler(ICropRepository cropRepository, IUnitofWorkRepository unitOfWork, ILogger<CropUpdateCommandHandler> logger, IUserActivityAudit activityAudit)
     {
         _cropRepository = cropRepository;
         _unitOfWork = unitOfWork;
         _logger = logger;
+        _activityAudit = activityAudit;
     }
     public async Task<Result<bool>> Handle(CropUpdateCommand request, CancellationToken cancellationToken)
     {
@@ -36,6 +40,11 @@ public class CropUpdateCommandHandler : IRequestHandler<CropUpdateCommand, Resul
         await _cropRepository.UpdateAsync(crop);
         await _unitOfWork.CommitAsync();
         _logger.LogInformation("Crop with ID {CropId} updated successfully.", crop.Id);
+        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
+        // write can never turn a committed update into an error).
+        await _activityAudit.RecordCropChangedAsync(
+            request.ActingUserId, ContentChangeAction.Updated, crop.CropCode, cancellationToken);
+
         return Result<bool>.Success(true);
     }
 }
