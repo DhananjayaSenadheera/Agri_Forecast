@@ -143,7 +143,10 @@ def _incumbent_hybrid_mae() -> float | None:
 
     A candidate must beat the incumbent hybrid, not just a naive baseline. Returns None when
     nothing is promoted yet or the incumbent predates the field, which makes the incumbent
-    gate a no-op. Comparable by construction: a retrain changes the fit, not the data.
+    gate a no-op. Comparable only while the feature store is unchanged: if the frame widens
+    (new crops/history, as at v17) the recorded incumbent MAE is from a different data frame
+    and the comparison is invalid — the guardrail does not yet detect this (open chip
+    task_c9cd4432: fingerprint the store and re-score the incumbent on frame change).
     """
     from ..registry import registry
     live = registry.load_promoted_metadata()
