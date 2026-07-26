@@ -17,61 +17,27 @@ Design notes
   The app module is imported once at module level; the dependency function
   (require_api_key) reads os.getenv() at call time, so per-test monkeypatching
   works without any module reimport.
-- agriforecast_ml.serving.predict is stubbed at module level via sys.modules so
-  that its heavyweight registry/DB call at import time never executes in this
-  test file.  The stub provides just enough surface for app.py to import cleanly.
+- agriforecast_ml.serving.predict is stubbed via the module-scoped
+  serving_app_with_stubbed_predict fixture (tests/conftest.py) so that its
+  heavyweight registry/DB call at import time never executes in this test
+  file.  The fixture restores sys.modules on teardown, so the stub cannot
+  leak into other test files during a full-suite run.
 - ingest_news and score_news are stubbed inside TestAdminAuthAccepts via
   patch.dict so that the real pipeline is never invoked.
 """
 from __future__ import annotations
 
 import sys
-from pathlib import Path
-from types import ModuleType
 from unittest.mock import MagicMock, patch
 
-# ---------------------------------------------------------------------------
-# Path setup: allow `import agriforecast_ml` from the ML project root.
-# ---------------------------------------------------------------------------
-ML_ROOT = Path(__file__).resolve().parents[1]
-if str(ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(ML_ROOT))
+import pytest
+from starlette.testclient import TestClient
 
-# ---------------------------------------------------------------------------
-# Stub out agriforecast_ml.serving.predict BEFORE app.py is imported.
-#
-# app.py does:  from . import predict
-# predict.py does at module level:  _PAYLOAD, _META = registry.load_promoted()
-# which triggers DB access.  We replace the entire module with a lightweight
-# stub so the serving app can be imported in a pure unit-test context.
-# ---------------------------------------------------------------------------
 
-_predict_stub = ModuleType("agriforecast_ml.serving.predict")
-_predict_stub.model_info = MagicMock(return_value={"version": "v-test", "status": "stub"})
-_predict_stub.predict_harvest = MagicMock(
-    return_value={
-        "cropId": "stub-crop",
-        "cropName": "Stub",
-        "plantDate": "2026-01-15",
-        "harvestDate": "2026-04-15",
-        "growthPeriodDays": 90,
-        "predictedPrice": 100.0,
-        "lowerBound": 80.0,
-        "upperBound": 120.0,
-        "confidence": "Medium",
-        "activePredictor": "stub",
-        "modelVersion": "v-test",
-        "explanation": "stub",
-        "topFactors": [],
-    }
-)
-_predict_stub.timeline = MagicMock(return_value={"stub": True})
-
-sys.modules.setdefault("agriforecast_ml.serving.predict", _predict_stub)
-
-# Now it is safe to import the app.
-from agriforecast_ml.serving.app import app  # noqa: E402
-from starlette.testclient import TestClient   # noqa: E402
+@pytest.fixture(scope="module")
+def app(serving_app_with_stubbed_predict):
+    """The serving app, imported with serving.predict stubbed (hermetic)."""
+    return serving_app_with_stubbed_predict
 
 # ---------------------------------------------------------------------------
 # Constants used across tests.
@@ -89,7 +55,7 @@ ENV_VAR = "ML_ADMIN_API_KEY"
 class TestAdminAuthRejects:
     """Requests to /admin/* without a valid key must be rejected with 401."""
 
-    def test_no_header_returns_401(self, monkeypatch):
+    def test_no_header_returns_401(self, monkeypatch, app):
         """Case 1: no X-API-Key header at all -> 401."""
         monkeypatch.setenv(ENV_VAR, CORRECT_KEY)
         client = TestClient(app, raise_server_exceptions=False)
@@ -99,7 +65,7 @@ class TestAdminAuthRejects:
             f"Body: {resp.text}"
         )
 
-    def test_wrong_header_returns_401(self, monkeypatch):
+    def test_wrong_header_returns_401(self, monkeypatch, app):
         """Case 2: X-API-Key header present but value is wrong -> 401."""
         monkeypatch.setenv(ENV_VAR, CORRECT_KEY)
         client = TestClient(app, raise_server_exceptions=False)
@@ -113,7 +79,7 @@ class TestAdminAuthRejects:
             f"Body: {resp.text}"
         )
 
-    def test_empty_string_header_returns_401(self, monkeypatch):
+    def test_empty_string_header_returns_401(self, monkeypatch, app):
         """Edge: X-API-Key header set to empty string -> 401 (not allowed)."""
         monkeypatch.setenv(ENV_VAR, CORRECT_KEY)
         client = TestClient(app, raise_server_exceptions=False)
@@ -127,7 +93,7 @@ class TestAdminAuthRejects:
             f"Body: {resp.text}"
         )
 
-    def test_error_body_is_json_with_detail(self, monkeypatch):
+    def test_error_body_is_json_with_detail(self, monkeypatch, app):
         """401 response body must be valid JSON with a 'detail' key."""
         monkeypatch.setenv(ENV_VAR, CORRECT_KEY)
         client = TestClient(app, raise_server_exceptions=False)
@@ -145,7 +111,7 @@ class TestAdminAuthRejects:
 class TestAdminAuthAccepts:
     """Correct X-API-Key must pass the auth layer (response is NOT 401 or 403)."""
 
-    def test_correct_key_is_not_401(self, monkeypatch):
+    def test_correct_key_is_not_401(self, monkeypatch, app):
         """Case 3: correct X-API-Key -> auth passes; must NOT be 401 or 403."""
         monkeypatch.setenv(ENV_VAR, CORRECT_KEY)
         client = TestClient(app, raise_server_exceptions=False)
@@ -167,7 +133,7 @@ class TestAdminAuthAccepts:
             f"Body: {resp.text}"
         )
 
-    def test_correct_key_pipeline_returns_200(self, monkeypatch):
+    def test_correct_key_pipeline_returns_200(self, monkeypatch, app):
         """With correct key and stubbed pipeline, endpoint must return 200."""
         monkeypatch.setenv(ENV_VAR, CORRECT_KEY)
         client = TestClient(app, raise_server_exceptions=False)
@@ -200,7 +166,7 @@ class TestFailClosed:
     """Server misconfiguration (env var absent/empty) must fail closed (5xx),
     never accidentally grant access."""
 
-    def test_env_var_unset_returns_5xx(self, monkeypatch):
+    def test_env_var_unset_returns_5xx(self, monkeypatch, app):
         """Case 4a: ML_ADMIN_API_KEY not present in environment -> 5xx."""
         monkeypatch.delenv(ENV_VAR, raising=False)
         client = TestClient(app, raise_server_exceptions=False)
@@ -214,7 +180,7 @@ class TestFailClosed:
             f"got {resp.status_code}. Body: {resp.text}"
         )
 
-    def test_env_var_empty_returns_5xx(self, monkeypatch):
+    def test_env_var_empty_returns_5xx(self, monkeypatch, app):
         """Case 4b: ML_ADMIN_API_KEY set to empty string -> 5xx."""
         monkeypatch.setenv(ENV_VAR, "")
         client = TestClient(app, raise_server_exceptions=False)
@@ -228,7 +194,7 @@ class TestFailClosed:
             f"got {resp.status_code}. Body: {resp.text}"
         )
 
-    def test_env_var_unset_does_not_return_2xx(self, monkeypatch):
+    def test_env_var_unset_does_not_return_2xx(self, monkeypatch, app):
         """Fail-closed: unset key must never yield a 2xx response."""
         monkeypatch.delenv(ENV_VAR, raising=False)
         client = TestClient(app, raise_server_exceptions=False)
@@ -242,7 +208,7 @@ class TestFailClosed:
             f"got {resp.status_code}. Body: {resp.text}"
         )
 
-    def test_env_var_unset_detail_describes_misconfiguration(self, monkeypatch):
+    def test_env_var_unset_detail_describes_misconfiguration(self, monkeypatch, app):
         """5xx body detail must mention misconfiguration, not leak internals."""
         monkeypatch.delenv(ENV_VAR, raising=False)
         client = TestClient(app, raise_server_exceptions=False)
@@ -266,7 +232,7 @@ class TestPublicUnaffected:
     """Public routes (/health, /model-info) must work without X-API-Key
     after F-02 was applied."""
 
-    def test_health_no_key_returns_200(self, monkeypatch):
+    def test_health_no_key_returns_200(self, monkeypatch, app):
         """Case 5: /health with no X-API-Key header -> 200."""
         monkeypatch.setenv(ENV_VAR, CORRECT_KEY)
         client = TestClient(app, raise_server_exceptions=False)
@@ -276,7 +242,7 @@ class TestPublicUnaffected:
             f"got {resp.status_code}. Body: {resp.text}"
         )
 
-    def test_health_with_wrong_key_still_200(self, monkeypatch):
+    def test_health_with_wrong_key_still_200(self, monkeypatch, app):
         """Public /health must not be rejected even when X-API-Key is wrong."""
         monkeypatch.setenv(ENV_VAR, CORRECT_KEY)
         client = TestClient(app, raise_server_exceptions=False)
@@ -286,7 +252,7 @@ class TestPublicUnaffected:
             f"got {resp.status_code}. Body: {resp.text}"
         )
 
-    def test_health_env_var_unset_still_200(self, monkeypatch):
+    def test_health_env_var_unset_still_200(self, monkeypatch, app):
         """Even with ML_ADMIN_API_KEY unset, /health must return 200.
         Confirms fail-closed logic only fires on /admin/* routes."""
         monkeypatch.delenv(ENV_VAR, raising=False)
@@ -297,7 +263,7 @@ class TestPublicUnaffected:
             f"got {resp.status_code}. Body: {resp.text}"
         )
 
-    def test_model_info_no_key_returns_200(self, monkeypatch):
+    def test_model_info_no_key_returns_200(self, monkeypatch, app):
         """/model-info is public -- no key needed."""
         monkeypatch.setenv(ENV_VAR, CORRECT_KEY)
         client = TestClient(app, raise_server_exceptions=False)

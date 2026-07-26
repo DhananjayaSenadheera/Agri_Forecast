@@ -54,7 +54,7 @@ def test_explain_build_x_is_the_single_source():
     assert explain._build_X is build_x
 
 
-def test_predict_build_x_delegates_to_single_source():
+def test_predict_build_x_delegates_to_single_source(monkeypatch):
     """predict._build_X must route through the shared build_x for its payload."""
     import agriforecast_ml.serving.predict as P
 
@@ -71,12 +71,12 @@ def test_predict_build_x_delegates_to_single_source():
         captured["payload"] = payload
         return orig(row, payload)
 
-    P.build_x = _spy
-    try:
-        P._PAYLOAD = _PAYLOAD  # deterministic payload for the delegation check
-        out = P._build_X(_ROW)
-    finally:
-        P.build_x = orig
+    # monkeypatch (not bare assignment) so the real module's build_x AND
+    # _PAYLOAD are restored afterwards -- test_phase3 runs against this same
+    # module object later in a full-suite run.
+    monkeypatch.setattr(P, "build_x", _spy)
+    monkeypatch.setattr(P, "_PAYLOAD", _PAYLOAD)  # deterministic payload for the delegation check
+    out = P._build_X(_ROW)
 
     assert captured["payload"] is _PAYLOAD
     # predict passes its module payload; explain passes an explicit one -- same fn.
