@@ -10,6 +10,11 @@ namespace AgriForecast.Domain.Enums;
 // 5..9 are content events: one member per admin-mutable entity, not one per verb — create, update and
 // delete share the entity's member and are told apart by the Details note. For all five, ActorUserId is
 // the acting admin, TargetUserId is null, and Details carries the content's short identifier.
+//
+// 10..11 are pipeline-control events: an admin started, or asked to stop, the ingestion service. They
+// carry the acting admin as ActorUserId, no TargetUserId, and the pass's batchId in Details, so an
+// operator can join a control action to the IngestionRuns rows it produced. StopRequested is named for
+// what is actually knowable: the API signals cancellation, it does not witness the pass end.
 public enum UserActivityEventType
 {
     LoginSucceeded = 0,
@@ -21,5 +26,7 @@ public enum UserActivityEventType
     FestivalChanged = 6,
     NewsEventChanged = 7,
     CropChanged = 8,
-    MarketChanged = 9
+    MarketChanged = 9,
+    IngestionServiceStarted = 10,
+    IngestionServiceStopRequested = 11
 }

@@ -49,6 +49,13 @@ builder.Services.AddApplicationLayer();
 // Auth:BootstrapAdminUsername is set and no admin yet exists. No seeded credentials, no migration.
 builder.Services.AddHostedService<AgriForecast.API.Startup.AdminBootstrapHostedService>();
 
+// The API can now RUN an ingestion pass (POST /api/admin/ingestion/service/start), which needs settings
+// that used to belong to the Ingestion Worker alone. Fail loud at boot if they are absent, rather than
+// letting the admin press start and collect a screenful of red run rows. Secrets are deliberately not
+// checked here — see IngestionPassConfiguration for why.
+AgriForecast.Infrastructure.Services.IngestionControl.IngestionPassConfiguration
+    .ThrowIfIncomplete(builder.Configuration);
+
 // JWT bearer authentication. The signing key comes from the "Jwt" config section
 // (dev placeholder in appsettings; MUST be an env/secret-store value in production).
 var jwtSettings = builder.Configuration.GetSection(JwtSettings.SectionName).Get<JwtSettings>()

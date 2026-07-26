@@ -65,6 +65,18 @@ public static class InfsDependencyInjection
         // the Application layer.
         services.AddScoped<IIngestionStatusSettings, AgriForecast.Infrastructure.Services.IngestionRead.IngestionStatusSettings>();
 
+        // Ingestion service control (admin start/stop) — shared by the API and the Ingestion Worker.
+        // All three are SINGLETON on purpose:
+        //  * the pass runner self-scopes and must outlive the request that started it;
+        //  * the hosted-pass registry is the process's memory of "what can I stop" and would be amnesiac
+        //    per request;
+        //  * the launcher is stateless but is captured by work that outlives its scope.
+        // The lock is singleton too — it holds no lease itself, it hands one out per acquisition.
+        services.AddSingleton<IIngestionPassRunner, AgriForecast.Infrastructure.Services.IngestionControl.IngestionPassRunner>();
+        services.AddSingleton<IIngestionPassLock, AgriForecast.Infrastructure.Services.IngestionControl.SqlIngestionPassLock>();
+        services.AddSingleton<IApiHostedIngestionPasses, AgriForecast.Infrastructure.Services.IngestionControl.ApiHostedIngestionPasses>();
+        services.AddSingleton<IBackgroundWorkLauncher, AgriForecast.Infrastructure.Services.IngestionControl.BackgroundWorkLauncher>();
+
         // Per-source ingestion watermark store. (The HARTI and CBSL typed HttpClients are registered further
         // down with the other typed clients.)
         services.AddScoped<IIngestionWatermarkRepository, IngestionWatermarkRepository>();
