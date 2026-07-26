@@ -11,10 +11,8 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace AgriForecast.API.Controllers;
 
-// Reads are open to any authenticated user ([Authorize] at class level). Mutations (create/update/
-// delete) are Admin-only (API-9): they change the crop dimension the ML model trains/serves on, so
-// a farmer must not be able to touch them. Method-level [Authorize(Roles = "Admin")] overrides the
-// class-level policy for those actions.
+// Reads are open to any authenticated user. Mutations are Admin-only: they change the crop dimension the
+// ML model trains and serves on, so a farmer must not be able to touch them.
 [ApiController]
 [Route("api/crops")]
 [Authorize]
@@ -32,8 +30,7 @@ public class CropController(IMediator mediator) : ControllerBase
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> CreateCrop([FromBody] CropCreateCommand command)
     {
-        // Stamp the acting admin from the JWT (never the body): the audit row must name who really
-        // made the change, and a body-supplied ActingUserId is discarded here.
+        // The acting admin comes from the JWT, never the request body, so the audit row cannot be forged.
         var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
@@ -42,7 +39,6 @@ public class CropController(IMediator mediator) : ControllerBase
         var result = await mediator.Send(command);
         if (result.IsSuccess)
             return Ok(result.Data);
-            //return StatusCode(statusCode: StatusCodes.Status201Created);
 
         return BadRequest(ToErrorResponse(result.Error));
     }
@@ -51,8 +47,7 @@ public class CropController(IMediator mediator) : ControllerBase
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Update([FromBody] CropUpdateCommand command)
     {
-        // Stamp the acting admin from the JWT (never the body): the audit row must name who really
-        // made the change, and a body-supplied ActingUserId is discarded here.
+        // The acting admin comes from the JWT, never the request body, so the audit row cannot be forged.
         var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
@@ -61,7 +56,6 @@ public class CropController(IMediator mediator) : ControllerBase
         var result = await mediator.Send(command);
         if (result.IsSuccess)
             return Ok(result.Data);
-            //return Task.FromResult<IActionResult>(StatusCode(statusCode: StatusCodes.Status204NoContent));
             
         return BadRequest(ToErrorResponse(result.Error));
     }
@@ -72,7 +66,6 @@ public class CropController(IMediator mediator) : ControllerBase
         var result = await mediator.Send(new CropGetByIdQuery(id));
         if (result.IsSuccess)
             return Ok(result.Data);
-            //return Task.FromResult<IActionResult>(StatusCode(statusCode: StatusCodes.Status204NoContent));
         return BadRequest(ToErrorResponse(result.Error));
     }
     
@@ -82,22 +75,19 @@ public class CropController(IMediator mediator) : ControllerBase
         var result = await mediator.Send(new CropGetAllQuery());
         if (result.IsSuccess)           
             return Ok(result.Data);
-            //return Task.FromResult<IActionResult>(StatusCode(statusCode: StatusCodes.Status204NoContent));
         return BadRequest(ToErrorResponse(result.Error));
     }
     [HttpDelete("delete/{id}")]
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> DeleteCrop(Guid id)
     {
-        // Stamp the acting admin from the JWT, never the route: the audit row must name who really
-        // deleted the row.
+        // The acting admin comes from the JWT, never the route, so the audit row cannot be forged.
         var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
 
         var result = await mediator.Send(new CropDeleteCommand(id, actingId.Value));
         if (result.IsSuccess)            return Ok(result.Data);
-            //return Task.FromResult<IActionResult>(StatusCode(statusCode: StatusCodes.Status204NoContent));
         return BadRequest(ToErrorResponse(result.Error));
     }
     

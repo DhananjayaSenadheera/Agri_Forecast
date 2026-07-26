@@ -5,10 +5,8 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace AgriForecast.API.Controllers;
 
-// Observed market-price history (API-2). Distinct from ForecastController: this serves
-// REAL past observations (a daily low-high envelope), never a forecast. Route matches the
-// FE proposal in src/api/types.ts / fixtures.ts: GET /api/prices/crop/{cropId}/history.
-// [Authorize] like the rest of the data surface.
+// Observed market-price history. Distinct from ForecastController: this serves real past observations (a
+// daily low-high envelope), never a forecast.
 [ApiController]
 [Route("api/prices")]
 [Authorize]

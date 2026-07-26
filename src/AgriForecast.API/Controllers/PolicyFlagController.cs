@@ -23,14 +23,13 @@ public class PolicyFlagController(IMediator mediator) : ControllerBase
         }
     };
 
-    // Policy flags feed the forecasting model (as-of joins) — creating one is Admin-only (API-9).
-    // The GET below stays [Authorize] (any authenticated user may read active flags).
+    // Policy flags feed the forecasting model, so creating one is Admin-only. The GET below stays plain
+    // [Authorize] — any authenticated user may read active flags.
     [HttpPost("create")]
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Create([FromBody] PolicyFlagCreateCommand command)
     {
-        // Stamp the acting admin from the JWT (never the body): the audit row must name who really
-        // made the change, and a body-supplied ActingUserId is discarded here.
+        // The acting admin comes from the JWT, never the request body, so the audit row cannot be forged.
         var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
@@ -43,15 +42,13 @@ public class PolicyFlagController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // PUT /api/policy-flag/update -> full-object update keyed by id; Admin-only (as-of-joined ML data).
-    // 200 with { id, trainingDataWarning } on success (warning non-null when the flag's window — old
-    // or new — is in the past); validation/guard failures -> 400 house error; not-found -> 400 failure.
+    // PUT /api/policy-flag/update -> full-object update keyed by id; Admin-only. 200 with
+    // { id, trainingDataWarning }; the warning is non-null when the old or new window is in the past.
     [HttpPut("update")]
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Update([FromBody] PolicyFlagUpdateCommand command)
     {
-        // Stamp the acting admin from the JWT (never the body): the audit row must name who really
-        // made the change, and a body-supplied ActingUserId is discarded here.
+        // The acting admin comes from the JWT, never the request body, so the audit row cannot be forged.
         var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
@@ -69,8 +66,7 @@ public class PolicyFlagController(IMediator mediator) : ControllerBase
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Delete(Guid id)
     {
-        // Stamp the acting admin from the JWT, never the route: the audit row must name who really
-        // deleted the row.
+        // The acting admin comes from the JWT, never the route, so the audit row cannot be forged.
         var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
