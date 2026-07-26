@@ -5,22 +5,15 @@ using FluentAssertions;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Tests for PasswordHasher (PBKDF2 via ASP.NET Core Identity PasswordHasher&lt;User&gt;).
-/// These are pure unit tests — no DI, no DB.
-///
-/// BUG DOCUMENTED: Verify_GarbageHash_ThrowsFormatException confirms that the
-/// production PasswordHasher.Verify() propagates FormatException when given a
-/// non-base64 string, instead of returning false. The fix is to catch the exception
-/// in PasswordHasher.Verify() and return false.
-/// See: AgriForecast.Infrastructure/Security/PasswordHasher.cs line 23 (Verify method).
+/// Tests for PasswordHasher (PBKDF2 via ASP.NET Core Identity's PasswordHasher). Pure unit tests: no DI,
+/// no DB.
+/// </summary>
 /// </summary>
 public class PasswordHasherTests
 {
     private readonly PasswordHasher _hasher = new();
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 1. Round-trip: Hash then Verify returns true
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 1. Round-trip: Hash then Verify returns true.
 
     [Fact]
     public void Hash_ThenVerify_SamePassword_ReturnsTrue()
@@ -40,9 +33,7 @@ public class PasswordHasherTests
         _hasher.Verify(hash, "WrongPassword456").Should().BeFalse();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 2. Plaintext must never equal its hash
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 2. Plaintext must never equal its hash.
 
     [Fact]
     public void Hash_Result_IsNotPlaintext()
@@ -53,9 +44,7 @@ public class PasswordHasherTests
         hash.Should().NotBe(password, "PBKDF2 hash must differ from the plaintext");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 3. Same password produces different salts (hashes are not identical)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 3. The same password produces different salts, so the hashes differ.
 
     [Fact]
     public void Hash_SamePassword_TwiceDifferentHash()
@@ -67,11 +56,8 @@ public class PasswordHasherTests
         hash1.Should().NotBe(hash2, "each call embeds a unique random salt");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 4. A malformed / non-base64 stored hash must be treated as a MISMATCH (false),
-    //    never as an unhandled exception. (Regression test for a fixed bug: Verify()
-    //    previously let FormatException from the Identity hasher escape.)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 4. A malformed or non-base64 stored hash must be treated as a MISMATCH, never an unhandled exception.
+    //    Regression test for a fixed bug where FormatException escaped Verify().
 
     [Fact]
     public void Verify_GarbageHash_ReturnsFalse()
@@ -80,9 +66,7 @@ public class PasswordHasherTests
             "a corrupted/garbage stored hash is a mismatch, not a crash");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 5. Edge-case passwords
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 5. Edge-case passwords.
 
     [Theory]
     [InlineData("12345678")]              // minimum 8 chars
@@ -94,9 +78,7 @@ public class PasswordHasherTests
         _hasher.Verify(hash, password).Should().BeTrue();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 6. Empty password against a real hash returns false (not a throw)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 6. An empty password against a real hash returns false rather than throwing.
 
     [Fact]
     public void Verify_EmptyStringPassword_AgainstRealHash_ReturnsFalse()

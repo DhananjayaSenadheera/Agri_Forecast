@@ -9,15 +9,14 @@ using FluentAssertions;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Logs hub PR A — unit tests for the admin Logs read handlers (GetTrainingRuns / GetUserActivity),
-/// their validators, and the UserActivityEventStrings wire-string mapping. The DB is faked via a
-/// canned ILogsReadStore so paging math + total, the newest-first + Id-DESC tiebreak, the event-type
-/// filter/canonicalization, enum -> frozen wire string, and the UTC-kind stamp are exercised in
-/// isolation. NOT covered here: the store's EF LINQ (verified by build + the live-DB conventions).
+/// Unit tests for the admin Logs read handlers, their validators, and the UserActivityEventStrings wire
+/// mapping. The DB is faked via a canned ILogsReadStore, so paging math, the newest-first + Id-DESC
+/// tiebreak, the event-type filter, the enum -> frozen wire string mapping and the UTC-kind stamp run in
+/// isolation. The store's EF LINQ is not covered here.
 /// </summary>
 public class AdminLogsHandlerTests
 {
-    // ── Fake read store: real in-memory order/page/filter over canned rows ─────────────
+    // Fake read store: real in-memory ordering, paging and filtering over canned rows.
     private sealed class FakeStore : ILogsReadStore
     {
         public List<TrainingRunRow> Training = new();
@@ -86,7 +85,7 @@ public class AdminLogsHandlerTests
         Guid? actor = null, Guid? target = null, string? username = null, string? details = null)
         => new(occurredUtc, type, actor, target, username, details);
 
-    // ── TRAINING: paging + total ────────────────────────────────────────────────────
+    // TRAINING: paging and total.
     [Fact]
     public async Task Training_PagingMath_ReturnsRequestedPageAndTotal()
     {
@@ -142,7 +141,7 @@ public class AdminLogsHandlerTests
         dto.Total.Should().Be(0);
     }
 
-    // ── USER-ACTIVITY: paging + tiebreak + filter + mapping ─────────────────────────
+    // USER-ACTIVITY: paging, tiebreak, filter and mapping.
     [Fact]
     public async Task Activity_Tiebreak_SameTimestamp_OrdersByIdDesc()
     {
@@ -224,7 +223,7 @@ public class AdminLogsHandlerTests
         item.Details.Should().Be("role -> Admin");
     }
 
-    // ── Wire-string mapping is total + frozen ───────────────────────────────────────
+    // Wire-string mapping is total and frozen.
     [Theory]
     [InlineData(UserActivityEventType.LoginSucceeded, "loginSucceeded")]
     [InlineData(UserActivityEventType.LoginFailed, "loginFailed")]
@@ -249,7 +248,7 @@ public class AdminLogsHandlerTests
         ((int)type).Should().Be(expected);
     }
 
-    // ── CONTENT events: the five appended types ─────────────────────────────────────
+    // CONTENT events: the five appended types.
     [Theory]
     [InlineData(UserActivityEventType.PolicyFlagChanged, "policyFlagChanged")]
     [InlineData(UserActivityEventType.FestivalChanged, "festivalChanged")]
@@ -310,7 +309,7 @@ public class AdminLogsHandlerTests
         item.Details.Should().Be("deleted 'VEG000071'");
     }
 
-    // ── ?types= : OR-combined multi filter ──────────────────────────────────────────
+    // ?types= : the OR-combined multi filter.
     private static FakeStore MixedActivityStore()
     {
         var store = new FakeStore();
@@ -400,7 +399,7 @@ public class AdminLogsHandlerTests
         dto.Items.Should().ContainSingle().Which.EventType.Should().Be("policyFlagChanged");
     }
 
-    // ── ?types= validation ──────────────────────────────────────────────────────────
+    // ?types= validation.
     [Theory]
     [InlineData("notAType")]
     [InlineData("cropChanged,notAType")]            // ONE bad token rejects the WHOLE list
@@ -442,7 +441,7 @@ public class AdminLogsHandlerTests
         result.IsValid.Should().BeTrue();
     }
 
-    // ── SYSTEM-ERRORS: paging + newest-first tiebreak + mapping ─────────────────────
+    // SYSTEM-ERRORS: paging, newest-first tiebreak and mapping.
     [Fact]
     public async Task Errors_PagingMath_ReturnsRequestedPageAndTotal()
     {
@@ -501,7 +500,7 @@ public class AdminLogsHandlerTests
         dto.Total.Should().Be(0);
     }
 
-    // ── VALIDATION ──────────────────────────────────────────────────────────────────
+    // Validation.
     private readonly GetTrainingRunsValidator _trainingValidator = new();
     private readonly GetUserActivityValidator _activityValidator = new();
     private readonly GetSystemErrorsValidator _errorsValidator = new();

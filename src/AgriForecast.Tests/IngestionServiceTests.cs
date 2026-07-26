@@ -24,7 +24,7 @@ namespace AgriForecast.Tests;
 /// </summary>
 public class IngestionServiceTests
 {
-    // ── Test doubles ─────────────────────────────────────────────────────────────────────────
+    // Test doubles.
 
     private sealed class StubHttpMessageHandler : HttpMessageHandler
     {
@@ -93,7 +93,7 @@ public class IngestionServiceTests
     private static HttpClient ClientFrom(StubHttpMessageHandler handler)
         => new(handler) { BaseAddress = new Uri("http://ml.test/") };
 
-    // ── HARTI: happy path advances the watermark ─────────────────────────────────────────────
+    // HARTI: the happy path advances the watermark.
 
     [Fact]
     public async Task Harti_Success_AdvancesWatermark_AndSendsApiKeyAndSinceDate()
@@ -137,10 +137,9 @@ public class IngestionServiceTests
             "the raw watermark must not be sent as sinceDate — the look-back must be applied");
     }
 
-    // ── HARTI: IngestAsync returns run-tracking stats mapped from the Python response ─────────
-    // (ingestion run-tracking foundation). The Worker attaches these to the source's IngestionRun
-    // row: inserted -> RowsInserted, skippedNoMarket -> RowsSkipped, and the coverage window is the
-    // requested resume lower bound (watermark - lookback) .. the newest landed ObservedDate.
+    // HARTI: IngestAsync returns run-tracking stats mapped from the Python response. The Worker attaches
+    // these to the run row: inserted -> RowsInserted, skippedNoMarket -> RowsSkipped, and the coverage
+    // window runs from the requested resume lower bound to the newest landed ObservedDate.
     [Fact]
     public async Task Harti_Success_ReturnsStats_MappedFromResponse()
     {
@@ -169,7 +168,7 @@ public class IngestionServiceTests
         stats.CoveredFromDate.Should().Be(new DateOnly(2026, 6, 22));
     }
 
-    // ── HARTI: a disabled early-return reports Outcome=Skipped (S1 — never a green success) ────
+    // HARTI: a disabled early return reports Outcome=Skipped, never a green success.
     [Fact]
     public async Task Harti_Disabled_ReportsSkippedOutcome()
     {
@@ -191,7 +190,7 @@ public class IngestionServiceTests
         stats.RowsInserted.Should().BeNull();
     }
 
-    // ── HARTI: a non-200 fail-safe early-return reports Outcome=Failed + reason (S1) ──────────
+    // HARTI: a non-200 fail-safe early return reports Outcome=Failed plus a reason.
     [Fact]
     public async Task Harti_HttpError_ReportsFailedOutcome_WithReason_WithoutThrowing()
     {
@@ -213,7 +212,7 @@ public class IngestionServiceTests
         stats.FailureReason.Should().Contain("502", "the run-row reason mirrors the watermark reason");
     }
 
-    // ── HARTI: look-back window is configurable ──────────────────────────────────────────────
+    // HARTI: the look-back window is configurable.
 
     [Fact]
     public async Task Harti_SinceDate_HonoursConfiguredLookbackDays()
@@ -239,7 +238,7 @@ public class IngestionServiceTests
             "a configured look-back of 3 days must be subtracted from the watermark");
     }
 
-    // ── HARTI: null watermark => full backfill (sinceDate omitted/null) ───────────────────────
+    // HARTI: a null watermark means a full backfill (sinceDate omitted).
 
     [Fact]
     public async Task Harti_NullWatermark_SendsNullSinceDate_ForFullBackfill()
@@ -262,7 +261,7 @@ public class IngestionServiceTests
             "a null watermark must serialise sinceDate as null (full backfill), never a fabricated date");
     }
 
-    // ── HARTI: missing key fails loud ────────────────────────────────────────────────────────
+    // HARTI: a missing admin key fails loud.
 
     [Fact]
     public async Task Harti_Throws_WhenAdminKeyMissing()
@@ -281,7 +280,7 @@ public class IngestionServiceTests
         handler.Calls.Should().Be(0, "no HTTP call must be made without an admin key");
     }
 
-    // ── HARTI: transport/HTTP failure holds the resume point (never throws to the Worker) ─────
+    // HARTI: a transport or HTTP failure holds the resume point and never throws to the Worker.
 
     [Fact]
     public async Task Harti_HttpError_RecordsFailure_ButDoesNotThrow_NorAdvanceResumePoint()
@@ -323,7 +322,7 @@ public class IngestionServiceTests
         wms.Peek(HartiBulletinIngestionService.SourceKey)!.Status.Should().Be(IngestionSourceStatus.Failed);
     }
 
-    // ── HARTI: a Disabled watermark is a no-op (no HTTP, not a failure) ──────────────────────
+    // HARTI: a Disabled watermark is a no-op — no HTTP call, and not a failure.
 
     [Fact]
     public async Task Harti_DisabledWatermark_IsNoOp_AndMakesNoHttpCall()
@@ -347,7 +346,7 @@ public class IngestionServiceTests
             "a disabled source stays disabled — it is never mistaken for a failure");
     }
 
-    // ── CBSL: flag off is a no-op (no HTTP) that is NOT a failure ────────────────────────────
+    // CBSL: flag off is a no-op (no HTTP call) that is not a failure.
 
     [Fact]
     public async Task Cbsl_FlagOff_IsNoOp_MakesNoHttpCall_AndIsNotAFailure()
@@ -370,7 +369,7 @@ public class IngestionServiceTests
         wm.Status.Should().NotBe(IngestionSourceStatus.Failed, "a disabled source is never a failure");
     }
 
-    // ── CBSL: enabled happy path triggers /admin/ingest-cbsl and advances the watermark ──────
+    // CBSL: the enabled happy path triggers /admin/ingest-cbsl and advances the watermark.
 
     [Fact]
     public async Task Cbsl_Enabled_TriggersMlPass_ReportsCounts_AndAdvancesWatermark()
@@ -404,7 +403,7 @@ public class IngestionServiceTests
         wm.LastObservedDate.Should().Be(new DateOnly(2026, 7, 21), "a confirmed success advances the resume point");
     }
 
-    // ── CBSL: enabling the flag overrides the flag-off era's Disabled watermark ──────────────
+    // CBSL: enabling the flag overrides the flag-off era's Disabled watermark.
 
     [Fact]
     public async Task Cbsl_Enabled_RunsEvenIfWatermarkWasLeftDisabled_ByTheFlagOffEra()
@@ -434,7 +433,7 @@ public class IngestionServiceTests
             "a successful enabled pass flips the flag-off era's Disabled state to Ok");
     }
 
-    // ── CBSL: missing admin key fails loud; failures hold the resume point ───────────────────
+    // CBSL: a missing admin key fails loud, and failures hold the resume point.
 
     [Fact]
     public async Task Cbsl_Enabled_Throws_WhenAdminKeyMissing()
@@ -495,8 +494,7 @@ public class IngestionServiceTests
         wms.Peek(CbslPriceReportIngestionService.SourceKey)!.Status.Should().Be(IngestionSourceStatus.Failed);
     }
 
-    // ── CBSL MACRO (P3, 86cahefbh): disabled by default is a no-op that makes no HTTP call and is
-    //    NOT a failure ─────────────────────────────────────────────────────────────────────────
+    // CBSL MACRO: disabled by default is a no-op that makes no HTTP call and is not a failure.
 
     [Fact]
     public async Task CbslMacro_DefaultDisabled_IsNoOp_MakesNoHttpCall_AndIsNotAFailure()
@@ -519,8 +517,8 @@ public class IngestionServiceTests
         wm.Status.Should().NotBe(IngestionSourceStatus.Failed, "a disabled source is never a failure");
     }
 
-    // ── CBSL MACRO: enabled path calls the seam, sends the admin key, and records per-series
-    //    watermarks from perSeriesCoverage ─────────────────────────────────────────────────────
+    // CBSL MACRO: the enabled path calls the seam, sends the admin key, and records per-series watermarks
+    // from perSeriesCoverage.
 
     [Fact]
     public async Task CbslMacro_Enabled_CallsSeam_SendsApiKey_AndRecordsPerSeriesWatermarks()
@@ -558,7 +556,7 @@ public class IngestionServiceTests
             .Status.Should().Be(IngestionSourceStatus.Ok);
     }
 
-    // ── CBSL MACRO: enabled but no admin key fails LOUD (no HTTP call) ────────────────────────
+    // CBSL MACRO: enabled but with no admin key fails loud, with no HTTP call.
 
     [Fact]
     public async Task CbslMacro_Enabled_Throws_WhenAdminKeyMissing()
@@ -578,7 +576,7 @@ public class IngestionServiceTests
         handler.Calls.Should().Be(0, "no HTTP call must be made without an admin key");
     }
 
-    // ── CBSL MACRO: enabled path fails SAFE on transport error (records failure, never throws) ──
+    // CBSL MACRO: the enabled path fails safe on a transport error — records the failure, never throws.
 
     [Fact]
     public async Task CbslMacro_Enabled_HttpError_RecordsFailure_ButDoesNotThrow()

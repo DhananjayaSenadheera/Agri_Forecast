@@ -45,7 +45,7 @@ public class RefreshTokenGeneratorTests
     private static JwtSecurityToken Parse(string token)
         => new JwtSecurityTokenHandler().ReadJwtToken(token);
 
-    // ── generation ────────────────────────────────────────────────────────────────
+    // Generation.
 
     [Fact]
     public void GenerateRefreshToken_CarriesRefreshTokenUseClaim()
@@ -94,7 +94,7 @@ public class RefreshTokenGeneratorTests
             "the refresh token must not embed the mutable username");
     }
 
-    // ── validation happy path ───────────────────────────────────────────────────────
+    // Validation happy path.
 
     [Fact]
     public void ValidateRefreshToken_ValidToken_ReturnsUserId()
@@ -105,7 +105,7 @@ public class RefreshTokenGeneratorTests
         gen.ValidateRefreshToken(token).Should().Be(TestUserId.ToString());
     }
 
-    // ── jti round-trip (revocation-store support) ────────────────────────────────────
+    // jti round-trip (revocation-store support).
 
     [Fact]
     public void GenerateRefreshToken_WithSuppliedJti_EmbedsThatJti()
@@ -150,7 +150,7 @@ public class RefreshTokenGeneratorTests
         Assert.Null(gen.ReadValidatedRefreshToken(accessToken));
     }
 
-    // ── validation 401 matrix ───────────────────────────────────────────────────────
+    // Validation 401 matrix.
 
     [Theory]
     [InlineData(null)]
@@ -218,7 +218,7 @@ public class RefreshTokenGeneratorTests
         BuildGenerator(otherKey).ValidateRefreshToken(token).Should().BeNull();
     }
 
-    // ── token-type separation: refresh token rejected by the ACCESS (Bearer) pipeline ─
+    // Token-type separation: a refresh token is rejected by the access (Bearer) pipeline.
 
     [Fact]
     public void RefreshToken_RejectedByAccessTokenValidation()

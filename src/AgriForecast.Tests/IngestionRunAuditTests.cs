@@ -59,7 +59,7 @@ public class IngestionRunAuditTests
             .AddInMemoryCollection(pairs.Select(p => new KeyValuePair<string, string?>(p.Key, p.Value)))
             .Build();
 
-    // ── ResolveBatchId ───────────────────────────────────────────────────────────────────────
+    // ResolveBatchId.
 
     [Fact]
     public void ResolveBatchId_UsesConfiguredGuid_WhenPresentAndValid()
@@ -86,7 +86,7 @@ public class IngestionRunAuditTests
         batch.Should().NotBe(Guid.Empty, "an absent/invalid BatchId must fall back to a generated GUID");
     }
 
-    // ── Lifecycle: Running -> Succeeded with counts ──────────────────────────────────────────
+    // Lifecycle: Running -> Succeeded with counts.
 
     [Fact]
     public async Task RunTracked_Success_WithStats_RecordsRunningThenSucceededWithCounts()
@@ -123,7 +123,7 @@ public class IngestionRunAuditTests
         run.RowsInserted.Should().BeNull("a status-only source leaves counts null, never fabricated zeros");
     }
 
-    // ── Outcome mapping (S1): a fail-safe source's Outcome drives the terminal status ─────────
+    // Outcome mapping: a fail-safe source's Outcome drives the terminal status.
 
     [Fact]
     public async Task RunTracked_OutcomeFailed_RecordsFailed_WithSanitizedReason_AndDoesNotThrow()
@@ -154,7 +154,7 @@ public class IngestionRunAuditTests
         run.ErrorSummary.Should().BeNull();
     }
 
-    // ── Lifecycle: body throws -> Failed with sanitized error ────────────────────────────────
+    // Lifecycle: the body throws -> Failed with a sanitized error.
 
     [Fact]
     public async Task RunTracked_BodyThrows_RecordsFailed_WithSanitizedErrorSummary_AndDoesNotThrow()
@@ -173,7 +173,7 @@ public class IngestionRunAuditTests
         runs.UpdateCount.Should().Be(1);
     }
 
-    // ── Audit-write failures NEVER break the pass ────────────────────────────────────────────
+    // Audit-write failures never break the pass.
 
     [Fact]
     public async Task RunTracked_RunningInsertSaveFails_SourceStillRuns_AndPassDoesNotThrow()
@@ -218,7 +218,7 @@ public class IngestionRunAuditTests
         runs.Single!.Status.Should().Be(IngestionRunStatus.Failed);
     }
 
-    // ── B1: context isolation — an audit write must NOT flush the ingestion scoped context ────
+    // Context isolation: an audit write must not flush the ingestion scoped context.
 
     [Fact]
     public async Task AuditWrite_IsIsolatedFrom_TheIngestionScopedContext()

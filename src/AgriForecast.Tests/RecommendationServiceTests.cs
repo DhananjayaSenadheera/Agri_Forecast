@@ -46,9 +46,7 @@ public class RecommendationServiceTests
             Confidence = confidence
         };
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 1. Up + High → StronglyRecommended
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 1. Up + High -> StronglyRecommended.
 
     [Fact]
     public async Task DetermineRecommendation_UpHigh_IsStronglyRecommended()
@@ -69,9 +67,7 @@ public class RecommendationServiceTests
         result[0].RecommendationLevel.Should().Be(RecommendationLevel.StronglyRecommended);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 2. Up + Medium → Recommended
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 2. Up + Medium -> Recommended.
 
     [Fact]
     public async Task DetermineRecommendation_UpMedium_IsRecommended()
@@ -91,9 +87,7 @@ public class RecommendationServiceTests
         result[0].RecommendationLevel.Should().Be(RecommendationLevel.Recommended);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 3. Up + Low → RecommendedWithRisk
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 3. Up + Low -> RecommendedWithRisk.
 
     [Fact]
     public async Task DetermineRecommendation_UpLow_IsRecommendedWithRisk()
@@ -113,9 +107,7 @@ public class RecommendationServiceTests
         result[0].RecommendationLevel.Should().Be(RecommendationLevel.RecommendedWithRisk);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 4. Stable (any confidence) → RecommendedWithRisk
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 4. Stable, any confidence -> RecommendedWithRisk.
 
     [Theory]
     [InlineData(ForecastConfidence.Low)]
@@ -138,9 +130,7 @@ public class RecommendationServiceTests
         result[0].RecommendationLevel.Should().Be(RecommendationLevel.RecommendedWithRisk);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 5. Down (any confidence) → NotRecommended
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 5. Down, any confidence -> NotRecommended.
 
     [Theory]
     [InlineData(ForecastConfidence.Low)]
@@ -163,9 +153,7 @@ public class RecommendationServiceTests
         result[0].RecommendationLevel.Should().Be(RecommendationLevel.NotRecommended);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 6. Results are ordered by RecommendationLevel descending
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 6. Results are ordered by RecommendationLevel descending.
 
     [Fact]
     public async Task GetBestCrops_OrderedByRecommendationLevelDescending()
@@ -204,9 +192,7 @@ public class RecommendationServiceTests
         result[2].RecommendationLevel.Should().Be(RecommendationLevel.NotRecommended);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 7. Crops with no forecast history are excluded from results
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 7. Crops with no forecast history are excluded from the results.
 
     [Fact]
     public async Task GetBestCrops_EmptyForecast_CropExcluded()
@@ -223,9 +209,7 @@ public class RecommendationServiceTests
         result.Should().BeEmpty("a crop with no forecast data must not appear in results");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 8. No crops in DB → empty list (no exception)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 8. No crops in the DB -> empty list, no exception.
 
     [Fact]
     public async Task GetBestCrops_NoCrops_ReturnsEmpty()

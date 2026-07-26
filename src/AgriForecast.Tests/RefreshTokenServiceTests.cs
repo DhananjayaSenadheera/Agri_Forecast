@@ -10,12 +10,11 @@ using Moq;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Unit tests for the persisted refresh-token (jti / token-family) revocation state machine
-/// (RefreshTokenService). A REAL JwtTokenGenerator produces/validates the tokens so the jti travels
-/// end-to-end; the store (IRefreshTokenRepository) is mocked so each state transition is asserted in
-/// isolation. Pins: issue-persists-row, rotate-marks-used-and-chains-family, reuse-revokes-family,
-/// revoked/expired/unknown/crypto-invalid rejected, logout-revokes-family, delete/demote-revokes-user,
-/// and fail-closed on a store error.
+/// Unit tests for the persisted refresh-token (jti / token-family) revocation state machine. A REAL
+/// JwtTokenGenerator produces and validates the tokens so the jti travels end-to-end, while the store is
+/// mocked so each transition is asserted in isolation. Pins: issue persists a row, rotate marks used and
+/// chains the family, reuse revokes the family, revoked/expired/unknown/crypto-invalid are rejected,
+/// logout revokes the family, delete or demote revokes the user, and a store error fails closed.
 /// </summary>
 public class RefreshTokenServiceTests
 {
@@ -71,7 +70,7 @@ public class RefreshTokenServiceTests
         RevokedAtUtc = null
     };
 
-    // ── issue ────────────────────────────────────────────────────────────────────────
+    // Issue.
 
     [Fact]
     public async Task IssueNewFamily_PersistsRow_AndReturnsToken()
@@ -105,7 +104,7 @@ public class RefreshTokenServiceTests
         token.Should().BeNull("a token that could not be persisted must not be handed out (fail-safe)");
     }
 
-    // ── rotate: happy path ─────────────────────────────────────────────────────────────
+    // Rotate: happy path.
 
     [Fact]
     public async Task Rotate_ValidCurrentToken_MarksUsed_ChainsFamily_ReturnsNewToken()
@@ -159,7 +158,7 @@ public class RefreshTokenServiceTests
         store.Verify(s => s.AddAsync(It.IsAny<RefreshTokenRecord>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
-    // ── rotate: reuse detection ────────────────────────────────────────────────────────
+    // Rotate: reuse detection.
 
     [Fact]
     public async Task Rotate_AlreadyUsedToken_RevokesEntireFamily_AndFails()
@@ -193,7 +192,7 @@ public class RefreshTokenServiceTests
         store.Verify(s => s.AddAsync(It.IsAny<RefreshTokenRecord>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
-    // ── rotate: 401 matrix ─────────────────────────────────────────────────────────────
+    // Rotate: 401 matrix.
 
     [Fact]
     public async Task Rotate_UnknownJti_FailsClosed()
@@ -266,7 +265,7 @@ public class RefreshTokenServiceTests
         result.IsSuccess.Should().BeFalse("a store error must reject the refresh — never a stateless fallback");
     }
 
-    // ── logout ─────────────────────────────────────────────────────────────────────────
+    // Logout.
 
     [Fact]
     public async Task RevokeFamilyForToken_ValidToken_RevokesFamily()
@@ -293,7 +292,7 @@ public class RefreshTokenServiceTests
         store.Verify(s => s.RevokeFamilyAsync(It.IsAny<Guid>(), It.IsAny<DateTime>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
-    // ── admin delete / demote ────────────────────────────────────────────────────────────
+    // Admin delete or demote.
 
     [Fact]
     public async Task RevokeAllForUser_DelegatesToStore()

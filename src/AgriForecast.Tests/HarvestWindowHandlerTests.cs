@@ -198,9 +198,8 @@ public class HarvestWindowHandlerTests
         Assert.Equal(90, new GetHarvestWindowQuery().HorizonDays);
     }
 
-    // ── Current price ─────────────────────────────────────────────────────────────
-    // The panel shows this beside the window's expected price so the farmer can see
-    // whether the recommendation actually beats selling today.
+    // Current price: the panel shows this beside the window's expected price so the farmer can see whether
+    // the recommendation actually beats selling today.
 
     [Fact]
     public async Task Current_price_is_the_trailing_average_of_the_daily_mid()

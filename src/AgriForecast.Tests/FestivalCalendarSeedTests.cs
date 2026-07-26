@@ -5,14 +5,11 @@ using FluentAssertions;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Guards for the FestivalCalendarEntry HasData seed (R1 P2). The load-bearing invariant is that
-/// the seed spans the FULL training history (2015 → current+1) for every seeded festival: a
-/// forward-only seed would zero the festival feature for ~95% of training rows while CV still
-/// looks fine — the silent-bug trap called out in DECISIONS.md 2026-07-03.
-///
-/// Tests read the exact rows that land in HasData via <see cref="AgriForecastDbContext.GetFestivalCalendarSeed"/>
-/// (one source of truth, no EF-InMemory / DB round-trip). No wall-clock: the provisional boundary
-/// is asserted against a PINNED reference year, never DateTime.Now. Style mirrors PolicyFlagTests.cs.
+/// Guards for the FestivalCalendarEntry HasData seed. The load-bearing invariant is that the seed spans the
+/// FULL training history (2015 to current+1) for every seeded festival: a forward-only seed would zero the
+/// festival feature for most training rows while cross-validation still looked fine.
+/// Tests read the exact rows that land in HasData via AgriForecastDbContext.GetFestivalCalendarSeed(), and
+/// the provisional boundary is asserted against a PINNED reference year, never DateTime.Now.
 /// </summary>
 public class FestivalCalendarSeedTests
 {

@@ -11,9 +11,9 @@ using UserEntity = AgriForecast.Domain.Entities.User;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// API-9 — config-driven admin bootstrap. Verifies the one-time promotion path and every no-op path
-/// (config absent, admin already exists, named user missing). The hosted service opens a DI scope,
-/// so tests wire a real ServiceCollection around mocked repositories.
+/// Config-driven admin bootstrap: the one-time promotion path and every no-op path (config absent, an
+/// admin already exists, the named user missing). The hosted service opens a DI scope, so the tests wire a
+/// real ServiceCollection around mocked repositories.
 /// </summary>
 public class AdminBootstrapTests
 {

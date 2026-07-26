@@ -10,11 +10,10 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Behavioural tests for the SystemError entity + SystemErrorLog writer (Logs hub PR A / Phase 3).
-/// Load-bearing guarantees: (1) the factory hard-caps every over-long field and turns blanks into null
-/// so an over-long value can never reach SQL; (2) a write failure is swallowed-and-logged and NEVER
-/// throws into the request; (3) the process-wide storm guard admits at most 60 writes per rolling
-/// minute and drops the excess, admitting again in the next window.
+/// Behavioural tests for the SystemError entity and the SystemErrorLog writer. Load-bearing guarantees:
+/// the factory hard-caps every over-long field and turns blanks into null so an over-long value can never
+/// reach SQL; a write failure is swallowed and logged and never throws into the request; and the
+/// process-wide storm guard admits at most 60 writes per rolling minute, admitting again in the next window.
 /// </summary>
 public class SystemErrorLogTests
 {
@@ -70,7 +69,7 @@ public class SystemErrorLogTests
             .SystemErrors.CountAsync();
     }
 
-    // ── ENTITY CAPS ──────────────────────────────────────────────────────────────────
+    // Entity caps.
     [Fact]
     public void FromException_HardCaps_OverlongMessagePathAndStack()
     {
@@ -120,7 +119,7 @@ public class SystemErrorLogTests
         row.TraceId.Should().BeNull();
     }
 
-    // ── WRITER FAIL-SAFE ─────────────────────────────────────────────────────────────
+    // Writer fail-safe.
     [Fact]
     public async Task RecordAsync_WhenSaveFails_IsSwallowed_AndNeverThrows()
     {
@@ -161,7 +160,7 @@ public class SystemErrorLogTests
         row.TraceId.Should().Be("trace-9");
     }
 
-    // ── STORM GUARD ──────────────────────────────────────────────────────────────────
+    // Storm guard.
     [Fact]
     public async Task StormGuard_Admits60PerWindow_Drops61st_AndAdmitsAgainNextWindow()
     {

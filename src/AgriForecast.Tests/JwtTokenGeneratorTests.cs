@@ -10,15 +10,11 @@ using Microsoft.IdentityModel.Tokens;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Tests for JwtTokenGenerator.
-/// Verifies that issued tokens parse correctly, carry the right claims,
-/// and are signed with the configured key/issuer/audience.
-///
-/// NOTE: JwtSecurityTokenHandler.ValidateToken() maps short JWT claim names to
-/// ClaimTypes long URIs (e.g. "sub" → ClaimTypes.NameIdentifier,
-/// "email" → ClaimTypes.Email). Tests use ReadJwtToken() on the raw token string
-/// to examine claims before name-mapping, which is cleaner and matches what the
-/// .NET code actually emits.
+/// Tests for JwtTokenGenerator: issued tokens parse, carry the right claims, and are signed with the
+/// configured key, issuer and audience.
+/// Note: JwtSecurityTokenHandler.ValidateToken() maps short JWT claim names to the ClaimTypes URIs (sub ->
+/// NameIdentifier, email -> Email), so these tests use ReadJwtToken() on the raw token to examine claims
+/// before name-mapping — which is what the .NET code actually emits.
 /// </summary>
 public class JwtTokenGeneratorTests
 {
@@ -72,9 +68,7 @@ public class JwtTokenGeneratorTests
         return (JwtSecurityToken)secToken;
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 1. Token validates with the same key (no exception = pass)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 1. The token validates with the same key (no exception means pass).
 
     [Fact]
     public void Generate_Token_ValidatesWithSameKey()
@@ -89,10 +83,7 @@ public class JwtTokenGeneratorTests
         validate.Should().NotThrow("a freshly generated token must validate with its own signing key");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 2. Claims: Sub = user.Id.ToString()
-    //    Read from JwtSecurityToken.Claims (short names, no handler mapping).
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 2. Claims: Sub = user.Id.ToString(), read from JwtSecurityToken.Claims (short names, no mapping).
 
     [Fact]
     public void Generate_Token_ContainsSubjectClaim_MatchingUserId()
@@ -157,9 +148,7 @@ public class JwtTokenGeneratorTests
         role.Should().Be(user.Role);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 3. Issuer and Audience match configuration
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 3. Issuer and Audience match configuration.
 
     [Fact]
     public void Generate_Token_HasCorrectIssuer()
@@ -187,9 +176,7 @@ public class JwtTokenGeneratorTests
         parsed.Audiences.Should().Contain(settings.Audience);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 4. ExpiresAtUtc ≈ UtcNow + AccessTokenMinutes
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 4. ExpiresAtUtc is about UtcNow + AccessTokenMinutes.
 
     [Fact]
     public void Generate_ExpiresAtUtc_ApproximatelyNowPlusMinutes()
@@ -208,9 +195,7 @@ public class JwtTokenGeneratorTests
         expiresAtUtc.Should().BeOnOrAfter(expectedMin).And.BeOnOrBefore(expectedMax);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 5. Token signed with a different key must fail validation
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 5. A token signed with a different key must fail validation.
 
     [Fact]
     public void Generate_Token_FailsWithWrongKey()
@@ -234,9 +219,7 @@ public class JwtTokenGeneratorTests
             "a token signed with a different key must not validate");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 6. Jti claim is present and unique across calls (anti-replay seed)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 6. The jti claim is present and unique across calls (anti-replay seed).
 
     [Fact]
     public void Generate_EachToken_HasUniqueJti()

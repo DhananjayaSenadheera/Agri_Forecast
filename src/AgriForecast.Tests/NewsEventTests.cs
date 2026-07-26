@@ -17,12 +17,10 @@ using Moq;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// News-event (API-12) vertical slice — CAPTURE + STORAGE ONLY (NewsEvents are not yet ML feature
-/// inputs, so — unlike PolicyFlag / FestivalCalendar — there is no training-data-warning idiom).
-/// Pins: enum-int mapping fidelity, the validator matrix (title / eventType / direction / sourceUrl
-/// / publishedAt-required-on-create), PublishedAt IMMUTABILITY on update (the UpdateDto omits it and
-/// the handler preserves the stored vintage), empty read = Success + empty list, and crop/market
-/// link round-trip. Style mirrors FestivalCalendarTests.
+/// News-event vertical slice — capture and storage only, so unlike PolicyFlag and FestivalCalendar there is
+/// no training-data-warning idiom. Pins enum-int mapping fidelity, the validator matrix, PublishedAt
+/// immutability on update (the UpdateDto omits it and the handler preserves the stored vintage), an empty
+/// read returning Success plus an empty list, and the crop/market link round-trip.
 /// </summary>
 public class NewsEventTests
 {
@@ -75,9 +73,7 @@ public class NewsEventTests
         }
     };
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Mapping fidelity (enum ints + links round-trip)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Mapping fidelity (enum ints and the links round-trip).
 
     [Fact]
     public void ToEntity_PreservesEnumIntsAndDateOnly_AndBuildsLinks()
@@ -133,9 +129,7 @@ public class NewsEventTests
         dto.AffectedMarketIds.Should().ContainSingle().Which.Should().Be(marketId);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Create validator matrix
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Create validator matrix.
 
     [Fact]
     public async Task Create_ValidCommand_Passes()
@@ -237,9 +231,7 @@ public class NewsEventTests
         r.Errors.Should().Contain(e => e.PropertyName.Contains("AffectedCropIds"));
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Update validator
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Update validator.
 
     [Fact]
     public async Task Update_ValidCommand_Passes()
@@ -263,9 +255,7 @@ public class NewsEventTests
         typeof(NewsEvent_UpdateDto).GetProperty("PublishedAt").Should().BeNull();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Handlers
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Handlers.
 
     private static Mock<IUnitofWorkRepository> Uow() => new();
 
@@ -371,9 +361,7 @@ public class NewsEventTests
         uow.Verify(u => u.CommitAsync(), Times.Once);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // GetAll query handler
-    // ──────────────────────────────────────────────────────────────────────────────
+    // GetAll query handler.
 
     [Fact]
     public async Task GetAll_ReturnsMappedEvents()
@@ -407,15 +395,11 @@ public class NewsEventTests
         result.Data.Should().BeEmpty();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Link reconcile (repository) — diff semantics, never clear-and-re-add
-    // ──────────────────────────────────────────────────────────────────────────────
-    // SetCropLinks/SetMarketLinks run against a TRACKED entity graph. If a retained
-    // link were removed and re-added as a fresh instance, EF's identity map would hold
-    // two instances with the same composite key → tracking exception (500) on a routine
-    // update. The load-bearing property is therefore reference preservation: a retained
-    // link must keep its ORIGINAL instance. The methods touch only the entity (no
-    // DbContext use), so they are unit-tested directly.
+    // Link reconcile (repository) — diff semantics, never clear-and-re-add.
+    // SetCropLinks/SetMarketLinks run against a TRACKED entity graph. If a retained link were removed and
+    // re-added as a fresh instance, EF's identity map would hold two instances with the same composite key
+    // and throw on a routine update. So a retained link must keep its ORIGINAL instance. The methods touch
+    // only the entity, so they are unit-tested directly.
 
     private static NewsEventRepository ReconcileRepo() => new(null!);
 

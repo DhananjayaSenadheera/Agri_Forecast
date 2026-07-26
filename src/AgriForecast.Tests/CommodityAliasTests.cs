@@ -4,9 +4,8 @@ using FluentAssertions;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Unit tests for the CommodityAlias entity (R1.1 P1, ClickUp 86cahef4z) — the
-/// version-controlled source-label -> canonical-crop mapping table that replaces hardcoded
-/// aliases in parser logic (PRD risk R5). Style mirrors MarketDomainTests.cs.
+/// Unit tests for the CommodityAlias entity — the version-controlled source-label to canonical-crop
+/// mapping that replaces hardcoded aliases in parser logic.
 /// </summary>
 public class CommodityAliasTests
 {

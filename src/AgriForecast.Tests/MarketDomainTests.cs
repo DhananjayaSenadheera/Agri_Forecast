@@ -5,18 +5,14 @@ using FluentAssertions;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Regression tests for the new market-dimension entities (R1P1): Market, PriceObservation,
-/// MarketType. Style mirrors MapperTests.cs already in this project.
-///
-/// PriceObservation.Create's asOfUtc guard is the most important test in this file: it is the
-/// leakage safeguard that stops a forgetful ingestion path from writing AsOfUtc = 0001-01-01,
-/// which would make the row "already published" in every as-of window (look-ahead leakage).
+/// Regression tests for the market-dimension entities: Market, PriceObservation and MarketType.
+/// PriceObservation.Create's asOfUtc guard is the most important test here: it is the leakage safeguard
+/// that stops a forgetful ingestion path writing AsOfUtc = 0001-01-01, which would make the row
+/// "already published" in every as-of window.
 /// </summary>
 public class MarketDomainTests
 {
-    // ──────────────────────────────────────────────────────────────────────────────
-    // PriceObservation.Create — happy path
-    // ──────────────────────────────────────────────────────────────────────────────
+    // PriceObservation.Create — happy path.
 
     private static (Guid marketId, string commodityName, DateOnly observedDate, DateTime asOfUtc, string source)
         ValidArgs() => (
@@ -121,9 +117,7 @@ public class MarketDomainTests
             .Should().NotContain("retrievedAtUtc");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // PriceObservation.Create — THE LEAKAGE GUARD
-    // ──────────────────────────────────────────────────────────────────────────────
+    // PriceObservation.Create — THE LEAKAGE GUARD.
 
     [Fact]
     public void PriceObservation_Create_Throws_WhenAsOfUtcIsDefault()
@@ -179,9 +173,7 @@ public class MarketDomainTests
             .And.ParamName.Should().Be("source");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // PriceObservation.Create — AsOfUtc vs ObservedDate independence
-    // ──────────────────────────────────────────────────────────────────────────────
+    // PriceObservation.Create — AsOfUtc and ObservedDate stay independent.
 
     [Fact]
     public void PriceObservation_Create_KeepsAsOfUtcAndObservedDateDistinct_WhenPublishedLate()
@@ -216,9 +208,7 @@ public class MarketDomainTests
         obs.AsOfUtc.Should().Be(asOfUtc);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // PriceObservation.AssignCrop
-    // ──────────────────────────────────────────────────────────────────────────────
+    // PriceObservation.AssignCrop.
 
     [Fact]
     public void PriceObservation_AssignCrop_SetsCropId()
@@ -277,9 +267,7 @@ public class MarketDomainTests
         obs.CropId.Should().Be(corrected);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // PriceObservation.Create — unit quarantine (R1.1 P1)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // PriceObservation.Create — unit quarantine.
 
     [Fact]
     public void PriceObservation_Create_UnitIsUnconfirmedByDefault()
@@ -311,9 +299,7 @@ public class MarketDomainTests
         obs.IsUnitConfirmed.Should().BeTrue();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Market.CreateNew — happy path
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Market.CreateNew — happy path.
 
     [Fact]
     public void Market_CreateNew_AssignsNonEmptyUniqueId()
@@ -398,9 +384,7 @@ public class MarketDomainTests
         market.IsEconomicCenter.Should().BeTrue();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Market.AssignCode
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Market.AssignCode.
 
     [Fact]
     public void Market_AssignCode_StampsCode_WhenNotYetAssigned()
@@ -449,9 +433,7 @@ public class MarketDomainTests
         market.MarketCode.Should().Be(string.Empty);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Market.ApplyUpdate
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Market.ApplyUpdate.
 
     private static Market ExistingMarket() => Market.CreateNew("Original", "OrigDistrict", MarketType.Wholesale);
 
@@ -520,16 +502,11 @@ public class MarketDomainTests
         existing.CreatedAt.Should().Be(originalCreatedAt);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // MarketType enum — persisted-int pinning
-    // ──────────────────────────────────────────────────────────────────────────────
+    // MarketType enum — persisted-int pinning.
 
-    // MarketType is stored as a plain int column in SQL Server (no HasConversion<string>
-    // seen in the model). Any reorder/insertion of a member here silently reassigns the
-    // numeric value of everything after it and corrupts every already-persisted row without
-    // throwing anywhere — the DB would just start meaning something different. If this test
-    // fails, do NOT "fix" the test: the enum has drifted from its persisted contract, and the
-    // fix belongs in a migration/backfill, not in this file.
+    // MarketType is stored as a plain int column, so any reorder or insertion silently reassigns the numeric
+    // value of everything after it and corrupts every persisted row without throwing. If this test fails, do
+    // not "fix" the test — the fix belongs in a migration or backfill.
     [Theory]
     [InlineData(MarketType.Wholesale, 0)]
     [InlineData(MarketType.Retail, 1)]

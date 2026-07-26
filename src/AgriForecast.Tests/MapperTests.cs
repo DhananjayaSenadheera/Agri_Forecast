@@ -9,17 +9,13 @@ using FluentAssertions;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Regression tests for the hand-written static mappers that replaced AutoMapper
-/// (security fix F-05: AutoMapper 12.0.1 / GHSA-rvv3-g6hj-g44x removed).
-/// These assert the exact ForMember/PreCondition semantics the old AutoMapper
-/// profiles encoded, which are otherwise invisible from the mapper code alone.
-/// Style mirrors PolicyFlagTests / ResultAndContractTests already in this project.
+/// Regression tests for the hand-written static mappers that replaced AutoMapper. They assert the exact
+/// ForMember/PreCondition semantics the old AutoMapper profiles encoded, which are otherwise invisible
+/// from the mapper code alone.
 /// </summary>
 public class MapperTests
 {
-    // ──────────────────────────────────────────────────────────────────────────────
-    // CropMapper — create
-    // ──────────────────────────────────────────────────────────────────────────────
+    // CropMapper — create.
 
     [Fact]
     public void Crop_ToEntity_AssignsNonEmptyUniqueId()
@@ -56,9 +52,7 @@ public class MapperTests
         crop.Source.Should().Be("Dambulla");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // CropMapper — update (conditional-copy guards, mutate-in-place, immutability)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // CropMapper — update (conditional-copy guards, mutate in place, immutability).
 
     private static Crop ExistingCrop() => Crop.CreateForManualEntry("Original", "OriginalSource", Guid.NewGuid());
 
@@ -150,9 +144,7 @@ public class MapperTests
         ReferenceEquals(result, existing).Should().BeTrue();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // CropMapper — Crop -> Crop_GetDto
-    // ──────────────────────────────────────────────────────────────────────────────
+    // CropMapper — Crop -> Crop_GetDto.
 
     // Helpers for the API-3 enrichment inputs (Crop has no navigations; the handler supplies these).
     private static CropCategory Category(string code, string name) =>
@@ -220,8 +212,7 @@ public class MapperTests
         Assert.Null(dto.Category); // null CropCategoryId (or an unresolved category) surfaces as null
     }
 
-    // ── growthDays serving-gate matrix ────────────────────────────────────────────
-    // Expose GrowthPeriodDays ONLY when IsVerified == true && GrowthPeriodDays > 0.
+    // growthDays serving-gate matrix: expose GrowthPeriodDays only when IsVerified and GrowthPeriodDays > 0.
 
     [Fact]
     public void GrowthDays_Value_WhenVerifiedAndPositive()
@@ -310,13 +301,7 @@ public class MapperTests
         dtos[2].GrowthDays.Should().BeNull();
     }
 
-    // R2 D-DF3: the EconomicCenterMapper tests were removed with the EconomicCenters CRUD
-    // retirement (mapper + Eco_* DTOs deleted). Market registration is covered by
-    // MarketMapperTests / MarketDomainTests / MarketCreateValidatorTests.
-
-    // ──────────────────────────────────────────────────────────────────────────────
-    // PolicyFlagMapper — create (date-only normalisation, nullable EffectiveTo)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // PolicyFlagMapper — create (date-only normalisation, nullable EffectiveTo).
 
     private static PolicyFlag_CreateDto ValidPolicyFlagDto(DateTime from, DateTime? to) => new()
     {
@@ -403,9 +388,7 @@ public class MapperTests
         flag.ReferenceUrl.Should().Be(dto.ReferenceUrl);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // PolicyFlagMapper — PolicyFlag -> PolicyFlag_GetDto / ToGetDtoList
-    // ──────────────────────────────────────────────────────────────────────────────
+    // PolicyFlagMapper — PolicyFlag -> PolicyFlag_GetDto / ToGetDtoList.
 
     private static PolicyFlag FullyPopulatedFlag() => new()
     {

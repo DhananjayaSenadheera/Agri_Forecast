@@ -7,13 +7,10 @@ using Moq;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Unit tests for GetPriceHistoryQueryHandler (API-2). The DB is faked via a canned
-/// IPriceHistoryStore so the window clamp + fence-post, per-date min/max aggregation, the
-/// fail-closed exclusion of unusable-band rows, and the empty-result shape are exercised
-/// in isolation. NOT covered here: the store's SQL filters (IsUnitConfirmed=1,
-/// MinPrice/MaxPrice > 0, market scope, NationalAggregate exclusion) — no relational
-/// test provider is referenced, so they are verified by inspection + a manual live check
-/// only; this fake merely reproduces the store's contract (usable rows only, coalesced).
+/// Unit tests for GetPriceHistoryQueryHandler. The DB is faked via a canned IPriceHistoryStore, so the
+/// window clamp and fence-post, the per-date min/max aggregation, the fail-closed exclusion of unusable
+/// rows and the empty-result shape run in isolation. The store's SQL filters are not covered here — the
+/// fake merely reproduces its contract (usable rows only, coalesced).
 /// </summary>
 public class PriceHistoryQueryHandlerTests
 {
@@ -52,7 +49,7 @@ public class PriceHistoryQueryHandlerTests
 
     private static PriceHistoryRow Row(DateOnly d, decimal min, decimal max) => new(d, min, max);
 
-    // ---- Empty ------------------------------------------------------------
+    // Empty.
 
     [Fact]
     public async Task No_data_returns_success_with_empty_list()
@@ -65,7 +62,7 @@ public class PriceHistoryQueryHandlerTests
         result.Data.Should().BeEmpty();
     }
 
-    // ---- Window clamp -----------------------------------------------------
+    // Window clamp.
 
     [Theory]
     [InlineData(1, 7)]      // below min -> 7
@@ -95,7 +92,7 @@ public class PriceHistoryQueryHandlerTests
         store.CapturedFrom.Should().Be(Latest.AddDays(-89));
     }
 
-    // ---- marketId threading ----------------------------------------------
+    // marketId threading.
 
     [Fact]
     public async Task MarketId_is_threaded_to_store()
@@ -106,7 +103,7 @@ public class PriceHistoryQueryHandlerTests
         store.CapturedMarketId.Should().Be(MktA);
     }
 
-    // ---- Per-date min/max aggregation ------------------------------------
+    // Per-date min/max aggregation.
 
     [Fact]
     public async Task Aggregates_min_of_mins_and_max_of_maxes_per_date()
@@ -154,7 +151,7 @@ public class PriceHistoryQueryHandlerTests
             .ContainInOrder("2026-07-08", "2026-07-09", "2026-07-10");
     }
 
-    // ---- Fail-closed exclusion (defense-in-depth) ------------------------
+    // Fail-closed exclusion (defence in depth).
 
     [Fact]
     public async Task Rows_without_a_usable_band_are_excluded_not_invented()

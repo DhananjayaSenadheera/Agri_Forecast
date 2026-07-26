@@ -27,9 +27,7 @@ public class PolicyFlagTests
     // name the exact actor rather than matching any Guid.
     private static readonly Guid ActingAdmin = Guid.Parse("11111111-2222-3333-4444-555555555555");
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Validator
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Validator.
 
     private readonly PolicyFlagCreateCommandValidator _validator = new();
 
@@ -116,9 +114,7 @@ public class PolicyFlagTests
         result.IsValid.Should().BeTrue("a single-day policy window is valid");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // GetAll query handler
-    // ──────────────────────────────────────────────────────────────────────────────
+    // GetAll query handler.
 
     private static PolicyFlag Flag(string title, DateTime from, DateTime? to) => new()
     {
@@ -187,9 +183,7 @@ public class PolicyFlagTests
         result.Error.Should().NotBeNullOrEmpty();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // API-13: Update validator (mirrors create + Id required + Source REQUIRED on mutation)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Update validator: mirrors create, plus Id required and Source required on mutation.
 
     private readonly PolicyFlagUpdateCommandValidator _updateValidator = new();
 
@@ -290,9 +284,7 @@ public class PolicyFlagTests
         result.Errors.Should().Contain(e => e.PropertyName.Contains("EffectiveTo"));
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // API-13: Update handler
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Update handler.
 
     private static (Mock<IPolicyFlagRepository> repo, Mock<IUnitofWorkRepository> uow) MutationMocks()
         => (new Mock<IPolicyFlagRepository>(), new Mock<IUnitofWorkRepository>());
@@ -406,9 +398,7 @@ public class PolicyFlagTests
         existing.EffectiveFrom.TimeOfDay.Should().Be(TimeSpan.Zero);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // API-13: Delete handler
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Delete handler.
 
     private static PolicyFlagDeleteCommandHandler DeleteHandler(
         Mock<IPolicyFlagRepository> repo, Mock<IUnitofWorkRepository> uow)
@@ -473,9 +463,7 @@ public class PolicyFlagTests
         uow.Verify(u => u.CommitAsync(), Times.Once);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // API-13: training-data warning helper (pure logic)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Training-data warning helper (pure logic).
 
     private static readonly DateTime Now = new(2026, 07, 16);
 

@@ -15,15 +15,12 @@ using Moq;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Festival-calendar (API-10) vertical slice. The ML model TRAINS on this table, so the tests pin
-/// the rules that protect the feature layer:
-///   - Create/Update validators: FestivalKey uppercase-key guard, date-only, LeadUpDays >= 0 with
-///     the PAIRED-DAY convention (0 is valid — a multi-day festival's continuation day), Source
-///     required on every mutation.
-///   - FestivalCalendarTrainingDataWarning: past-dated mutation warns (delete + update, stored vs
-///     incoming); future-dated does not.
-///   - Handlers: happy paths, not-found, empty-id, duplicate (FestivalKey, Date) guard, GetAll.
-/// Style mirrors PolicyFlagTests.
+/// Festival-calendar vertical slice. The ML model trains on this table, so the tests pin the rules that
+/// protect the feature layer:
+///   - Create/Update validators: the uppercase FestivalKey guard, date-only dates, LeadUpDays >= 0 with the
+///     paired-day convention (0 is valid), and Source required on every mutation.
+///   - FestivalCalendarTrainingDataWarning: a past-dated mutation warns, a future-dated one does not.
+///   - Handlers: happy paths, not-found, empty id, the duplicate (FestivalKey, Date) guard, and GetAll.
 /// </summary>
 public class FestivalCalendarTests
 {
@@ -31,9 +28,7 @@ public class FestivalCalendarTests
     // name the exact actor rather than matching any Guid.
     private static readonly Guid ActingAdmin = Guid.Parse("11111111-2222-3333-4444-555555555555");
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Create validator
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Create validator.
 
     private readonly FestivalCalendarCreateCommandValidator _createValidator = new();
     private readonly FestivalCalendarUpdateCommandValidator _updateValidator = new();
@@ -142,9 +137,7 @@ public class FestivalCalendarTests
         result.Errors.Should().Contain(e => e.PropertyName.Contains("Source"));
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Update validator
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Update validator.
 
     private static FestivalCalendarUpdateCommand ValidUpdate() => new()
     {
@@ -193,9 +186,7 @@ public class FestivalCalendarTests
         (await _updateValidator.ValidateAsync(cmd)).IsValid.Should().BeTrue();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Training-data warning helper
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Training-data warning helper.
 
     private static readonly DateTime Now = new(2026, 07, 16, 10, 0, 0, DateTimeKind.Utc);
 
@@ -246,9 +237,7 @@ public class FestivalCalendarTests
             .Should().BeNull();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Create handler
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Create handler.
 
     private static (Mock<IFestivalCalendarRepository>, Mock<IUnitofWorkRepository>) Mocks()
         => (new Mock<IFestivalCalendarRepository>(), new Mock<IUnitofWorkRepository>());
@@ -286,9 +275,7 @@ public class FestivalCalendarTests
         uow.Verify(u => u.CommitAsync(), Times.Never);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Update handler
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Update handler.
 
     private static FestivalCalendarEntry Entry(DateTime date, string key = "AVURUDU") => new()
     {
@@ -377,9 +364,7 @@ public class FestivalCalendarTests
         uow.Verify(u => u.CommitAsync(), Times.Never);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Delete handler
-    // ──────────────────────────────────────────────────────────────────────────────
+    // Delete handler.
 
     [Fact]
     public async Task DeleteHandler_EmptyId_Fails()
@@ -445,9 +430,7 @@ public class FestivalCalendarTests
         uow.Verify(u => u.CommitAsync(), Times.Once);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // GetAll query handler
-    // ──────────────────────────────────────────────────────────────────────────────
+    // GetAll query handler.
 
     [Fact]
     public async Task GetAll_ReturnsMappedEntries()

@@ -12,9 +12,8 @@ using UserEntity = AgriForecast.Domain.Entities.User;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// API-9 — Admin user-management handlers + validator. Pure unit tests (Moq'd IUserRepository /
-/// IUnitofWorkRepository), mirroring the MarketCreateTests style. Covers the fail-closed guards the
-/// security review cares about: role whitelist, self-delete, and last-admin delete/demote.
+/// Admin user-management handlers and validator. Pure unit tests with mocked repositories, covering the
+/// fail-closed guards that matter: the role whitelist, self-delete, and last-admin delete or demote.
 /// </summary>
 public class UserManagementHandlerTests
 {
@@ -40,7 +39,7 @@ public class UserManagementHandlerTests
         UpdatedAt = DateTime.UtcNow.AddDays(-1)
     };
 
-    // ── GetAllUsersQueryHandler ────────────────────────────────────────────────────
+    // GetAllUsersQueryHandler.
 
     [Fact]
     public async Task GetAll_ProjectsFields_NewestFirst_NoPasswordHash()
@@ -118,7 +117,7 @@ public class UserManagementHandlerTests
         result.Data.Should().BeEmpty();
     }
 
-    // ── UpdateUserRoleCommandHandler ───────────────────────────────────────────────
+    // UpdateUserRoleCommandHandler.
 
     private static (UpdateUserRoleCommandHandler handler, Mock<IUserRepository> repo, Mock<IUnitofWorkRepository> uow, Mock<IRefreshTokenService> refresh)
         BuildUpdate()
@@ -247,7 +246,7 @@ public class UserManagementHandlerTests
         refresh.Verify(r => r.RevokeAllForUserAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
-    // ── DeleteUserCommandHandler ───────────────────────────────────────────────────
+    // DeleteUserCommandHandler.
 
     private static (DeleteUserCommandHandler handler, Mock<IUserRepository> repo, Mock<IUnitofWorkRepository> uow, Mock<IRefreshTokenService> refresh)
         BuildDelete()
@@ -341,7 +340,7 @@ public class UserManagementHandlerTests
         uow.Verify(u => u.CommitAsync(), Times.Once);
     }
 
-    // ── UpdateUserRoleCommandValidator ─────────────────────────────────────────────
+    // UpdateUserRoleCommandValidator.
 
     private readonly UpdateUserRoleCommandValidator _validator = new();
 
