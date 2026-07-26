@@ -12,3 +12,6 @@
 **/Dockerfile
 **/.dockerignore
 AgriForecast.ML/
+# Per-dev local override — designated home for local settings/creds
+# (gitignored); must never be baked into an image layer.
+**/appsettings.Development.json

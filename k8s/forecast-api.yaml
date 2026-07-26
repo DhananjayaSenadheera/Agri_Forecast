@@ -73,6 +73,17 @@ spec:
               value: "http://localhost:4173"
             - name: Cors__AllowedOrigins__2
               value: "http://localhost:5173"
+            # Label echoed by GET /api/admin/ingestion/status so the admin UI
+            # can tell WHICH process runs ingestion (no secret, cosmetic).
+            - name: Ingestion__ServiceAddress
+              value: "k8s cronjob/daily-pipeline (agriforecast)"
+          # KNOWN LIMITATION (F-08 corollary): through Docker Desktop's
+          # NodePort forwarding every host client presents the same source
+          # IP, so the per-IP rate limiter effectively shares ONE bucket
+          # (100 req/min global, 10 req/min auth) across all local callers.
+          # Acceptable for a single-user dev machine; a hosted deployment
+          # must set ForwardedHeaders__KnownProxies (see appsettings.json)
+          # so the real client IP partitions the limiter.
           # /health is anonymous AND exempt from rate limiting precisely so
           # orchestrator probes can't 429-flap the pod (F-08) — no code change
           # needed here.

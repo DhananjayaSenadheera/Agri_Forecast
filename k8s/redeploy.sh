@@ -49,10 +49,16 @@ if ! command -v kubectl >/dev/null 2>&1 || ! kubectl get ns "$NAMESPACE" >/dev/n
   KUBECTL_OK=false
 fi
 
-# Recreate a pre-created recovery container in place, preserving its exact
-# config (image/env/entrypoint/cmd). Uses python3 + the docker SDK-free CLI:
-# config is read as JSON and re-issued as a `docker create` argv list, so no
-# secret env value is ever echoed or shell-interpolated.
+# Recreate a pre-created recovery container in place, preserving its name,
+# its runtime-only env vars (connection string / AGRI_DB_*), and its
+# entrypoint/cmd. NOT preserved: HostConfig (binds, network mode, restart
+# policy, port mappings) — both recovery containers were verified to use
+# defaults for all of those; the script warns and skips if that ever stops
+# being true rather than silently dropping settings. Uses python3 so config
+# travels as JSON -> argv list; no secret env value is ever echoed or
+# shell-interpolated. (Deliberately NOT `docker inspect | python3 - <<EOF`:
+# the heredoc would replace the pipe as stdin and the interpreter would eat
+# it — python fetches the JSON itself.)
 recreate_recovery_container() {
   local cname="$1" image="$2"
   if ! docker inspect "$cname" >/dev/null 2>&1; then
@@ -64,18 +70,61 @@ recreate_recovery_container() {
     return 0 # uses a different image — untouched by this rebuild
   fi
   echo "  recreating recovery container $cname against the fresh $image ..."
-  docker inspect "$cname" | python3 - "$cname" <<'PYEOF'
+  python3 - "$cname" <<'PYEOF'
 import json, subprocess, sys
 
 name = sys.argv[1]
-cfg = json.load(sys.stdin)[0]["Config"]
+
+
+def inspect(kind, ref):
+    out = subprocess.run(["docker", *kind, "inspect", ref],
+                         check=True, capture_output=True, text=True).stdout
+    return json.loads(out)[0]
+
+
+info = inspect([], name)
+cfg = info["Config"]
+host = info.get("HostConfig") or {}
+
+# Refuse to recreate (rather than silently drop settings) if the container
+# carries non-default HostConfig we don't reproduce.
+nondefault = []
+if host.get("Binds"):
+    nondefault.append("Binds")
+if info.get("Mounts"):
+    nondefault.append("Mounts")
+if host.get("PortBindings"):
+    nondefault.append("PortBindings")
+if (host.get("RestartPolicy") or {}).get("Name") not in (None, "", "no"):
+    nondefault.append("RestartPolicy")
+if host.get("NetworkMode") not in (None, "", "default", "bridge"):
+    nondefault.append("NetworkMode")
+if nondefault:
+    print(f"  WARNING: {name} uses non-default HostConfig ({', '.join(nondefault)}) "
+          f"this script does not reproduce — left as-is. Recreate it by hand "
+          f"against the fresh image.")
+    sys.exit(0)
+
+# Only re-pass env vars the image does NOT define itself: re-passing the
+# image's own PATH/PYTHON_*/DOTNET_* would pin the OLD image's values onto
+# the new build. A var whose NAME the fresh image defines but with a
+# DIFFERENT value is ambiguous (stale old-image value vs. deliberate
+# override) — dropped with a named warning, so nothing is pinned silently.
+image_vars = dict(
+    e.split("=", 1)
+    for e in inspect(["image"], cfg["Image"]).get("Config", {}).get("Env") or []
+)
+runtime_env = []
+for e in cfg.get("Env") or []:
+    k, _, v = e.partition("=")
+    if k not in image_vars:
+        runtime_env.append(e)  # true runtime-only var (conn string, AGRI_DB_*)
+    elif v != image_vars[k]:
+        print(f"  note: {k} differed from the image default — not carried over "
+              f"(re-set it manually on the container if the override was intentional).")
 
 argv = ["docker", "create", "--name", name]
-for e in cfg.get("Env") or []:
-    # Inspect merges image-defined env (PATH etc.) into Config.Env; passing
-    # those back through -e is harmless (same values the image sets anyway)
-    # and guarantees the run-time-only vars (connection string, AGRI_DB_*)
-    # are preserved exactly.
+for e in runtime_env:
     argv += ["-e", e]
 if cfg.get("Entrypoint"):
     argv += ["--entrypoint", cfg["Entrypoint"][0]]
@@ -85,10 +134,10 @@ if cfg.get("Entrypoint") and len(cfg["Entrypoint"]) > 1:
 if cfg.get("Cmd"):
     argv += cfg["Cmd"]
 
-subprocess.run(["docker", "rm", name], check=True, stdout=subprocess.DEVNULL)
+subprocess.run(["docker", "rm", "-f", name], check=True, stdout=subprocess.DEVNULL)
 # argv list, never a shell string: env values are passed verbatim and unprinted.
 subprocess.run(argv, check=True, stdout=subprocess.DEVNULL)
-print(f"  {name}: recreated (same name/env/command, new image build)")
+print(f"  {name}: recreated ({len(runtime_env)} runtime env var(s) carried over, new image build)")
 PYEOF
 }
 

@@ -88,10 +88,10 @@ agriforecast` and curl `http://localhost:8077/health`, then Ctrl-C.
 ## The pipelines — supervised test, then cut over
 
 Both CronJobs ship **suspended** on purpose: the launchd job that runs
-`run-daily.sh` is still active, and running both would double-ingest. Also, a
-failed/missed daily run **permanently loses that day's DEC data** (the scraper
-only ever gets the current day), so do not cut over until a supervised run has
-succeeded.
+`run-daily.sh` is still active, and running both would double-ingest. Do not
+cut over until a supervised run has succeeded. (A late run backfills fine —
+the DEC fetch returns full history per pass — but a failed run still costs a
+day of freshness, so treat failures as urgent.)
 
 ### Supervised run (do this once, watching)
 
@@ -115,6 +115,33 @@ When satisfied: `kubectl delete job daily-test -n agriforecast`.
 Note: a manual test run ingests real data for **today** — that is fine (the
 ingestion is idempotent per day), but do it instead of, not in addition to,
 letting launchd also run that afternoon if you can.
+
+### Pre-cutover checklist (both items gate the unsuspend, not the merge)
+
+Two pieces of `run-daily.sh`'s operational scaffolding have **no pod
+equivalent** and must be covered before the CronJob becomes the only daily
+path:
+
+1. **SQL Server readiness.** The script `docker start`s `sql_server_container`
+   and polls `SELECT 1` for up to 120 s; a pod cannot start a host container,
+   and the ingestion step fails immediately against a cold DB with no retry
+   (`backoffLimit: 0`). Give the container a restart policy so it is always up
+   when the machine is:
+
+   ```bash
+   docker update --restart unless-stopped sql_server_container
+   ```
+
+2. **Failure visibility.** The script's EXIT trap prints a FAILED banner and
+   fires a macOS notification — the control added after the pipeline failed
+   silently for 8 straight mornings. A failed CronJob run is only visible via
+   `kubectl`, so until proper alerting exists, check daily (or wire this into
+   a login shell / a small launchd check):
+
+   ```bash
+   kubectl get jobs -n agriforecast --sort-by=.metadata.creationTimestamp
+   # any job with COMPLETIONS 0/1 = a failed pipeline run — inspect its step logs
+   ```
 
 ### Cut over (only after the supervised run succeeded)
 

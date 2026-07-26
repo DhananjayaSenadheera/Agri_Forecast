@@ -28,10 +28,11 @@
 #
 # SUSPENDED BY DEFAULT (suspend: true) — deliberate. The launchd job is still
 # live; running both would double-ingest. Unsuspend ONLY after one supervised
-# manual run succeeds AND launchd is bootout'd (see k8s/README.md). A missed
-# 21:00 run loses that day's DEC data PERMANENTLY (the scraper only gets the
-# current day), hence the generous startingDeadlineSeconds: if the machine/
-# cluster was asleep at 21:00 but comes back within 6h, the run still fires.
+# manual run succeeds AND launchd is bootout'd (see k8s/README.md). The
+# generous startingDeadlineSeconds means a machine asleep at 21:00 that wakes
+# within 6h still runs: a late run backfills fine (the DEC fetch returns full
+# history per pass), but a day DEC published while we never ran at all is a
+# day of freshness lost until the next run.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -64,9 +65,16 @@ spec:
               image: agriforecast-ml:latest
               imagePullPolicy: IfNotPresent
               command: ["sh", "-c"]
+              # set -e + non-empty assertion: a silent write failure here
+              # would otherwise thread an EMPTY batch id, which verify treats
+              # as "no batch id" — breaking the IngestionRuns <->
+              # IngestionVerifications join in the admin runs-log without any
+              # visible error.
               args:
                 - |
+                  set -e
                   cat /proc/sys/kernel/random/uuid > /shared/batch_id
+                  test -s /shared/batch_id
                   echo "batch id: $(cat /shared/batch_id)"
               volumeMounts:
                 - { name: shared, mountPath: /shared }
@@ -81,7 +89,6 @@ spec:
                 - |
                   export Ingestion__BatchId="$(cat /shared/batch_id)"
                   exec dotnet AgriForecast.Ingestion.dll
-              workingDir: /app
               env:
                 - name: AGRI_DB_PORT
                   valueFrom:

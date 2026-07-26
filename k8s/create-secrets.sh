@@ -74,14 +74,27 @@ fi
 kubectl apply -f "$SCRIPT_DIR/namespace.yaml" >/dev/null
 
 # create ... --dry-run=client -o yaml | apply  ==> idempotent create-or-update.
+# AGRI_MODEL_HMAC_KEY is optional (strong model-integrity verification,
+# registry.py): propagate it when .env has it, so a future re-signing of the
+# registry doesn't silently downgrade the cluster pod to sha256-only checks.
+HMAC_ARGS=()
+if [ -n "${AGRI_MODEL_HMAC_KEY:-}" ]; then
+  HMAC_ARGS=(--from-literal=AGRI_MODEL_HMAC_KEY="$AGRI_MODEL_HMAC_KEY")
+fi
+
 kubectl create secret generic agri-db -n "$NAMESPACE" \
   --from-literal=AGRI_DB_HOST="$AGRI_DB_HOST" \
   --from-literal=AGRI_DB_PORT="$AGRI_DB_PORT" \
   --from-literal=AGRI_DB_NAME="$AGRI_DB_NAME" \
   --from-literal=AGRI_DB_USER="$AGRI_DB_USER" \
   --from-literal=AGRI_DB_PASSWORD="$AGRI_DB_PASSWORD" \
+  "${HMAC_ARGS[@]+"${HMAC_ARGS[@]}"}" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-echo "secret agri-db: created/updated (5 keys)"
+if [ ${#HMAC_ARGS[@]} -gt 0 ]; then
+  echo "secret agri-db: created/updated (6 keys, incl. AGRI_MODEL_HMAC_KEY)"
+else
+  echo "secret agri-db: created/updated (5 keys)"
+fi
 
 kubectl create secret generic agri-jwt -n "$NAMESPACE" \
   --from-literal=JWT_KEY="$JWT" \

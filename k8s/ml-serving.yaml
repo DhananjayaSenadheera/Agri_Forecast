@@ -52,20 +52,26 @@ spec:
             - name: models
               mountPath: /app/models
               readOnly: true # serving only reads; training/promotion happen outside the cluster
-          # Startup can take a few seconds (model unpickle); give readiness a
-          # little slack before traffic, and be patient before restarting.
+          # The promoted model is unpickled at import time, BEFORE uvicorn
+          # binds the port. startupProbe owns that window (up to 150s) so a
+          # slow model load can't be mistaken for a hung process; liveness
+          # only takes over once startup has succeeded.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8077
+            periodSeconds: 5
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /health
               port: 8077
-            initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /health
               port: 8077
-            initialDelaySeconds: 20
             periodSeconds: 20
             failureThreshold: 3
       volumes:
