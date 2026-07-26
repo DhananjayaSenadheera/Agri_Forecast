@@ -16,5 +16,11 @@ public interface IPipelineScheduleSettings
     // How long after the fire time a late start still counts as "this night's run" — the .NET mirror of
     // startingDeadlineSeconds. A machine asleep at 21:00 that wakes within this window runs the pipeline
     // and must not be reported as a miss.
+    //
+    // CONSTRAINT: the whole window must fall inside ONE UTC day. IngestionVerifications.PipelineDate is
+    // stamped from the UTC date at verify time, and the health handler falls back to matching on it, so
+    // a window that crosses midnight UTC would stamp late verifications with the next day's date and
+    // lose them. With the 21:00 Colombo fire (15:30 UTC) the ceiling is 510 minutes; the configured 360
+    // leaves 2.5h of headroom. Raising it past that means matching verifications on RunUtc instead.
     int CatchUpWindowMinutes { get; }
 }

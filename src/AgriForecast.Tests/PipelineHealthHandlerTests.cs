@@ -75,7 +75,7 @@ public class PipelineHealthHandlerTests
         }
 
         public Task<IngestionVerificationRow?> GetVerificationForBatchOrDateAsync(
-            Guid? batchId, DateOnly pipelineDate, CancellationToken ct = default)
+            Guid? batchId, DateOnly pipelineDate, DateTime notBeforeUtc, CancellationToken ct = default)
         {
             ct.ThrowIfCancellationRequested();
 
@@ -84,7 +84,8 @@ public class PipelineHealthHandlerTests
                 : null;
 
             return Task.FromResult(byBatch
-                ?? Latest(_verifications.Where(v => v.PipelineDate == pipelineDate)));
+                ?? Latest(_verifications.Where(v =>
+                    v.PipelineDate == pipelineDate && v.RunUtc >= notBeforeUtc)));
         }
 
         private static IngestionVerificationRow? Latest(IEnumerable<IngestionVerification> rows)
@@ -319,6 +320,48 @@ public class PipelineHealthHandlerTests
         health.FeatureBuildStatus.Should().Be("running");
     }
 
+    // THE GAP between two containers. The ingestion step has exited — every batch row carries a
+    // FinishedUtc and rolls up clean — but mirror, verify, news and sentiment still have to run before
+    // build_features writes its first row. That shape is indistinguishable from "the build never ran",
+    // and on a perfectly healthy night it would flash red for a few minutes every single evening, which
+    // is how an operator learns to ignore the banner. While ingestion only just finished, "running" is
+    // the honest answer.
+    [Fact]
+    public async Task Running_InTheGapBetweenIngestionFinishingAndTheFeatureBuildStarting()
+    {
+        var batchId = Guid.NewGuid();
+        var store = new FakeStore()
+            .Add(CleanBatch(batchId, FireUtc.AddMinutes(1)))
+            .Add(Verification(batchId, IngestionVerificationStatus.Pass, FireUtc.AddMinutes(20)));
+
+        // CleanBatch's last row finishes ~9 minutes in; nothing has written a FEATURE_BUILD row yet.
+        var health = await HealthAsync(store, FireUtc.AddMinutes(22));
+
+        health.State.Should().Be(PipelineHealthStates.Running,
+            "the night is still in progress between the ingestion and feature-build containers");
+        health.FeatureBuildStatus.Should().BeNull();
+    }
+
+    // The same shape, but ingestion finished hours ago: the build really never started. The gap
+    // allowance must expire, or it becomes a permanent excuse that hides the failure it was carved out
+    // of. This is the boundary between "still going" and the silent failure the banner exists for.
+    [Theory]
+    [InlineData(30, PipelineHealthStates.Running)]   // inside the staleness window -> still the gap
+    [InlineData(240, PipelineHealthStates.Failed)]   // 4h after ingestion ended -> the build never ran
+    public async Task TheGapAllowance_ExpiresWithTheStalenessWindow(
+        int minutesAfterFire, string expectedState)
+    {
+        var batchId = Guid.NewGuid();
+        var store = new FakeStore()
+            .Add(CleanBatch(batchId, FireUtc.AddMinutes(1)))
+            .Add(Verification(batchId, IngestionVerificationStatus.Pass, FireUtc.AddMinutes(20)));
+
+        var health = await HealthAsync(
+            store, FireUtc.AddMinutes(minutesAfterFire), stalenessMinutes: 120);
+
+        health.State.Should().Be(expectedState);
+    }
+
     // An unfinished row past the staleness window is a crashed process, not a running one. The batch
     // still holds a Running row, so the roll-up is "partial" — honest about the sources that did land.
     [Fact]
@@ -391,6 +434,28 @@ public class PipelineHealthHandlerTests
         var health = await HealthAsync(store, FireUtc.AddHours(2));
 
         health.State.Should().Be(PipelineHealthStates.GateBlocked);
+    }
+
+    // The date fallback must not reach BACKWARDS past the fire time. Verify can be run by hand at any
+    // point in the same UTC day — the live data carries three rows for 2026-07-26 — and a Fail from a
+    // morning spot-check has nothing to say about a night that had not started yet. Matching on
+    // PipelineDate alone would hand that morning verdict to tonight and paint a clean night
+    // gate_blocked, the mirror image of a false green and just as corrosive to trust in the banner.
+    [Fact]
+    public async Task AdHocVerificationFromBeforeTheFireTime_IsNotThisNightsVerdict()
+    {
+        var batchId = Guid.NewGuid();
+        var store = new FakeStore()
+            .Add(CleanBatch(batchId, FireUtc.AddMinutes(1)))
+            .Add(FeatureBuild(FireUtc.AddMinutes(25), IngestionRunStatus.Succeeded))
+            // Same calendar date, six hours BEFORE the pipeline fired, and no BatchId to disqualify it.
+            .Add(Verification(null, IngestionVerificationStatus.Fail, FireUtc.AddHours(-6),
+                pipelineDate: new DateOnly(2026, 7, 26)));
+
+        var health = await HealthAsync(store, FireUtc.AddHours(2));
+
+        health.VerificationStatus.Should().BeNull("that run predates the night being reported on");
+        health.State.Should().Be(PipelineHealthStates.Green);
     }
 
     // --- ingestion outcomes -------------------------------------------------------------------

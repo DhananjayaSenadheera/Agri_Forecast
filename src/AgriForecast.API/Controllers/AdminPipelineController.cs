@@ -15,22 +15,14 @@ namespace AgriForecast.API.Controllers;
 [Authorize(Roles = UserRoles.Admin)]
 public class AdminPipelineController(IMediator mediator) : ControllerBase
 {
-    private static object ToErrorResponse(string error) => new
-    {
-        errors = new[]
-        {
-            new { property = "Pipeline", message = error }
-        }
-    };
-
     // GET /api/admin/pipeline/health — did last night's run happen, and how did it end?
-    // Always 200 for an admin: "nothing ran" is an answer (state "missing"), not an error.
+    // Always 200 for an admin. There is no failure branch to map: the query takes no input to validate,
+    // and every operational outcome — including "nothing ran at all" — is a state in the body, not an
+    // error. An unexpected exception is the error-handling middleware's job, not a hand-rolled 400.
     [HttpGet("health")]
     public async Task<IActionResult> GetHealth()
     {
         var result = await mediator.Send(new GetPipelineHealthQuery());
-        if (result.IsSuccess)
-            return Ok(result.Data);
-        return BadRequest(ToErrorResponse(result.Error));
+        return Ok(result.Data);
     }
 }

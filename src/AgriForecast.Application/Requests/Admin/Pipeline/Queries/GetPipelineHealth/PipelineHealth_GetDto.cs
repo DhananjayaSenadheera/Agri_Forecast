@@ -19,6 +19,13 @@ public class PipelineHealth_GetDto
     // Over-alerting for a few minutes is the safe direction here — under-reporting a suspended CronJob
     // is the incident this endpoint exists to catch. When state is "missing", startedUtc and batchId are
     // always null.
+    //
+    // EDGE — "running" with a finished batch and no feature build: the pipeline's steps run in separate
+    // containers, and between the last ingestion row and the first FEATURE_BUILD row sit the mirror,
+    // verify, news and sentiment steps. For those minutes the batch looks complete with no build in
+    // sight, which is shape-identical to a build that never ran. While ingestion finished recently the
+    // endpoint reports "running" rather than "failed", so a healthy night does not flash red every
+    // evening; once that recency window lapses the same shape becomes "failed" as it should.
     public string State { get; set; } = string.Empty;
 
     // The batch this night's verdict was read off, or null when nothing ran in the window.

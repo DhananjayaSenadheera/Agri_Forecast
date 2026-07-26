@@ -18,8 +18,13 @@ public interface IPipelineHealthReadStore
 
     // The verification for this night: the latest row linked to batchId, falling back to the latest row
     // stamped with pipelineDate when the batch has none (an ad-hoc verify run writes no BatchId).
+    //
+    // The fallback is bounded by notBeforeUtc — the night's fire time — because PipelineDate alone is
+    // NOT specific to a night. An ad-hoc verify run against the same calendar date (three such rows
+    // exist for 2026-07-26 in the live data) would otherwise become tonight's verdict, and a Fail from
+    // a morning spot-check would paint a night that had not started yet as gate_blocked.
     Task<IngestionVerificationRow?> GetVerificationForBatchOrDateAsync(
-        Guid? batchId, DateOnly pipelineDate, CancellationToken ct = default);
+        Guid? batchId, DateOnly pipelineDate, DateTime notBeforeUtc, CancellationToken ct = default);
 }
 
 // One run row reduced to what the health derivation needs: which batch, which source, and whether it

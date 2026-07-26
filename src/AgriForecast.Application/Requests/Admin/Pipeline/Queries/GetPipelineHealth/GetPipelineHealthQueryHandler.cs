@@ -20,9 +20,11 @@ namespace AgriForecast.Application.Requests.Admin.Pipeline.Queries.GetPipelineHe
 //   2. a run row is unfinished and fresher than the staleness -> "running"
 //   3. verification for this night is Fail                    -> "gate_blocked"
 //   4. batch roll-up "failed" / "partial"                     -> "failed" / "partial"
-//   5. otherwise green — UNLESS the feature build is missing or did not succeed, which is "failed"
+//   5. clean batch, no feature build YET, ingestion only just
+//      finished (the gap between the two containers)          -> "running"
+//   6. otherwise green — UNLESS the feature build is missing or did not succeed, which is "failed"
 //
-// Rule 5 is the point of the whole endpoint. Ingestion landing cleanly while build_features never ran
+// Rule 6 is the point of the whole endpoint. Ingestion landing cleanly while build_features never ran
 // leaves CropFeatureDaily stale and forecasts quietly drifting, which is exactly the silent failure this
 // banner exists to surface; calling that night green would reproduce the bug in the alerting.
 //
@@ -70,7 +72,7 @@ public class GetPipelineHealthQueryHandler
         var rows = await _store.GetRunsForBatchesStartedBetweenAsync(windowStart, nightEnd, cancellationToken);
 
         // FEATURE_BUILD is not an ingestion source and carries its own solo BatchId, so it can never be
-        // the batch we pick — but it IS the signal rule 5 turns on, so it is read separately.
+        // the batch we pick — but it IS the signal rules 5 and 6 turn on, so it is read separately.
         var excluded = new HashSet<string>(
             IngestionSources.ExcludedFromServiceState, StringComparer.OrdinalIgnoreCase);
 
@@ -96,7 +98,7 @@ public class GetPipelineHealthQueryHandler
             : IngestionStatusStrings.ToWire(featureBuildRows[0].Status);
 
         var verification = await _store.GetVerificationForBatchOrDateAsync(
-            batch?.BatchId, fire.LocalDate, cancellationToken);
+            batch?.BatchId, fire.LocalDate, windowStart, cancellationToken);
 
         var state = DeriveState(batch, featureBuildRows, featureBuildStatus, verification, nowUtc);
 
@@ -145,6 +147,21 @@ public class GetPipelineHealthQueryHandler
         var rollup = IngestionBatchRollup.Aggregate(batch.Rows.Select(r => r.Status).ToList());
         if (rollup == IngestionBatchRollup.Failed) return PipelineHealthStates.Failed;
         if (rollup == IngestionBatchRollup.Partial) return PipelineHealthStates.Partial;
+
+        // THE GAP. Ingestion is clean and finished, but the pipeline's later steps live in other
+        // containers: mirror, verify, news and sentiment all run between the last ingestion row and the
+        // first FEATURE_BUILD row. For those minutes every batch row has a FinishedUtc and no feature
+        // build exists yet, which looks identical to "the build never ran" — and on a perfectly healthy
+        // night that would fire a red alert every single evening, training the operator to ignore it.
+        // While ingestion finished RECENTLY the honest answer is that the night is still in progress.
+        // Past the staleness window the same shape really is a build that never started, and falls
+        // through to the rule below.
+        if (featureBuildStatus is null)
+        {
+            var lastRowFinishedUtc = batch.Rows.Max(r => r.FinishedUtc ?? r.StartedUtc);
+            if (lastRowFinishedUtc >= nowUtc.AddMinutes(-_ingestionSettings.RunningStalenessMinutes))
+                return PipelineHealthStates.Running;
+        }
 
         // Ingestion is clean and the gate did not fail, so the only remaining question is whether the
         // feature store was actually rebuilt. Anything other than a succeeded build — missing, failed,

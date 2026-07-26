@@ -34,7 +34,7 @@ public class PipelineHealthReadStore : IPipelineHealthReadStore
     }
 
     public async Task<IngestionVerificationRow?> GetVerificationForBatchOrDateAsync(
-        Guid? batchId, DateOnly pipelineDate, CancellationToken ct = default)
+        Guid? batchId, DateOnly pipelineDate, DateTime notBeforeUtc, CancellationToken ct = default)
     {
         if (batchId.HasValue)
         {
@@ -47,8 +47,12 @@ public class PipelineHealthReadStore : IPipelineHealthReadStore
         // PipelineDate is stamped from the UTC date at verify time. The whole catch-up window sits
         // inside one UTC day (21:00 Colombo is 15:30 UTC, +6h is 21:30 UTC), so for this night's runs
         // that date always equals the Colombo date of the fire time.
+        //
+        // The date on its own is not enough, though: verify can be run by hand at any point in that same
+        // UTC day, hours BEFORE the pipeline fires. Requiring RunUtc at or after the fire time keeps a
+        // morning spot-check out of tonight's verdict.
         return await Latest(_db.IngestionVerifications.AsNoTracking()
-            .Where(v => v.PipelineDate == pipelineDate), ct);
+            .Where(v => v.PipelineDate == pipelineDate && v.RunUtc >= notBeforeUtc), ct);
     }
 
     private static Task<IngestionVerificationRow?> Latest(
