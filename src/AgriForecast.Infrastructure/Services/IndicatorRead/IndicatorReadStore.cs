@@ -4,18 +4,15 @@ using Microsoft.EntityFrameworkCore;
 
 namespace AgriForecast.Infrastructure.Services.IndicatorRead;
 
-// Read-only projection over EconomicIndicators + MacroSeriesPoints for the admin Indicators
-// page (ADM-6 / API-11). Pure EF LINQ, AsNoTracking — no business logic here (window
-// resolution + validation live in the handlers).
+// Read-only projection over EconomicIndicators and MacroSeriesPoints for the admin Indicators page. Pure EF
+// LINQ, AsNoTracking — window resolution and validation live in the handlers.
 //
-// DATE HANDLING: EconomicIndicator.Date is a DateTime stored at midnight; MacroSeriesPoint
-// ReferenceDate/PublishedAt are mapped to SQL "date" (no time). DateOnly filter bounds are
-// converted to midnight DateTime at the boundary and compared inclusively (stored values sit
-// at midnight, so `<= to(midnight)` includes the "to" day). Materialized DateTimes are then
-// coalesced to DateOnly in memory (DateOnly.FromDateTime does not translate to SQL).
+// Dates: EconomicIndicator.Date is a DateTime stored at midnight, while the macro dates are SQL "date".
+// DateOnly filter bounds are converted to midnight DateTime at the boundary and compared inclusively, then
+// materialized DateTimes are coalesced to DateOnly in memory (DateOnly.FromDateTime does not translate).
 //
-// The macro reads NEVER collapse ReferenceDate and PublishedAt — both flow through verbatim,
-// and the window filter is applied on ReferenceDate only (the chart axis / leakage discipline).
+// The macro reads never collapse ReferenceDate and PublishedAt: both flow through verbatim, and the window
+// filter is applied on ReferenceDate only.
 public class IndicatorReadStore : IIndicatorReadStore
 {
     private readonly AgriForecastDbContext _db;
@@ -61,8 +58,8 @@ public class IndicatorReadStore : IIndicatorReadStore
         var fromDt = fromInclusive.ToDateTime(TimeOnly.MinValue);
         var toDt = toInclusive.ToDateTime(TimeOnly.MinValue);
 
-        // Window on ReferenceDate ONLY (the chart axis). PublishedAt is projected verbatim,
-        // never used to filter — filtering on it would be the leakage collapse this guards against.
+        // Window on ReferenceDate only (the chart axis). PublishedAt is projected verbatim and never used to
+        // filter — filtering on it would be exactly the leakage collapse this guards against.
         var raw = await _db.MacroSeriesPoints.AsNoTracking()
             .Where(x => x.SeriesCode == key && x.ReferenceDate >= fromDt && x.ReferenceDate <= toDt)
             .OrderBy(x => x.ReferenceDate).ThenBy(x => x.PublishedAt)

@@ -23,22 +23,17 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
     private readonly CodeSettings _codeSettings;
     private const string SourceName = "DAMBULLA_DEC";
 
-    // Every DAMBULLA_DEC row is a Dambulla economic-centre price, so inserts must carry the
-    // Dambulla Markets link (FK added in R2 Step 3.3). Resolved at runtime by MarketCode —
-    // never a hardcoded GUID (same rule as the Step 3.3 backfill migration and HARTI loader).
+    // Every DAMBULLA_DEC row is a Dambulla economic-centre price, so inserts must carry the Dambulla Markets
+    // link. Resolved at runtime by MarketCode, never a hardcoded GUID.
     private const string DambullaMarketCode = "MKT00000001";
 
-    // Default category for auto-provisioned crops = top-level Vegetable (fixed seed GUID).
-    // Fruit-by-keyword refinement bumps obvious fruits to top-level Fruit instead.
-    // (Seed GUIDs are the fixed reference-table constants on CropCategory — single source of truth
-    // shared with the manual registration path and the CropCode re-code migration.)
+    // Default category for auto-provisioned crops is top-level Vegetable; the fruit-keyword check below bumps
+    // obvious fruits to top-level Fruit instead. The seed GUIDs live on CropCategory.
     private static readonly Guid VegetableCategoryId = CropCategory.VegetableId;
     private static readonly Guid FruitCategoryId = CropCategory.FruitId;
 
-    // Conservative fruit keyword list. Melon variants are deliberately EXCLUDED: "watermelon"
-    // and other melons appear under vegetables in Sri Lankan market groupings, so keeping them
-    // as the Vegetable default avoids mis-classifying them as Fruit. Covers the common
-    // "avacado" misspelling seen in feed product names.
+    // Conservative fruit keyword list. Melon variants are deliberately excluded, because melons appear under
+    // vegetables in Sri Lankan market groupings. Covers the common "avacado" misspelling in feed names.
     private static readonly string[] FruitKeywords =
     {
         "banana", "mango", "papaya", "pineapple", "guava", "avocado", "avacado"
@@ -62,33 +57,28 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
     {
         var maxProductId = int.Parse(_config["MarketPriceSources:DambullaDec:MaxProductId"] ?? "101");
 
-        // Fail-closed: without the Dambulla Markets row we cannot link inserts, and inserting
-        // unlinked rows would silently recreate the NULL-EconomicCenterId gap this guards against.
+        // Fail closed: without the Dambulla Markets row we cannot link inserts, and inserting unlinked rows
+        // would silently recreate the NULL-EconomicCenterId gap this guards against.
         var dambullaMarket = await _marketRepository.GetOneAsyncInclude(m => m.MarketCode == DambullaMarketCode)
             ?? throw new InvalidOperationException(
                 $"Market '{DambullaMarketCode}' (Dambulla DEC) not found; aborting ingestion rather than inserting unlinked price rows.");
 
-        // 1. R2 Step 8.2: the CommodityAliases route is the SINGLE GOVERNING resolver. Build the
-        //    feed ProductId -> CropId lookup from ACTIVE DEC-scoped (or null-Source) aliases whose
-        //    Alias parses as an integer ProductId (Alias='11', Source='DAMBULLA_DEC'). The legacy
-        //    Crops.ExternalProductId route (and its column) was retired in this subtask; there is no
-        //    longer a shadow comparison — this route IS the route.
+        // 1. CommodityAliases is the single governing resolver. Build the feed ProductId -> CropId lookup from
+        //    ACTIVE DEC-scoped (or global) aliases whose Alias parses as an integer ProductId.
         var cropByProduct = BuildAliasRoute(await _commodityAliasRepository.GetAllAsync());
 
-        // Load all crops solely to self-heal agronomy profiles below (a crop must never exist
-        // without one). This is NOT a resolution route — resolution is alias-only.
+        // Load all crops solely to self-heal agronomy profiles below. This is NOT a resolution route —
+        // resolution is alias-only.
         var crops = await _cropRepository.GetAllAsync();
 
-        // Track which crops already have an agronomy profile so we can (a) self-heal any crop
-        // that somehow exists without one and (b) avoid double-staging a profile for a crop we
-        // just provisioned in this same pass. Loaded once; kept in sync as we create profiles.
+        // Track which crops already have an agronomy profile, so we can self-heal any crop without one and
+        // avoid double-staging a profile for a crop provisioned in this same pass.
         var cropsWithProfile = (await _agronomyProfileRepository.GetAllAsync())
             .Select(p => p.CropId)
             .ToHashSet();
 
-        // 2. Self-heal: auto-provision a crop for every product that already has price
-        //    rows but no crop yet. Historic data ingested before a crop existed becomes
-        //    forecastable without any manual catalog curation.
+        // 2. Self-heal: auto-provision a crop for every product that already has price rows but no crop, so
+        //    historic data becomes forecastable without manual catalog curation.
         int cropsAutoCreated = 0;
         var existingProducts = await _marketPriceRepository.GetDistinctExternalProductsAsync(SourceName, ct);
         foreach (var product in existingProducts)
@@ -101,10 +91,8 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
             cropsAutoCreated++;
         }
 
-        // 2b. Self-heal agronomy profiles: a crop must never exist without a profile going
-        //     forward, but legacy/edge crops predating this rule may lack one. Stage a PENDING
-        //     profile for any such crop (matches how we self-heal missing crops above). Idempotent:
-        //     crops that already have a profile are skipped via cropsWithProfile.
+        // 2b. Self-heal agronomy profiles: a crop must never exist without one going forward, but legacy crops
+        //     may lack one. Idempotent — crops already in cropsWithProfile are skipped.
         int profilesHealed = 0;
         foreach (var crop in crops)
         {
@@ -214,24 +202,20 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
             "Dambulla ingestion completed. Inserted={Inserted}, SkippedExisting={Skipped}, ZeroSkipped={ZeroSkipped}, CropsAutoCreated={CropsAutoCreated}, NewCropsFromFeed={NewCropsFromFeed}, Backfilled={Backfilled}, FailedProducts={FailedProducts}",
             inserted, skipped, zeroSkipped, cropsAutoCreated, newCropsFromFeed, backfilled, failedProducts);
 
-        // Return the SAME counts already logged (no recount) for the source's IngestionRun row.
-        // RowsSkipped folds both dedup-skips (existing dates) and zero-price market-closed skips.
-        // DistinctCrops (S3) is the number of distinct crops on rows actually INSERTED this pass —
-        // NOT the whole ~96-crop alias route, which would report ~96 every pass regardless of work
-        // done. RowsFetched / coverage dates are left null — the loop tracks no fetched total or date
-        // window, and null is the honest "not tracked" value rather than a fabricated number.
+        // Return the same counts already logged, for the source's IngestionRun row. RowsSkipped folds both
+        // dedup skips and zero-price market-closed skips. DistinctCrops counts the crops on rows actually
+        // INSERTED this pass, not the whole ~96-crop alias route, which would report ~96 every pass. RowsFetched
+        // and the coverage dates stay null — the honest "not tracked" value.
         return new IngestionRunStats(
             RowsInserted: inserted,
             RowsSkipped: skipped + zeroSkipped,
             DistinctCrops: insertedCropIds.Count);
     }
 
-    // Builds the governing resolution lookup: feed ProductId -> CropId, from ACTIVE DEC-scoped
-    // (or null-Source / global — the CommodityAlias contract says NULL applies to all sources)
-    // aliases whose Alias parses as an integer ProductId. Non-numeric / inactive / other-source
-    // aliases are skipped (they simply don't participate — never a misresolution). Precedence is
-    // DETERMINISTIC: a DEC-scoped alias always beats a global one for the same ProductId
-    // (specific over general), regardless of enumeration order.
+    // Builds the governing resolution lookup, feed ProductId -> CropId, from ACTIVE DEC-scoped or global
+    // aliases whose Alias parses as an integer ProductId. Non-numeric, inactive and other-source aliases are
+    // skipped rather than misresolved. Precedence is deterministic: a DEC-scoped alias always beats a global
+    // one for the same ProductId, regardless of enumeration order.
     private static Dictionary<int, Guid> BuildAliasRoute(IEnumerable<CommodityAlias> aliases)
     {
         var route = new Dictionary<int, Guid>();
@@ -252,24 +236,19 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         return route;
     }
 
-    // Creates and stages (not committed) a crop for an external market product, plus its PENDING
-    // agronomy profile (a crop must never exist without one).
-    //
-    // R2 D-DF4: CropCode is now the category-prefixed VEG######/FRT###### scheme (was the
-    // source-derived DMB###### scheme). The prefix follows the crop's resolved CropCategoryId
-    // (fruit-keyword ⇒ FRT, else VEG), consuming the per-prefix DefaultSetting counter via
-    // CodeSettings.GetCropCode — the SAME counter the manual CQRS path uses. The counter increment
-    // commits in the caller's CommitAsync scope alongside the crop insert. CropCode has no unique
-    // index/FK/join (display-only), so a rare worker/API counter race yields at worst a duplicate
-    // cosmetic code, never a failed insert — accepted trade-off for a single consistent code scheme.
-    // cropsWithProfile is updated so the self-heal pass never double-stages a profile for a crop
-    // provisioned in this same run.
+    // Creates and stages (not commits) a crop for an external market product, plus its PENDING agronomy
+    // profile — a crop must never exist without one.
+    // CropCode uses the category-prefixed VEG######/FRT###### scheme, consuming the same per-prefix
+    // DefaultSetting counter as the manual CQRS path; the increment commits in the caller's CommitAsync scope.
+    // CropCode has no unique index, FK or join, so a rare counter race yields at worst a duplicate cosmetic
+    // code, never a failed insert. cropsWithProfile is updated so the self-heal pass never double-stages a
+    // profile for a crop provisioned here.
     private async Task<Guid> CreateCropForProductAsync(int externalProductId, string name, HashSet<Guid> cropsWithProfile, CancellationToken ct)
     {
         var cropName = string.IsNullOrWhiteSpace(name) ? $"Product {externalProductId}" : name.Trim();
 
-        // Assign a default CropCategory so auto-provisioned crops are never left uncategorised:
-        // top-level Vegetable, or top-level Fruit when the product name matches a fruit keyword.
+        // Assign a default CropCategory so auto-provisioned crops are never left uncategorised: top-level
+        // Vegetable, or top-level Fruit when the product name matches a fruit keyword.
         var categoryId = ResolveCategoryId(cropName);
 
         // CropCode prefix follows the TOP-LEVEL category of that CropCategoryId.
@@ -281,16 +260,13 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
 
         await _cropRepository.Addasync(crop);
 
-        // Stage the PENDING (unverified, all-fields-NULL) agronomy profile alongside the crop, in
-        // the same commit scope as the caller's CommitAsync. Step-5 curation fills and verifies it.
+        // Stage the pending agronomy profile alongside the crop, in the caller's commit scope.
         await _agronomyProfileRepository.AddAsync(CropAgronomyProfile.CreatePending(crop.Id));
         cropsWithProfile.Add(crop.Id);
 
-        // R2 Step 8.2: a brand-new feed product is mapped SOLELY by an ACTIVE DEC CommodityAlias
-        // (Alias = the stable ProductId stringified, Source='DAMBULLA_DEC'), staged in the same
-        // unit of work as the crop + pending profile. This alias is the only crop<->product mapping
-        // (Crops.ExternalProductId is gone); without it the product would be unmapped and would
-        // auto-provision a fresh duplicate crop on the next run.
+        // A brand-new feed product is mapped SOLELY by an ACTIVE DEC CommodityAlias (Alias = the ProductId
+        // stringified), staged in the same unit of work as the crop and its profile. Without it the product
+        // would be unmapped and would auto-provision a duplicate crop on the next run.
         await _commodityAliasRepository.AddAsync(
             CommodityAlias.CreateNew(externalProductId.ToString(), crop.Id, SourceName));
 
@@ -302,9 +278,8 @@ public class MarketPriceIngestionService : IMarketPriceIngestionService
         return crop.Id;
     }
 
-    // Maps an auto-provisioned crop name to a top-level CropCategory. Default is Vegetable;
-    // returns Fruit only when the (case-insensitive) name contains a fruit keyword. Melons are
-    // intentionally NOT fruit keywords (kept as Vegetable — see FruitKeywords remarks).
+    // Maps an auto-provisioned crop name to a top-level CropCategory. Vegetable by default; Fruit only when
+    // the name contains a fruit keyword. Melons are intentionally not fruit keywords.
     private static Guid ResolveCategoryId(string cropName)
     {
         var lower = cropName.ToLowerInvariant();

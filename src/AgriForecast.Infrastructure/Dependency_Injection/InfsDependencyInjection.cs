@@ -31,11 +31,8 @@ public static class InfsDependencyInjection
         services.AddScoped<ICropRepository, CropRepository>();
         services.AddScoped<ICropCategoryRepository, CropCategoryRepository>();
         services.AddScoped<IMarketPriceRepository, MarketPriceRepository>();
-        // R2 D-DF4: the ingestion auto-provision path now stamps category-prefixed CropCodes via
-        // CodeSettings (same counter as the manual CQRS path). The Ingestion worker wires only the
-        // Infrastructure layer (not AddApplicationLayer), so register CodeSettings here too — its
-        // only dependency, IDefaultSettingRepository, is registered above. Matches the Transient
-        // lifetime used in ApplicationDependencyInjection (the API registers both; harmless dup).
+        // The Ingestion worker wires only the Infrastructure layer, so CodeSettings is registered here too
+        // (the API registers it as well; a harmless duplicate).
         services.AddTransient<AgriForecast.Application.common.CodeSettings>();
         services.AddScoped<IMarketPriceIngestionService, MarketPriceIngestionService>();
         services.AddScoped<IWeatherIngestionService, WeatherIngestionService>();
@@ -47,8 +44,7 @@ public static class InfsDependencyInjection
         services.AddScoped<IPolicyFlagRepository, PolicyFlagRepository>();
         services.AddScoped<IFestivalCalendarRepository, FestivalCalendarRepository>();
         services.AddScoped<INewsEventRepository, NewsEventRepository>();
-        // Read-only store over the Python-owned NewsArticles capture table (admin News page
-        // "Ingested articles" feed) — raw SQL, deliberately outside the EF model.
+        // Read-only store over the Python-owned NewsArticles capture table (raw SQL, outside the EF model).
         services.AddScoped<Application.Services.INewsArticleReadStore, Services.NewsArticleRead.NewsArticleReadStore>();
         services.AddScoped<IForecastingService, ForecastingService>();
         services.AddScoped<IRecommendationService, RecommendationService>();
@@ -58,48 +54,39 @@ public static class InfsDependencyInjection
         services.AddScoped<IMarketReadStore, AgriForecast.Infrastructure.Services.MarketRead.MarketReadStore>();
         // API-2: read-only price-history store (GET /api/prices/crop/{cropId}/history).
         services.AddScoped<IPriceHistoryStore, AgriForecast.Infrastructure.Services.PriceHistory.PriceHistoryStore>();
-        // API-11: read-only economic-indicator + macro-series store (GET /api/indicators,
-        // /api/macro-series, /api/indicators/catalog) for the admin Indicators page (ADM-6).
+        // Read-only economic-indicator and macro-series store for the admin Indicators page.
         services.AddScoped<IIndicatorReadStore, AgriForecast.Infrastructure.Services.IndicatorRead.IndicatorReadStore>();
-        // PR 3: read-only ingestion-audit store (GET /api/admin/ingestion/status + /runs) for the
-        // admin ingestion page. Reads only — uses the normal request-scoped DbContext (unlike the
-        // write-side IngestionRunRepository, which isolates every write in its own scope).
+        // Read-only ingestion-audit store. Reads only, so it uses the normal request-scoped DbContext, unlike
+        // the write-side IngestionRunRepository which isolates every write in its own scope.
         services.AddScoped<IIngestionReadStore, AgriForecast.Infrastructure.Services.IngestionRead.IngestionReadStore>();
-        // Logs hub PR A: read-only Logs-hub store (GET /api/admin/logs/training + /user-activity) for
-        // the admin Logs page. Reads only — normal request-scoped DbContext (mirrors IngestionReadStore).
+        // Read-only Logs-hub store. Reads only, on the normal request-scoped DbContext.
         services.AddScoped<ILogsReadStore, AgriForecast.Infrastructure.Services.LogsRead.LogsReadStore>();
-        // PR 3: resolves the status handler's config values (Ingestion:ServiceAddress /
-        // RunningStalenessMinutes) at the Infrastructure boundary, keeping config out of Application.
+        // Resolves the status handler's config at the Infrastructure boundary, keeping configuration out of
+        // the Application layer.
         services.AddScoped<IIngestionStatusSettings, AgriForecast.Infrastructure.Services.IngestionRead.IngestionStatusSettings>();
 
-        // R1.1 P1 Step 6: per-source ingestion watermark store + the CBSL ingestion service.
-        // (The HARTI + CBSL typed HttpClients are registered further down alongside the other
-        // typed clients.)
+        // Per-source ingestion watermark store. (The HARTI and CBSL typed HttpClients are registered further
+        // down with the other typed clients.)
         services.AddScoped<IIngestionWatermarkRepository, IngestionWatermarkRepository>();
         // Ingestion run-tracking store: one IngestionRun row per source per pass (audit foundation).
         services.AddScoped<IIngestionRunRepository, IngestionRunRepository>();
-        // CbslPriceReportIngestionService is registered as a typed HttpClient further down
-        // alongside the other ML-service clients (it orchestrates POST /admin/ingest-cbsl).
-        // R1 P3 (86cahefbh): CBSL macro (CCPI/MEI vintage) ingestion service — thin, feature-flagged
-        // OFF skeleton over the Python /admin/ingest-cbsl-macro seam. Its typed HttpClient is
-        // registered further down alongside the other ML-service clients.
+        // The CBSL price-report and CBSL macro ingestion services are registered as typed HttpClients further
+        // down, alongside the other ML-service clients.
 
         // Auth: user store, password hashing, and JWT issuance.
         services.AddScoped<IUserRepository, UserRepository>();
         services.AddScoped<IPasswordHasher, PasswordHasher>();
         services.AddScoped<IJwtTokenGenerator, JwtTokenGenerator>();
-        // Refresh-token revocation store (persisted jti / token-family). Scoped: shares the
-        // request-scoped DbContext with the user repo so an admin delete + revoke commit together.
+        // Refresh-token revocation store. Scoped so it shares the request DbContext with the user repo and an
+        // admin delete plus revoke commit together.
         services.AddScoped<IRefreshTokenRepository, RefreshTokenRepository>();
         services.AddScoped<IRefreshTokenService, RefreshTokenService>();
-        // Logs hub PR A: fire-safe user-activity audit. Isolates every write in its own scope and
-        // swallows-and-logs (never adds a failure mode to login/registration/admin ops) — same B1
-        // discipline as IngestionRunRepository, so it depends only on IServiceScopeFactory.
+        // Fire-safe user-activity audit: isolates every write in its own scope and swallows-and-logs, so it
+        // depends only on IServiceScopeFactory.
         services.AddScoped<IUserActivityAudit, UserActivityAudit>();
-        // Logs hub PR A (Phase 3): fire-safe system-error writer for GlobalExceptionMiddleware's 500
-        // path. SINGLETON (deliberate deviation from UserActivityAudit's Scoped) so the storm-guard
-        // window + retention counter are process-wide instance state; safe because it self-scopes every
-        // DB access and captures no scoped dependency, and it lets the middleware constructor-inject it.
+        // Fire-safe system-error writer. SINGLETON, unlike the Scoped UserActivityAudit, so the storm-guard
+        // window and retention counter are process-wide. Safe because it self-scopes every DB access and
+        // captures no scoped dependency, and it lets the middleware constructor-inject it.
         services.AddSingleton<ISystemErrorLog, SystemErrorLog>();
         services.Configure<JwtSettings>(configuration.GetSection(JwtSettings.SectionName));
         services.AddHttpClient<IDambullaApiClient, DambullaApiClient>(http =>
@@ -112,10 +99,8 @@ public static class InfsDependencyInjection
             http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(30);
         })
-        // SSRF hardening (S1): the DEC portal probes fixed JSON endpoints. Disable
-        // auto-redirect so a 3xx from the portal cannot silently bounce the request
-        // to an internal/arbitrary host; a redirect surfaces as a non-2xx and the
-        // client returns null (handled as a failed fetch), never followed blindly.
+        // SSRF hardening: disable auto-redirect so a 3xx from the DEC portal cannot bounce the request to an
+        // internal host. A redirect surfaces as a non-2xx and the client returns null.
         .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
         {
             AllowAutoRedirect = false,
@@ -131,11 +116,9 @@ public static class InfsDependencyInjection
             http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(30);
         });
-        // News ingestion: typed HttpClient over the same ML service, triggering
-        // the Python news pipeline via POST /admin/ingest-news (orchestrated by
-        // the Ingestion Worker). The pipeline fetches RSS + scores sentiment, so
-        // it needs a much longer timeout than /predict (override via
-        // MlService:NewsIngestTimeoutSeconds, default 600).
+        // News ingestion over the same ML service (POST /admin/ingest-news). The pipeline fetches RSS and
+        // scores sentiment, so it needs a much longer timeout than /predict
+        // (MlService:NewsIngestTimeoutSeconds, default 600).
         services.AddHttpClient<INewsIngestionService, NewsIngestionService>(http =>
         {
             var baseUrl = configuration["MlService:BaseUrl"];
@@ -148,12 +131,9 @@ public static class InfsDependencyInjection
             http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
         });
-        // HARTI multi-market bulletin ingestion: typed HttpClient over the same ML service,
-        // triggering the Python HARTI pipeline via POST /admin/ingest-harti (orchestrated by the
-        // Ingestion Worker). The pipeline can (re)parse a large PDF corpus + run data-quality
-        // hooks, so it needs a long timeout — much longer than /predict (override via
-        // MlService:HartiIngestTimeoutSeconds, default 1800 = 30 min for a full backfill; the
-        // daily incremental pass is far shorter).
+        // HARTI bulletin ingestion over the same ML service (POST /admin/ingest-harti). The pipeline can
+        // reparse a large PDF corpus, so the timeout is long (MlService:HartiIngestTimeoutSeconds, default
+        // 1800 for a full backfill; the daily incremental pass is far shorter).
         services.AddHttpClient<IHartiBulletinIngestionService, HartiBulletinIngestionService>(http =>
         {
             var baseUrl = configuration["MlService:BaseUrl"];
@@ -166,11 +146,9 @@ public static class InfsDependencyInjection
             http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
         });
-        // CBSL Daily Price Report ingestion (feat/cbsl-price-parser, capture-only) — typed
-        // HttpClient over the same ML service, triggering the Python CBSL pipeline via POST
-        // /admin/ingest-cbsl (orchestrated by the Ingestion Worker; the old NotSupported client
-        // skeleton is retired). The daily incremental pass downloads/parses at most a handful of
-        // 2-page PDFs, so a modest timeout suffices (override via MlService:CbslIngestTimeoutSeconds).
+        // CBSL Daily Price Report ingestion over the same ML service (POST /admin/ingest-cbsl). The daily pass
+        // parses at most a handful of 2-page PDFs, so a modest timeout suffices
+        // (MlService:CbslIngestTimeoutSeconds).
         services.AddHttpClient<ICbslPriceReportIngestionService, CbslPriceReportIngestionService>(http =>
         {
             var baseUrl = configuration["MlService:BaseUrl"];
@@ -183,11 +161,8 @@ public static class InfsDependencyInjection
             http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
         });
-        // R1 P3 (86cahefbh): CBSL macro ingestion — typed HttpClient over the same ML service,
-        // triggering the Python macro pipeline via POST /admin/ingest-cbsl-macro (orchestrated by
-        // the Ingestion Worker). BaseAddress = MlService:BaseUrl (the /admin/* seam lives on the ML
-        // service, same as HARTI/news). The pipeline scrapes + parses a small monthly PDF corpus, so
-        // a 60s timeout is comfortable (override via MlService:CbslMacroIngestTimeoutSeconds).
+        // CBSL macro ingestion over the same ML service (POST /admin/ingest-cbsl-macro). The pipeline parses a
+        // small monthly PDF corpus, so 60s is comfortable (MlService:CbslMacroIngestTimeoutSeconds).
         services.AddHttpClient<ICbslMacroIngestionService, CbslMacroIngestionService>(http =>
         {
             var baseUrl = configuration["MlService:BaseUrl"];
@@ -200,10 +175,8 @@ public static class InfsDependencyInjection
             http.BaseAddress = new Uri(baseUrl);
             http.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
         })
-        // SSRF hardening (matches the Dambulla client): disable auto-redirect so a 3xx from the ML
-        // host cannot silently bounce an authenticated admin POST to an internal/arbitrary host — a
-        // redirect surfaces as a non-2xx and is handled as a failed pass, never followed blindly.
-        // (The recorded lesson notes the existing CBSL price-report client block lacks this.)
+        // SSRF hardening, as on the Dambulla client: disable auto-redirect so a 3xx from the ML host cannot
+        // bounce an authenticated admin POST to an internal host.
         .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
         {
             AllowAutoRedirect = false,

@@ -52,26 +52,24 @@ public class JwtTokenGenerator : IJwtTokenGenerator
     private const string TokenUseClaim = "token_use";
     private const string RefreshTokenUse = "refresh";
 
-    // Internal-jti overload: unchanged public behaviour for the stateless call sites/tests.
+    // Overload that generates the jti internally, for the stateless call sites and tests.
     public (string token, DateTime expiresAtUtc) GenerateRefreshToken(Guid userId)
         => GenerateRefreshToken(userId, Guid.NewGuid());
 
     public (string token, DateTime expiresAtUtc) GenerateRefreshToken(Guid userId, Guid jti)
     {
-        // Refresh tokens are long-lived and identify the user by their IMMUTABLE id only — never the
-        // mutable username — so a rename or delete-then-re-register can't let an outstanding refresh
-        // token resolve to a different account. Username/email/role are re-resolved from the store on
-        // each refresh, so they are deliberately NOT embedded. Id is lowercased (Guid.ToString()
-        // default) to match the .NET<->Python wire convention. The jti is supplied by the caller so
-        // the persisted revocation record and this token agree on the same identifier.
+        // Refresh tokens identify the user by their IMMUTABLE id only — never the mutable username — so a
+        // rename or delete-then-re-register cannot let an outstanding token resolve to a different account.
+        // Username, email and role are re-resolved from the store on each refresh, so they are not embedded.
+        // The jti comes from the caller so the persisted revocation record and this token agree.
         var expiresAtUtc = DateTime.UtcNow.AddDays(_settings.RefreshTokenDays);
 
         var claims = new[]
         {
             new Claim(JwtRegisteredClaimNames.Sub, userId.ToString()),
             new Claim(JwtRegisteredClaimNames.Jti, jti.ToString()),
-            // Token-type separation: marks this as a refresh token so it can never be replayed
-            // as an access token even if the audience check were ever loosened.
+            // Marks this as a refresh token, so it can never be replayed as an access token even if the
+            // audience check were ever loosened.
             new Claim(TokenUseClaim, RefreshTokenUse)
         };
 
@@ -80,8 +78,7 @@ public class JwtTokenGenerator : IJwtTokenGenerator
 
         var token = new JwtSecurityToken(
             issuer: _settings.Issuer,
-            // Distinct audience so the default JwtBearer pipeline (ValidAudience = access audience)
-            // rejects this token if it is ever presented as a Bearer access token.
+            // Distinct audience so the default JwtBearer pipeline rejects this token if presented as a Bearer.
             audience: _settings.EffectiveRefreshAudience,
             claims: claims,
             notBefore: DateTime.UtcNow,
@@ -99,7 +96,7 @@ public class JwtTokenGenerator : IJwtTokenGenerator
             return null;
 
         // Subject is the immutable user id. Default inbound mapping turns "sub" into
-        // ClaimTypes.NameIdentifier, so check both to be robust to mapping settings.
+        // ClaimTypes.NameIdentifier, so check both.
         var userId = validated.Value.principal.FindFirst(ClaimTypes.NameIdentifier)?.Value
                      ?? validated.Value.principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
 
@@ -116,17 +113,16 @@ public class JwtTokenGenerator : IJwtTokenGenerator
         var userIdStr = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value
                         ?? principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
 
-        // jwt.Id is the raw jti claim, read straight off the validated token — immune to inbound
-        // claim-type remapping. Both ids must be well-formed GUIDs or the token is treated as invalid.
+        // jwt.Id is the raw jti claim, immune to inbound claim-type remapping. Both ids must be valid GUIDs.
         if (!Guid.TryParse(userIdStr, out var userId) || !Guid.TryParse(jwt.Id, out var jti))
             return null;
 
         return new RefreshTokenPrincipal(userId, jti);
     }
 
-    // Shared crypto validation for both refresh-token readers. Returns the validated principal and
-    // the parsed token, or null on ANY failure (bad signature / wrong audience / expired / malformed
-    // / not a refresh token) — the reason is never surfaced, so callers cannot build an oracle.
+    // Shared crypto validation for both refresh-token readers. Returns null on ANY failure (bad signature,
+    // wrong audience, expired, malformed, not a refresh token) — the reason is never surfaced, so a caller
+    // cannot build an oracle.
     private (ClaimsPrincipal principal, JwtSecurityToken jwt)? ValidateRefreshCore(string? token)
     {
         if (string.IsNullOrWhiteSpace(token))
@@ -140,8 +136,7 @@ public class JwtTokenGenerator : IJwtTokenGenerator
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
             ValidIssuer = _settings.Issuer,
-            // Only the refresh audience is accepted here, so an ACCESS token placed in the cookie
-            // (audience = access audience) fails validation and is rejected as a refresh token.
+            // Only the refresh audience is accepted, so an access token placed in the cookie is rejected.
             ValidAudience = _settings.EffectiveRefreshAudience,
             IssuerSigningKey = key,
             ClockSkew = TimeSpan.FromSeconds(30)
@@ -164,8 +159,7 @@ public class JwtTokenGenerator : IJwtTokenGenerator
         }
         catch
         {
-            // Any validation failure (bad signature, wrong audience, expired, malformed) is a 401 —
-            // never surface the reason to the caller.
+            // Any validation failure is a 401 — never surface the reason to the caller.
             return null;
         }
     }

@@ -5,11 +5,9 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Infrastructure.ExternalSources.Interfaces;
 
-// Historical USD/LKR via fawazahmed0/exchange-api (free, keyless, daily history).
-// Date is the SUBDOMAIN: https://{yyyy-MM-dd}.currency-api.pages.dev/v1/currencies/usd.json
-// Response: { "date": "2025-01-01", "usd": { "lkr": 293.16, ... } }  -> read usd.lkr (nested).
-// NOTE: the older jsDelivr "gh/..@date" / "npm/..@date" tag URLs are deprecated (404 / cold-start
-// hangs), so we hit the Cloudflare Pages host directly with absolute URIs.
+// Historical USD/LKR via fawazahmed0/exchange-api (free, keyless, daily history). The date is the
+// SUBDOMAIN: https://{yyyy-MM-dd}.currency-api.pages.dev/v1/currencies/usd.json, and the rate is read from
+// the nested usd.lkr. The older jsDelivr tag URLs are deprecated (404 / cold-start hangs).
 public sealed class FawazCurrencyFxClient : IFxHistoricalClient
 {
     private const decimal MinPlausibleRate = 200m;

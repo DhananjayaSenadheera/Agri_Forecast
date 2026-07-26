@@ -9,29 +9,21 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Infrastructure.Services.CbslIngestion;
 
-// CBSL Daily Price Report ingestion — LIVE (feat/cbsl-price-parser, 2026-07-22; capture-only).
+// CBSL Daily Price Report ingestion (capture-only). The PDF parser is Python (agriforecast_ml/cbsl_report);
+// this service orchestrates it over the same authenticated HTTP -> FastAPI seam as HARTI and News, via
+// POST /admin/ingest-cbsl.
 //
-// The R1.1 P1 Step 6 skeleton is now real: the PDF parser was corpus-probed and built on the
-// Python side (agriforecast_ml/cbsl_report — the single-source-of-truth rule the HARTI parser
-// follows), and this service orchestrates it over the same authenticated HTTP->FastAPI seam as
-// HARTI/News, via POST /admin/ingest-cbsl. The old typed-client skeleton (CbslPriceReportClient,
-// which could only throw NotSupportedException) is retired.
+// The feature flag MarketPriceSources:Cbsl:Enabled is the source's pause switch. Flag off keeps the
+// watermark Disabled, which is a documented no-op and never a source failure; flag on runs the pass even if
+// a Disabled watermark was left behind by the flag-off era, and a successful pass flips it back to Ok.
 //
-// FEATURE FLAG (MarketPriceSources:Cbsl:Enabled) is the source's single pause switch: flag OFF =>
-// the watermark is kept in the Disabled state (a documented no-op, NEVER a source failure) exactly
-// as before; flag ON => the pass runs regardless of a Disabled watermark left by the flag-off era
-// (the Disabled state is the flag's REFLECTION, not an independent control — a successful pass
-// flips it to Ok via RecordSuccess).
+// Resume mirrors HARTI: sinceDate = LastObservedDate - CbslLookbackDays (default 3), since a report for a
+// holiday-adjacent date can appear around gaps and the idempotent upsert makes re-scanning free. A null
+// watermark sends a null sinceDate and Python applies its own last-7-days default — a cold start must never
+// trigger a silent historical backfill (deliberate backfills go through the CLI).
 //
-// Resume/look-back mirrors HARTI: sinceDate = LastObservedDate - CbslLookbackDays (default 3;
-// reports for a holiday-adjacent date can appear around gaps, and the idempotent upsert makes
-// re-scanning free). A NULL watermark sends a null sinceDate and the Python side applies its own
-// last-7-days default — the capture-only contract (owner 2026-07-22): a cold start must never
-// trigger a silent historical backfill (deliberate backfills go through the ingest_cbsl.py CLI).
-//
-// Fail-safe but EXPRESSIVE (S1): transport/HTTP/parse failures record a watermark Failure WITHOUT
-// advancing the resume point and return Outcome=Failed — never a throw to the Worker, never a
-// green run row for a failed pass.
+// Fail-safe but expressive: transport, HTTP or parse failures record a watermark failure WITHOUT advancing
+// the resume point and return Outcome=Failed — never a throw to the Worker, never a green run row.
 public class CbslPriceReportIngestionService : ICbslPriceReportIngestionService
 {
     public const string SourceKey = "CBSL";
@@ -75,8 +67,7 @@ public class CbslPriceReportIngestionService : ICbslPriceReportIngestionService
 
         if (!enabled)
         {
-            // Flag OFF: keep the watermark in the Disabled state (create it Disabled if absent) —
-            // a no-op that is explicitly NOT a source failure, exactly the pre-parser behaviour.
+            // Flag off: keep the watermark Disabled (creating it if absent). A no-op, not a source failure.
             var disabledWm = await _watermarks.GetOrCreateAsync(
                 SourceKey, IngestionSourceStatus.Disabled, DisabledReason, ct);
 
@@ -94,8 +85,7 @@ public class CbslPriceReportIngestionService : ICbslPriceReportIngestionService
 
         var watermark = await _watermarks.GetOrCreateAsync(SourceKey, ct: ct);
 
-        // Fail loud on a missing admin key (mirrors HARTI/News; a silent missing header would
-        // surface as a confusing 401 from the ML service).
+        // Fail loud on a missing admin key: a silently missing header would surface as a confusing 401.
         var apiKey = _configuration[AdminApiKeyConfigKey];
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException(
@@ -208,14 +198,13 @@ public class CbslPriceReportIngestionService : ICbslPriceReportIngestionService
 
     private sealed class IngestCbslRequest
     {
-        // Resume lower bound (report date > sinceDate). Null => the Python side's own
-        // last-7-days default (capture-only: never a silent full backfill).
+        // Resume lower bound (report date > sinceDate). Null means the Python side's last-7-days default.
         [JsonPropertyName("sinceDate")]
         public string? SinceDate { get; set; }
     }
 
-    // Response shape is deliberately IDENTICAL to /admin/ingest-harti's (one contract for the
-    // PDF-price sources); private mirror classes keep the two services decoupled in code.
+    // The response shape is deliberately identical to /admin/ingest-harti's; the private mirror keeps the two
+    // services decoupled in code.
     private sealed class IngestCbslResponse
     {
         [JsonPropertyName("status")]

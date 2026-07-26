@@ -7,28 +7,21 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Infrastructure.Repositories;
 
-// ISOLATION + FAIL-SAFE (mirrors UserActivityAudit's B1 discipline): every error-log write runs in its
-// OWN service scope, resolving a FRESH AgriForecastDbContext with an independent ChangeTracker, so an
-// error-log SaveChanges can never flush the request's pending entities, and a poisoned entity in the
-// request context can never make the error-log save throw.
+// Every error-log write runs in its OWN service scope with a fresh DbContext, so it can never flush the
+// request's pending entities, and a poisoned entity in the request context can never make the log save throw.
 //
-// FAIL-SAFE: recording an error must NEVER change the response being recorded. Every write is wrapped
-// in a catch-all that SWALLOWS-AND-LOGS ONLY THE FAILURE'S TYPE NAME (never the exception message, the
-// request path, or any captured field) and NEVER rethrows into the middleware.
+// Recording an error must never change the response being recorded, so every write is wrapped in a catch-all
+// that logs ONLY the failure's type name — never the exception message, the request path, or any captured
+// field — and never rethrows into the middleware.
 //
-// LIFETIME (deliberate deviation from UserActivityAudit's Scoped registration): this writer is a
-// SINGLETON so the storm-guard window and the retention counter are naturally PROCESS-WIDE instance
-// state. It is safe as a singleton because it depends only on singleton-safe seams (IServiceScopeFactory,
-// ILogger, TimeProvider) and self-scopes every DB access — it captures no scoped dependency. Being a
-// singleton also lets GlobalExceptionMiddleware constructor-inject it directly.
+// This writer is a SINGLETON, unlike the Scoped UserActivityAudit, so the storm-guard window and the
+// retention counter are process-wide instance state. That is safe because it depends only on singleton-safe
+// seams and self-scopes every DB access, and it lets GlobalExceptionMiddleware constructor-inject it.
 //
-// STORM GUARD: a process-wide token bucket admits at most MaxWritesPerWindow (60) writes per rolling
-// one-minute window; excess writes are DROPPED (not queued). When a window with drops rolls over, one
-// stdout log reports the drop count for that window.
-//
-// RETENTION: after roughly every PruneEveryN (100) successful inserts, a bounded DELETE TOP (500) trims
-// rows older than 90 days. The prune is self-guarded (its own scope + try/catch) so a prune failure can
-// never throw and never masks a successful insert.
+// Storm guard: a process-wide token bucket admits at most MaxWritesPerWindow writes per rolling minute;
+// excess writes are dropped, not queued, and one log reports the drop count when a window rolls over.
+// Retention: roughly every PruneEveryN successful inserts, a bounded DELETE trims rows older than 90 days.
+// The prune is self-guarded, so a prune failure never throws and never masks a successful insert.
 public class SystemErrorLog : ISystemErrorLog
 {
     private const string SourceApi = "API";
@@ -84,15 +77,15 @@ public class SystemErrorLog : ISystemErrorLog
         }
         catch (Exception failure)
         {
-            // Log ONLY the failure's type name — never the recorded exception's message/stack, and
-            // never the request path — and swallow: error logging must never change the response.
+            // Log only the failure's type name — never the recorded exception or the request path — and
+            // swallow: error logging must never change the response.
             _logger.LogWarning("Failed to write system-error log row ({FailureType}).",
                 failure.GetType().Name);
         }
     }
 
-    // Process-wide token bucket. Returns true if this write is admitted, false if the window is full and
-    // the write must be dropped. On a window roll-over, emits one stdout log per window that had drops.
+    // Process-wide token bucket. Returns false when the window is full and the write must be dropped; on a
+    // window roll-over it emits one log per window that had drops.
     private bool TryAdmit()
     {
         var now = _clock.GetUtcNow().UtcDateTime;
@@ -122,8 +115,8 @@ public class SystemErrorLog : ISystemErrorLog
         }
     }
 
-    // Every Nth successful insert, run the bounded age-based prune in its OWN scope. Fully self-guarded:
-    // a prune failure is swallowed-and-logged (type name only) and never throws, never masks the insert.
+    // Every Nth successful insert, run the bounded age-based prune in its own scope. Self-guarded: a prune
+    // failure is swallowed and logged and never masks the insert.
     private async Task MaybePruneAsync(CancellationToken ct)
     {
         if (Interlocked.Increment(ref _insertCount) % PruneEveryN != 0)

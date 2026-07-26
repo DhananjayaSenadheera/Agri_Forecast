@@ -7,24 +7,19 @@ using Microsoft.EntityFrameworkCore;
 namespace AgriForecast.Infrastructure.Services.IngestionRead;
 
 // Read-only projection over the ingestion audit tables for the admin ingestion page. Pure EF LINQ,
-// AsNoTracking — no business logic here (state derivation, batch-outcome roll-up, staleness window,
-// and validation live in the handlers). Uses the normal request-scoped DbContext: these are reads,
-// so none of the write-side isolation (IngestionRunRepository's per-write scopes) is needed.
-//
-// DATE HANDLING: IngestionRun.CoveredFrom/ToDate, IngestionVerification.PipelineDate and
-// IngestionWatermark.LastObservedDate are all mapped to SQL "date" and modelled as DateOnly, so they
-// project straight through (no midnight-DateTime coalescing like the EconomicIndicator store needs).
+// AsNoTracking — state derivation, batch roll-up and validation live in the handlers. These are reads, so
+// none of the write-side per-write scoping is needed.
+// The date columns are all SQL "date" modelled as DateOnly, so they project straight through.
 public class IngestionReadStore : IIngestionReadStore
 {
     private readonly AgriForecastDbContext _db;
 
     public IngestionReadStore(AgriForecastDbContext db) => _db = db;
 
-    // Applies the caller-supplied source exclusion (null/empty = no exclusion). The POLICY of WHICH
-    // sources are excluded is the handler's (IngestionSources.ExcludedFromServiceState) — this store
-    // only applies what it is given, so /runs can keep listing rows the status card ignores.
-    // Materialized to a List because EF translates List.Contains to a SQL IN, and negated to
-    // NOT IN (...). Source is never null (non-nullable column), so no null-handling branch is needed.
+    // Applies the caller-supplied source exclusion (null or empty means no exclusion). The policy of WHICH
+    // sources are excluded belongs to the handler; this store only applies what it is given, so /runs can keep
+    // listing rows the status card ignores. Materialized to a List because EF translates List.Contains to a
+    // SQL IN, negated to NOT IN.
     private IQueryable<IngestionRun> RunsExcluding(IReadOnlyCollection<string>? excludeSources)
     {
         var q = _db.IngestionRuns.AsNoTracking();
@@ -86,9 +81,8 @@ public class IngestionReadStore : IIngestionReadStore
 
         var total = await q.CountAsync(ct);
 
-        // Defense-in-depth against Skip overflow/negative even though GetIngestionRunsValidator owns
-        // the real bounds (page>=1, pageSize 1..100): compute the offset as long and clamp to a sane
-        // non-negative int ceiling so a pathological page never throws or wraps negative.
+        // Defence in depth against a Skip overflow even though GetIngestionRunsValidator owns the real bounds:
+        // compute the offset as long and clamp it to a non-negative int.
         var skip = (int)Math.Clamp((long)(page - 1) * pageSize, 0L, int.MaxValue);
 
         var items = await q

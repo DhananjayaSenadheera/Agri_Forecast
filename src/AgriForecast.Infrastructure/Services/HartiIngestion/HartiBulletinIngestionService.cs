@@ -8,50 +8,40 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Infrastructure.Services.HartiIngestion;
 
-// Orchestrates the multi-market HARTI daily-bulletin ingestion (R1.1 P1 Step 6).
+// Orchestrates the multi-market HARTI daily-bulletin ingestion.
 //
-// SINGLE SOURCE OF TRUTH: the HARTI PDF parser is Python and STAYS Python. This .NET service
-// does NOT parse PDFs. It triggers the Python pipeline over the same HTTP->FastAPI seam the
-// rest of the app already uses (mirroring NewsIngestionService), via the authenticated
-// POST /admin/ingest-harti endpoint, then awaits + reports counts and the post-pass
-// data-quality summary the Python side returns.
+// The HARTI PDF parser is Python and stays Python. This service does not parse PDFs; it triggers the Python
+// pipeline over the same HTTP -> FastAPI seam the rest of the app uses, via the authenticated
+// POST /admin/ingest-harti, then reports the counts and data-quality summary Python returns.
 //
-// Watermark (resumable): before triggering it reads the "HARTI" IngestionWatermark; if the
-// source is Disabled it is a no-op (and never a failure). After a successful trigger it
-// advances LastSuccessUtc + LastObservedDate. A transport/HTTP failure records a Failure on
-// the watermark WITHOUT moving the resume point, then returns (never throws to the Worker) —
-// the Worker's own per-source try/catch is the outer belt; this is the inner suspenders.
+// Watermark: before triggering it reads the "HARTI" watermark; a Disabled source is a no-op and never a
+// failure. A successful trigger advances LastSuccessUtc and LastObservedDate. A transport or HTTP failure
+// records a failure WITHOUT moving the resume point and then returns, never throwing to the Worker.
 //
-// Late-arrival look-back: the resume lower bound is NOT the raw watermark. HARTI can publish a
-// bulletin late for a date at/behind the watermark; a strict "ObservedDate > LastObservedDate"
-// resume would skip that late bulletin forever. So sinceDate = LastObservedDate - HartiLookbackDays
-// (config MlService:HartiLookbackDays, default 7), re-scanning roughly the last week every pass.
-// The upsert is idempotent, so re-scanning already-landed dates is free (existing rows just
-// UPDATE; a genuinely-late bulletin in the window finally lands). A NULL watermark stays NULL =>
-// full backfill (see the first-run note below).
+// Late-arrival look-back: the resume lower bound is not the raw watermark. HARTI can publish a bulletin late
+// for a date at or behind the watermark, and a strict "ObservedDate > LastObservedDate" resume would skip it
+// forever. So sinceDate = LastObservedDate - HartiLookbackDays (default 7), re-scanning roughly the last week
+// each pass; the idempotent upsert makes that free. A null watermark stays null, meaning a full backfill.
 //
-// FIRST-RUN BOOTSTRAP: a cold, empty-watermark full backfill parses the entire ~3000-PDF corpus
-// and can exceed HartiIngestTimeoutSeconds (default 1800s), so it may never bootstrap over HTTP.
-// The sanctioned first-time seed is to run the CLI `python ingest_harti.py` once (no HTTP
-// timeout); after that these incremental Worker passes take over. The transport-timeout log
-// message below says exactly this so an operator hitting the timeout knows what to do.
+// First run: a cold full backfill parses the entire ~3000-PDF corpus and can exceed HartiIngestTimeoutSeconds,
+// so it may never bootstrap over HTTP. Seed it once with the CLI `python ingest_harti.py`, after which these
+// incremental passes take over; the transport-timeout log message says exactly that.
 //
-// SELF-HEALING is the canonical layer's job, run in-process on the Python side as part of the
-// same admin call (heal_price_observation_crops): unresolved commodity labels stay CropId NULL
-// and are logged, NEVER auto-provisioned into duplicate crops. Unknown markets are WARN-skipped,
-// never invented. This service surfaces those counts; it does not itself mint crops or markets.
+// Self-healing is the Python canonical layer's job, run in-process as part of the same admin call: unresolved
+// commodity labels stay CropId NULL and are logged, never auto-provisioned into duplicate crops, and unknown
+// markets are skipped with a warning rather than invented. This service only surfaces those counts.
 public class HartiBulletinIngestionService : IHartiBulletinIngestionService
 {
     public const string SourceKey = "HARTI";
 
-    // The ML service's /admin/* routes require X-API-Key == ML_ADMIN_API_KEY (security fix F-02),
-    // read from configuration (never hardcoded) — same key the news pass uses.
+    // The ML service's /admin/* routes require X-API-Key == ML_ADMIN_API_KEY, read from configuration and
+    // never hardcoded — the same key the news pass uses.
     private const string AdminApiKeyConfigKey = "MlService:AdminApiKey";
     private const string AdminApiKeyHeaderName = "X-API-Key";
 
-    // Late-arrival look-back window (days) subtracted from the watermark when computing the
-    // resume lower bound, so a bulletin published late for a date at/behind the watermark is not
-    // skipped forever. Default 7; the idempotent upsert makes re-scanning the window free.
+    // Late-arrival look-back (days) subtracted from the watermark to compute the resume lower bound, so a
+    // bulletin published late for an already-passed date is not skipped forever. Default 7; the idempotent
+    // upsert makes re-scanning the window free.
     private const string LookbackDaysConfigKey = "MlService:HartiLookbackDays";
     private const int DefaultLookbackDays = 7;
 
@@ -90,8 +80,7 @@ public class HartiBulletinIngestionService : IHartiBulletinIngestionService
             return new IngestionRunStats(Outcome: IngestionRunOutcome.Skipped);
         }
 
-        // Fail loud on missing admin key (mirrors NewsIngestionService / SqlDbService F-01 guard):
-        // sending no header would surface as a confusing 401 from the ML service.
+        // Fail loud on a missing admin key: sending no header would surface as a confusing 401.
         var apiKey = _configuration[AdminApiKeyConfigKey];
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException(
@@ -101,11 +90,10 @@ public class HartiBulletinIngestionService : IHartiBulletinIngestionService
                 "via the MlService__AdminApiKey environment variable. The value must match the ML " +
                 "service's ML_ADMIN_API_KEY.");
 
-        // Resume hint with a late-arrival look-back: fetch bulletins after (LastObservedDate -
-        // HartiLookbackDays), so the daily pass does not re-scrape the whole ~3000-PDF corpus yet
-        // still re-scans roughly the last week to catch a bulletin published late for an
-        // already-passed date. Idempotent upsert => re-scanning the window is free. Null watermark
-        // stays null => full backfill (the Python side treats a null sinceDate as "no lower bound").
+        // Resume hint with the late-arrival look-back: fetch bulletins after (LastObservedDate -
+        // HartiLookbackDays), so the daily pass does not re-scrape the whole corpus but still catches a
+        // bulletin published late for an already-passed date. A null watermark stays null, which the Python
+        // side treats as no lower bound (a full backfill).
         var lookbackDays = _configuration.GetValue<int?>(LookbackDaysConfigKey) ?? DefaultLookbackDays;
         if (lookbackDays < 0) lookbackDays = 0;   // never widen into the future; a negative would.
         DateOnly? sinceDate = watermark.LastObservedDate?.AddDays(-lookbackDays);
@@ -135,8 +123,8 @@ public class HartiBulletinIngestionService : IHartiBulletinIngestionService
             const string transportReason = "Transport failure calling /admin/ingest-harti (first-run backfill may exceed the HTTP timeout — seed via ingest_harti.py CLI, see docs).";
             watermark.RecordFailure(transportReason);
             await _watermarks.SaveChangesAsync(ct);
-            // Fail-safe but EXPRESSIVE (S1): never throws to the Worker, yet the run row is marked
-            // Failed with the same reason the watermark got — not a green Succeeded row.
+            // Fail-safe but expressive: never throws to the Worker, yet the run row is marked Failed with the
+            // same reason the watermark got, not a green Succeeded.
             return new IngestionRunStats(Outcome: IngestionRunOutcome.Failed, FailureReason: transportReason);
         }
 
@@ -183,9 +171,8 @@ public class HartiBulletinIngestionService : IHartiBulletinIngestionService
                 result?.Gaps?.NWarning ?? 0,
                 result?.Gaps?.NError ?? 0);
 
-            // Advance the resume watermark ONLY on a confirmed success. LastObservedDate is the
-            // newest ObservedDate the Python side landed this pass (null if it landed nothing new,
-            // in which case RecordSuccess keeps the previous high-water mark).
+            // Advance the resume watermark ONLY on a confirmed success. LastObservedDate is the newest date
+            // the Python side landed this pass; null keeps the previous high-water mark.
             DateOnly? newest = TryParseDateOnly(result?.PriceObservations?.MaxObservedDate);
             watermark.RecordSuccess(
                 DateTime.UtcNow,
@@ -193,9 +180,8 @@ public class HartiBulletinIngestionService : IHartiBulletinIngestionService
                 $"inserted={result?.PriceObservations?.Inserted ?? 0}, updated={result?.PriceObservations?.Updated ?? 0}");
             await _watermarks.SaveChangesAsync(ct);
 
-            // Map the counts the Python side returned onto the source's IngestionRun row. Coverage
-            // window = the requested resume lower bound (sinceDate) .. the newest landed ObservedDate.
-            // "updated" has no run-stats column and is dropped from the audit row (still logged above).
+            // Map the counts the Python side returned onto the run row. The coverage window runs from the
+            // requested resume lower bound to the newest landed ObservedDate; "updated" has no run-stats column.
             return new IngestionRunStats(
                 CoveredFromDate: sinceDate,
                 CoveredToDate: newest,

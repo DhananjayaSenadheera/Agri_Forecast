@@ -6,9 +6,8 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Infrastructure.ExternalSources.Interfaces;
 
-// Typed HttpClient over the Python FastAPI ML service POST /predict.
-// Fails safe: returns null on any non-success / exception so the handler can
-// surface a structured error instead of leaking a 500.
+// Typed HttpClient over the Python FastAPI ML service. Fails safe: returns null on any non-success or
+// exception so the handler can surface a structured error instead of leaking a 500.
 public sealed class HarvestPredictionClient : IHarvestPredictionClient
 {
     private readonly HttpClient _httpClient;

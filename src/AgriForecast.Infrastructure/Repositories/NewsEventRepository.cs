@@ -46,10 +46,9 @@ public class NewsEventRepository : INewsEventRepository
         return Task.CompletedTask;
     }
 
-    // Reconcile by DIFF, never clear-and-re-add: the entity arrives tracked (GetByIdAsync
-    // includes the links), and re-adding a retained composite-key row would put a second
-    // instance with the same key into EF's identity map → tracking exception on a routine
-    // update that keeps a link. Retained links keep their original instances untouched.
+    // Reconcile by DIFF, never clear-and-re-add: the entity arrives tracked with its links, and re-adding a
+    // retained composite-key row would put a second instance with the same key into EF's identity map and
+    // throw on a routine update that keeps a link.
     public void SetCropLinks(NewsEvent entity, IReadOnlyCollection<Guid>? cropIds)
     {
         var wanted = (cropIds ?? Array.Empty<Guid>()).Distinct().ToHashSet();

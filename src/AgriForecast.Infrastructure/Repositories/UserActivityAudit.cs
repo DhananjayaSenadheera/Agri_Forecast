@@ -8,14 +8,11 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Infrastructure.Repositories;
 
-// ISOLATION + FAIL-SAFE (mirrors IngestionRunRepository's B1 discipline): every audit write runs in
-// its OWN service scope, resolving a FRESH AgriForecastDbContext with an independent ChangeTracker,
-// so an audit SaveChanges can never flush the caller's (login/registration/admin) pending entities,
-// and a poisoned entity in the caller's context can never make an audit save throw.
-//
-// FAIL-SAFE: an audit write must NEVER break the operation it records. Every write is wrapped in a
-// try/catch that SWALLOWS-AND-LOGS — the auth/user handlers await the call but it can never throw
-// into them. The clock is stamped here (DateTime.UtcNow) at write time.
+// Every audit write runs in its OWN service scope with a fresh DbContext, so an audit SaveChanges can never
+// flush the caller's pending entities, and a poisoned entity in the caller's context can never make an audit
+// save throw.
+// An audit write must never break the operation it records: every write is wrapped in a try/catch that
+// swallows-and-logs, so the awaiting handlers can never see it throw. The clock is stamped here at write time.
 public class UserActivityAudit : IUserActivityAudit
 {
     private readonly IServiceScopeFactory _scopeFactory;
@@ -45,8 +42,6 @@ public class UserActivityAudit : IUserActivityAudit
     public Task RecordUserDeletedAsync(Guid actorUserId, Guid targetUserId, CancellationToken ct = default) =>
         WriteAsync(UserActivityEvent.UserDeleted(actorUserId, targetUserId, DateTime.UtcNow), ct);
 
-    // ── Admin CONTENT mutations ───────────────────────────────────────────────────────────────────
-
     public Task RecordPolicyFlagChangedAsync(
         Guid actingAdminId, ContentChangeAction action, string? identifier, CancellationToken ct = default) =>
         WriteAsync(UserActivityEvent.PolicyFlagChanged(
@@ -72,14 +67,10 @@ public class UserActivityAudit : IUserActivityAudit
         WriteAsync(UserActivityEvent.MarketChanged(
             actingAdminId, RenderDetails(action, identifier), DateTime.UtcNow), ct);
 
-    // The ONE place the content Details note is rendered: "<verb> '<identifier>'" (e.g.
-    // "updated 'GARLIC-IMPORT-BAN'"). Rendering here — not at the thirteen call sites — is what keeps
-    // the note format identical everywhere and greppable by the admin Logs page.
-    //
-    // The identifier is trimmed and hard-capped to IdentifierMaxLength, which keeps the whole note
-    // WELL under the 500-char Details column even before the entity's own cap (an admin can type a
-    // very long title; the audit trail only needs enough to recognise the row). A blank identifier
-    // renders the bare verb rather than an empty-quoted "created ''".
+    // The one place the content Details note is rendered: "<verb> '<identifier>'". Rendering it here rather
+    // than at the thirteen call sites keeps the format identical everywhere and greppable by the Logs page.
+    // The identifier is trimmed and capped to IdentifierMaxLength, well under the 500-char Details column.
+    // A blank identifier renders the bare verb rather than "created ''".
     public static string RenderDetails(ContentChangeAction action, string? identifier)
     {
         var verb = action switch
@@ -100,8 +91,7 @@ public class UserActivityAudit : IUserActivityAudit
         return $"{verb} '{trimmed}'";
     }
 
-    // Deliberately far below the Details column's 500: these are handles (titles/keys/codes), not
-    // content. Leaves ample headroom for the verb + quotes under any future note prefix.
+    // Deliberately far below the Details column's 500: these are handles (titles, keys, codes), not content.
     private const int IdentifierMaxLength = 120;
 
     // Single isolated, swallow-and-log write path shared by every event. Never rethrows.
@@ -116,8 +106,8 @@ public class UserActivityAudit : IUserActivityAudit
         }
         catch (Exception ex)
         {
-            // Log the event TYPE only (never the attempted username / details) and swallow — the
-            // audited operation must succeed even if its audit trail could not be written.
+            // Log the event type only — never the attempted username or details — and swallow, so the audited
+            // operation still succeeds even if its audit trail could not be written.
             _logger.LogWarning(ex, "Failed to write user-activity audit row for {EventType}.",
                 activityEvent.EventType);
         }

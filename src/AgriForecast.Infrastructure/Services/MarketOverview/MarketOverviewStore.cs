@@ -4,16 +4,14 @@ using Microsoft.EntityFrameworkCore;
 
 namespace AgriForecast.Infrastructure.Services.MarketOverview;
 
-// Read-only projection over PriceObservations for the market-overview endpoint.
-// PriceObservations is the multi-market table (10 markets, ~363K rows) that supersedes
-// the Dambulla-only MarketPrices. MarketId is a real Markets FK, so market names resolve
-// directly. ObservedDate is the economic event date (the overview's date axis).
+// Read-only projection over PriceObservations for the market-overview endpoint. PriceObservations is the
+// multi-market table that supersedes the Dambulla-only MarketPrices; MarketId is a real Markets FK and
+// ObservedDate is the economic event date.
 //
-// QUARANTINE: rows with IsUnitConfirmed=0 are HELD and must never feed aggregation.
-// That single bit is the unified hold flag: it is set to 0 both for unit-unproven rows
-// (ingestion default) AND for rolling-IQR outliers held by the Python
-// data_quality.flag_price_outliers() machinery. Filtering IsUnitConfirmed=1 fail-closed
-// excludes both classes; there is no separate outlier column on the table.
+// Quarantine: rows with IsUnitConfirmed=0 are HELD and must never feed aggregation. That single bit is the
+// unified hold flag — set to 0 both for unit-unproven rows and for rolling-IQR outliers held by the Python
+// data-quality machinery — so filtering IsUnitConfirmed=1 excludes both classes. There is no separate
+// outlier column on the table.
 public class MarketOverviewStore : IMarketOverviewStore
 {
     private readonly AgriForecastDbContext _db;
@@ -31,8 +29,8 @@ public class MarketOverviewStore : IMarketOverviewStore
     public async Task<IReadOnlyList<MarketPriceWindowRow>> GetRowsAsync(
         DateOnly fromInclusive, DateOnly toInclusive, CancellationToken ct = default)
     {
-        // Window filter + confirmed-only filter applied server-side; only the columns the
-        // handler needs are projected. Nullable prices are coalesced to 0 (== "absent").
+        // The window and confirmed-only filters are applied server-side, and only the columns the handler needs
+        // are projected. Nullable prices are coalesced to 0, meaning absent.
         var rows = await (
             from po in _db.PriceObservations
             where po.IsUnitConfirmed

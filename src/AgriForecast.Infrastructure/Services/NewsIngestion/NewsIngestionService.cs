@@ -6,25 +6,16 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Infrastructure.Services.NewsIngestion;
 
-// Triggers the Python news pipeline (ingest_news -> score_news) once per daily
-// pass by calling the FastAPI serving app's POST /admin/ingest-news endpoint.
-//
-// Transport: typed HttpClient over the same Python ML service the rest of the
-// app already talks to (MlService:BaseUrl), mirroring HarvestPredictionClient.
-// The repo's only .NET->Python integration is HTTP->FastAPI; reusing it avoids
-// coupling the Worker host to a Python venv on disk (no subprocess precedent).
-//
-// Fails safe: never throws to the Worker on a transport/HTTP error. The pass
-// is logged and continues, exactly like the other ingestion steps. A non-2xx
-// (the Python side surfaces a structured 502/503 on pipeline failure) is logged
-// with body + status, not swallowed silently.
+// Triggers the Python news pipeline (ingest_news -> score_news) once per daily pass, via the FastAPI serving
+// app's POST /admin/ingest-news.
+// Transport is a typed HttpClient over the same Python ML service the rest of the app already talks to, so
+// the Worker host needs no Python venv on disk.
+// Fails safe: never throws to the Worker on a transport or HTTP error — the pass is logged and continues. A
+// non-2xx is logged with body and status, not swallowed silently.
 public class NewsIngestionService : INewsIngestionService
 {
-    // /admin/ingest-news is an authenticated admin endpoint on the ML service
-    // (security fix F-02). We must send X-API-Key equal to the ML service's
-    // ML_ADMIN_API_KEY env var. The key is read from configuration (never
-    // hardcoded): MlService:AdminApiKey, supplied via .NET user-secrets in dev
-    // and the MlService__AdminApiKey environment variable in prod.
+    // /admin/ingest-news requires X-API-Key equal to the ML service's ML_ADMIN_API_KEY. The key is read from
+    // configuration and never hardcoded: user-secrets in dev, MlService__AdminApiKey in prod.
     private const string AdminApiKeyConfigKey = "MlService:AdminApiKey";
     private const string AdminApiKeyHeaderName = "X-API-Key";
 
@@ -49,10 +40,8 @@ public class NewsIngestionService : INewsIngestionService
 
     public async Task IngestAsync(CancellationToken ct)
     {
-        // Fail loud (mirrors the SqlDbService F-01 guard): if the admin key is
-        // absent we throw a clear configuration error rather than sending no
-        // header, which would otherwise surface as a confusing 401 from the ML
-        // service. This runs when an ingest is actually attempted.
+        // Fail loud: if the admin key is absent, throw a clear configuration error rather than sending no
+        // header, which would surface as a confusing 401 from the ML service.
         var apiKey = _configuration[AdminApiKeyConfigKey];
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException(
@@ -62,8 +51,7 @@ public class NewsIngestionService : INewsIngestionService
                 "production via the MlService__AdminApiKey environment variable. The value " +
                 "must match the ML service's ML_ADMIN_API_KEY.");
 
-        // Defaults run the full live pipeline: fetch RSS + write + QA, then
-        // score + write the daily sentiment table.
+        // Defaults run the full live pipeline: fetch RSS, write and QA, then score and write daily sentiment.
         var payload = new IngestNewsRequest();
 
         HttpResponseMessage resp;
