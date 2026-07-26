@@ -1,9 +1,8 @@
 namespace AgriForecast.Application.Requests.Admin.Ingestion.Queries.GetIngestionRuns;
 
-// One run row for GET /api/admin/ingestion/runs. Status is a pre-rendered lowercase string; dates
-// are yyyy-MM-dd strings; counts are nullable (a status-only source leaves them null — honest, never
-// a fabricated 0). ErrorSummary is passed through as stored (already sanitized at write time — no
-// stack traces or paths). PascalCase -> camelCase JSON per the API default policy.
+// One run row for GET /api/admin/ingestion/runs. Status is a pre-rendered lowercase string, dates are
+// yyyy-MM-dd strings, and counts stay null for a status-only source rather than being faked as 0.
+// ErrorSummary is passed through as stored (already sanitized at write time).
 public class IngestionRun_GetDto
 {
     public Guid Id { get; set; }
@@ -22,8 +21,8 @@ public class IngestionRun_GetDto
     public IngestionRunVerification_GetDto? Verification { get; set; }
 }
 
-// The verification joined onto a run via BatchId (latest per BatchId). checksJson is the raw JSON
-// string passed through verbatim (the FE parses it); it is already sanitized at write time.
+// The verification joined onto a run by BatchId (latest per BatchId). checksJson is passed through
+// verbatim for the FE to parse.
 public class IngestionRunVerification_GetDto
 {
     public string OverallStatus { get; set; } = string.Empty; // "Pass" | "Warn" | "Fail"

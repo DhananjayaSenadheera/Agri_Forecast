@@ -2,35 +2,25 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Domain.Entities;
 
-// A market promoted to a first-class dimension in the multi-market model.
-// Covers physical DEC trading hubs (Dambulla, Keppetipola, Thambuttegama) as well
-// as HARTI / CBSL pseudo-markets that only publish price bulletins. PriceObservation
-// rows hang off Markets; EconomicCenter is retained and back-linked (nullable) for
-// back-compat. MarketCode uses the MKT###### scheme (see DefaultSetting.Mkt_*).
+// A market as a first-class dimension: physical DEC trading hubs as well as HARTI / CBSL pseudo-markets
+// that only publish price bulletins. PriceObservation rows hang off Markets.
 public class Market
 {
     public Guid Id { get; private set; }
-    // MarketCode is the human-facing business key. Private-set: it is assigned exactly
-    // once by the create handler via AssignCode (mirrors how Crop.CropCode / EconomicCenter
-    // are code-stamped) and never mutated ad hoc thereafter. The HasData seed and the
-    // ECOMAP back-fill set it at the DB level, not through this setter, so they are unaffected.
+    // Assigned exactly once by the create handler via AssignCode. The HasData seed and the backfill set
+    // it at the DB level, bypassing this setter.
     public string MarketCode { get; private set; } = string.Empty;
     public string Name { get; private set; } = string.Empty;
-    // District is private-set: mutated only through the CreateNew factory and ApplyUpdate,
-    // keeping this controlled dimension from being poked with unvalidated free text.
+    // Private-set so the district can only change through CreateNew or ApplyUpdate.
     public string? District { get; private set; }
     public MarketType MarketType { get; set; }
     public bool IsActive { get; set; }
-    // IsEconomicCenter folds the retiring EconomicCenters dimension into Markets (R2 D-DF3):
-    // a Dedicated Economic Centre is now just a Markets row with this flag set. NOT NULL,
-    // defaults false so every existing/ingestion-provisioned market is a plain market unless
-    // explicitly promoted. Public-set so a future economic-centre registration path can set it.
+    // A Dedicated Economic Centre is a Markets row with this flag set. NOT NULL, defaults false.
     public bool IsEconomicCenter { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 
-    // Factory for manual/CRUD-created markets. MarketCode is assigned by the create
-    // handler after construction (mirrors EconomicCenter.CreateNew / Crop.CreateForManualEntry).
+    // MarketCode is assigned by the create handler after construction.
     public static Market CreateNew(string name, string? district, MarketType marketType, bool isEconomicCenter = false)
     {
         if (string.IsNullOrWhiteSpace(name))
@@ -49,9 +39,7 @@ public class Market
         };
     }
 
-    // Controlled one-time code assignment: the create handler stamps the generated
-    // MKT###### code here after construction (mirrors Crop/EconomicCenter code-stamping).
-    // Guards an empty code and refuses to silently re-stamp an already-coded market.
+    // One-time code assignment: refuses an empty code and refuses to re-stamp an already-coded market.
     public void AssignCode(string marketCode)
     {
         if (string.IsNullOrWhiteSpace(marketCode))

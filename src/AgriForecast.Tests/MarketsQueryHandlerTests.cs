@@ -8,12 +8,10 @@ using Moq;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Unit tests for GetMarketsQueryHandler (API-1). The DB is faked via a canned
-/// IMarketReadStore so mapping, enum-int fidelity, the hasPrices flag threading, and the
-/// empty-result shape are exercised in isolation. NOT covered here: the store's SQL
-/// EXISTS filter for hasPrices — no relational test provider is referenced, so it is
-/// verified by inspection + a manual live check only. If a store-level harness ever
-/// lands, its first test belongs on that filter (held row must not qualify a market).
+/// Unit tests for GetMarketsQueryHandler. The DB is faked via a canned IMarketReadStore, so mapping,
+/// enum-int fidelity, the hasPrices flag threading and the empty-result shape run in isolation. Not covered
+/// here: the store's SQL EXISTS filter for hasPrices, which is verified by inspection and a live check. If
+/// a store-level harness ever lands, its first test belongs on that filter.
 /// </summary>
 public class MarketsQueryHandlerTests
 {
@@ -48,7 +46,7 @@ public class MarketsQueryHandlerTests
         bool hasStoredData = false, DateOnly? lastStoredDate = null, bool isTrainingSource = false)
         => new(id, name, district, type, eco, hasStoredData, lastStoredDate, isTrainingSource);
 
-    // ---- Empty ------------------------------------------------------------
+    // Empty.
 
     [Fact]
     public async Task Empty_registry_returns_success_with_empty_list()
@@ -59,7 +57,7 @@ public class MarketsQueryHandlerTests
         result.Data.Should().BeEmpty();
     }
 
-    // ---- Mapping + enum-int fidelity --------------------------------------
+    // Mapping and enum-int fidelity.
 
     [Fact]
     public async Task Maps_all_fields_including_null_district_and_marketType()
@@ -93,7 +91,7 @@ public class MarketsQueryHandlerTests
         agg.IsEconomicCenter.Should().BeFalse();
     }
 
-    // ---- Monitoring fields map through (storage/freshness/training) --------
+    // Monitoring fields map through (storage, freshness, training).
 
     [Fact]
     public async Task Maps_monitoring_fields_storing_lastDate_and_trainingSource()
@@ -148,7 +146,7 @@ public class MarketsQueryHandlerTests
         m.IsTrainingSource.Should().BeFalse();
     }
 
-    // ---- hasPrices flag threading + filter --------------------------------
+    // hasPrices flag threading and filter.
 
     [Fact]
     public async Task Default_query_does_not_request_hasPricesOnly()

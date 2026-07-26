@@ -16,7 +16,7 @@ public class IngestionRunTests
     private static readonly DateTime Started = new(2026, 7, 21, 6, 0, 0, DateTimeKind.Utc);
     private static readonly DateTime Finished = new(2026, 7, 21, 6, 5, 0, DateTimeKind.Utc);
 
-    // ── StartRunning ─────────────────────────────────────────────────────────────────────────
+    // StartRunning.
 
     [Fact]
     public void StartRunning_MintsRunningRow_WithBatchAndSource_AndNullFinished()
@@ -43,7 +43,7 @@ public class IngestionRunTests
         act.Should().Throw<ArgumentException>().And.ParamName.Should().Be("source");
     }
 
-    // ── MarkSucceeded ────────────────────────────────────────────────────────────────────────
+    // MarkSucceeded.
 
     [Fact]
     public void MarkSucceeded_WithCounts_SetsSucceeded_AndCarriesEveryCount()
@@ -85,7 +85,7 @@ public class IngestionRunTests
         run.CoveredFromDate.Should().BeNull();
     }
 
-    // ── MarkSkipped ──────────────────────────────────────────────────────────────────────────
+    // MarkSkipped.
 
     [Fact]
     public void MarkSkipped_SetsSkipped_NotAFailure()
@@ -99,7 +99,7 @@ public class IngestionRunTests
         run.ErrorSummary.Should().BeNull();
     }
 
-    // ── MarkFailed: sanitization is the load-bearing invariant ───────────────────────────────
+    // MarkFailed: sanitization is the load-bearing invariant.
 
     [Fact]
     public void MarkFailed_SetsFailed_AndSanitizesToTypePlusMessage()
@@ -152,7 +152,7 @@ public class IngestionRunTests
         run.ErrorSummary!.Length.Should().Be(1000, "the sanitized error must fit the nvarchar(1000) column");
     }
 
-    // ── MarkFailed: path-like tokens are redacted (S2) ───────────────────────────────────────
+    // MarkFailed: path-like tokens are redacted.
 
     [Theory]
     [InlineData(@"Could not open C:\Users\svc\secrets\db.config for read", "C:")]
@@ -181,7 +181,7 @@ public class IngestionRunTests
             "route names are not filesystem paths and must not be redacted");
     }
 
-    // ── MarkFailed(string reason): fail-safe sources record a reason without an exception ────
+    // MarkFailed(string reason): a fail-safe source records a reason without an exception.
 
     [Fact]
     public void MarkFailed_WithReasonString_SetsFailed_AndStoresSanitizedReason()
@@ -195,7 +195,7 @@ public class IngestionRunTests
         run.ErrorSummary.Should().Be("ML returned 502.");
     }
 
-    // ── Persisted-int pinning for both enums ─────────────────────────────────────────────────
+    // Persisted-int pinning for both enums.
 
     [Theory]
     [InlineData(IngestionRunStatus.Running, 0)]

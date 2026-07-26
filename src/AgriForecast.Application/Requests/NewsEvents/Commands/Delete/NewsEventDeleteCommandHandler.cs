@@ -46,8 +46,7 @@ public class NewsEventDeleteCommandHandler : IRequestHandler<NewsEventDeleteComm
         await _unitofWorkRepository.CommitAsync();
 
         _logger.LogInformation("News event {Id} deleted.", existing.Id);
-        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
-        // write can never turn a committed delete into an error).
+        // Audited after the commit, and the audit swallows-and-logs, so it can never fail the delete.
         await _activityAudit.RecordNewsEventChangedAsync(
             request.ActingUserId, ContentChangeAction.Deleted, existing.Title, cancellationToken);
 

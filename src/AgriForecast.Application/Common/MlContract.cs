@@ -1,9 +1,7 @@
 namespace AgriForecast.Application.common;
 
-// Canonical magic-string values from the Python ML /predict contract.
-// Centralized so the honesty cap fails CLOSED if the ML wording/casing ever
-// drifts - a fallback / Low-confidence prediction must never silently become a
-// confident-looking recommendation. Compare with OrdinalIgnoreCase.
+// Magic-string values from the Python /predict contract, centralized so the honesty cap fails closed if
+// the ML wording or casing ever drifts. Compare with OrdinalIgnoreCase.
 public static class MlContract
 {
     // ActivePredictor value emitted when the model falls back to the per-crop mean.

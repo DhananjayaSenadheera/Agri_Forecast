@@ -7,13 +7,9 @@ using Microsoft.AspNetCore.Authorization;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// API-9 — role-enforcement WIRING assertions. ASP.NET's authorization middleware returns 403 when
-/// an authenticated caller lacks a required role and 401 when unauthenticated; these tests prove,
-/// per endpoint, that the correct <c>[Authorize(Roles = "Admin")]</c> / <c>[Authorize]</c> /
-/// <c>[AllowAnonymous]</c> attributes are actually present, so a non-admin is refused (403) on every
-/// Admin-locked route and reads stay merely authenticated. (Attribute-level, so no TestServer/DB is
-/// needed — deterministic and fast; a full HTTP 403 round-trip via WebApplicationFactory is a
-/// recommended future add.)
+/// Role-enforcement WIRING assertions: per endpoint, prove the correct [Authorize(Roles = "Admin")] /
+/// [Authorize] / [AllowAnonymous] attribute is actually present, so a non-admin is refused on every
+/// Admin-locked route and reads stay merely authenticated. Attribute-level, so no TestServer or DB.
 /// </summary>
 public class AdminAuthorizationWiringTests
 {
@@ -38,7 +34,7 @@ public class AdminAuthorizationWiringTests
     private static bool RequiresAuthOnly(Type controller, string method) =>
         AuthAttrs(controller, method).Any() && !IsAnonymous(controller, method) && !IsAdminLocked(controller, method);
 
-    // ── UserController: entirely Admin-only ────────────────────────────────────────
+    // UserController: entirely Admin-only.
     [Theory]
     [InlineData(nameof(UserController.GetAll))]
     [InlineData(nameof(UserController.UpdateRole))]
@@ -48,7 +44,7 @@ public class AdminAuthorizationWiringTests
         IsAdminLocked(typeof(UserController), method).Should().BeTrue();
     }
 
-    // ── Mutating endpoints on existing controllers: Admin-only ─────────────────────
+    // Mutating endpoints on existing controllers: Admin-only.
     [Theory]
     [InlineData(typeof(CropController), nameof(CropController.CreateCrop))]
     [InlineData(typeof(CropController), nameof(CropController.Update))]
@@ -70,7 +66,7 @@ public class AdminAuthorizationWiringTests
             $"{controller.Name}.{method} mutates state and must be Admin-locked");
     }
 
-    // ── Reads stay authenticated-only (NOT admin-gated) ────────────────────────────
+    // Reads stay authenticated-only, not admin-gated.
     [Theory]
     [InlineData(typeof(CropController), nameof(CropController.GetAllCrops))]
     [InlineData(typeof(CropController), nameof(CropController.GetCropById))]
@@ -93,10 +89,8 @@ public class AdminAuthorizationWiringTests
         IsAdminLocked(controller, method).Should().BeFalse();
     }
 
-    // ── AdminIngestionController: BOTH reads are Admin-only ────────────────────────
-    // PR 3: unlike the other read endpoints (authenticated-only), the admin ingestion reads surface
-    // operational internals (source states, error summaries, coverage windows) and are Admin-locked
-    // at the controller level. Prove the [Authorize(Roles = Admin)] is actually wired on each action.
+    // AdminIngestionController: both reads are Admin-only. Unlike the other read endpoints they surface
+    // operational internals, so prove [Authorize(Roles = Admin)] is actually wired on each action.
     [Theory]
     [InlineData(nameof(AdminIngestionController.GetStatus))]
     [InlineData(nameof(AdminIngestionController.GetRuns))]
@@ -107,10 +101,8 @@ public class AdminAuthorizationWiringTests
         IsAnonymous(typeof(AdminIngestionController), method).Should().BeFalse();
     }
 
-    // ── AdminLogsController: BOTH reads are Admin-only ────────────────────────────
-    // Logs hub PR A: like AdminIngestionController, the Logs reads surface operational internals
-    // (model-promotion decisions, security events) and are Admin-locked at the controller level.
-    // Prove the [Authorize(Roles = Admin)] is actually wired on each action.
+    // AdminLogsController: both reads are Admin-only for the same reason (model-promotion decisions and
+    // security events). Prove [Authorize(Roles = Admin)] is actually wired on each action.
     [Theory]
     [InlineData(nameof(AdminLogsController.GetTraining))]
     [InlineData(nameof(AdminLogsController.GetUserActivity))]
@@ -121,7 +113,7 @@ public class AdminAuthorizationWiringTests
         IsAnonymous(typeof(AdminLogsController), method).Should().BeFalse();
     }
 
-    // ── Auth endpoints stay anonymous by design ────────────────────────────────────
+    // Auth endpoints stay anonymous by design.
     [Theory]
     [InlineData(nameof(AuthController.Register))]
     [InlineData(nameof(AuthController.Login))]

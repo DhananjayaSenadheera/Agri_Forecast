@@ -1,11 +1,8 @@
 namespace AgriForecast.Application.Requests.PolicyFlag.DTOs;
 
-// Response for an update/delete. Carries the id of the affected row plus an OPTIONAL
-// training-data warning: policy flags are as-of-joined into the ML model's training features,
-// so mutating a flag whose effective window (or previous window) is in the past silently
-// rewrites data the model has already learned from. The mutation still SUCCEEDS (owner wants
-// warn, not block); when TrainingDataWarning is non-null the admin UI should surface it so an
-// operator knows a retrain may be needed. Future-only windows => TrainingDataWarning is null.
+// Response for an update or delete: the affected id plus an optional training-data warning. Policy flags
+// feed ML training features, so mutating a flag whose window has already started rewrites data the model
+// learned from. The mutation still succeeds — the warning is for the admin UI to surface.
 public class PolicyFlag_MutationResultDto
 {
     public Guid Id { get; set; }

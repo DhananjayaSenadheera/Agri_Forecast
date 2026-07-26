@@ -23,10 +23,8 @@ public class NewsEventController(IMediator mediator) : ControllerBase
         }
     };
 
-    // GET /api/news-events/get/all -> all events, newest knowledge date first. Stays [Authorize]
-    // (authenticated-only, NOT Admin-gated): non-personal reference data, same posture as
-    // PolicyFlag / FestivalCalendar reads. Returns 200 [] on empty — deliberately NOT the legacy
-    // policy-flag 400-on-empty quirk.
+    // GET /api/news-events/get/all -> all events, newest knowledge date first. Plain [Authorize], not
+    // Admin-gated: non-personal reference data. Returns 200 [] on empty, not the legacy 400-on-empty.
     [HttpGet("get/all")]
     public async Task<IActionResult> GetAll()
     {
@@ -37,17 +35,14 @@ public class NewsEventController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // News events are curated data mutated by admins only (API-9). CAPTURE + STORAGE ONLY: unlike
-    // PolicyFlag / FestivalCalendar these are NOT yet ML feature inputs (the model learns event
-    // weights in a later, separate task), so there is deliberately NO training-data warning on the
-    // mutations. PublishedAt is the immutable knowledge/vintage date — the UpdateDto does not carry
-    // it, so it cannot be rewritten.
+    // News events are curated data mutated by admins only. Capture and storage only: unlike PolicyFlag and
+    // FestivalCalendar these are not ML feature inputs yet, so there is deliberately no training-data warning
+    // on the mutations. PublishedAt is the immutable vintage date and the UpdateDto does not carry it.
     [HttpPost("create")]
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Create([FromBody] NewsEventCreateCommand command)
     {
-        // Stamp the acting admin from the JWT (never the body): the audit row must name who really
-        // made the change, and a body-supplied ActingUserId is discarded here.
+        // The acting admin comes from the JWT, never the request body, so the audit row cannot be forged.
         var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
@@ -66,8 +61,7 @@ public class NewsEventController(IMediator mediator) : ControllerBase
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Update([FromBody] NewsEventUpdateCommand command)
     {
-        // Stamp the acting admin from the JWT (never the body): the audit row must name who really
-        // made the change, and a body-supplied ActingUserId is discarded here.
+        // The acting admin comes from the JWT, never the request body, so the audit row cannot be forged.
         var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
@@ -85,8 +79,7 @@ public class NewsEventController(IMediator mediator) : ControllerBase
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Delete(Guid id)
     {
-        // Stamp the acting admin from the JWT, never the route: the audit row must name who really
-        // deleted the row.
+        // The acting admin comes from the JWT, never the route, so the audit row cannot be forged.
         var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));

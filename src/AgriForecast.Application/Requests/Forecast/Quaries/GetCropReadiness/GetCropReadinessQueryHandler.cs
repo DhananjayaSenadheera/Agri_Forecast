@@ -23,9 +23,8 @@ public class GetCropReadinessQueryHandler
     public async Task<Result<CropReadiness_GetDto>> Handle(
         GetCropReadinessQuery request, CancellationToken cancellationToken)
     {
-        // Read-only passthrough of the ML service's readiness map. The empty
-        // shape (ModelActive=false, no crops) is a VALID response — the FE
-        // degrades to no tint — so only a transport failure is a Failure.
+        // Read-only passthrough. The empty shape (ModelActive=false, no crops) is a valid response — the
+        // FE degrades to no tint — so only a transport failure is a Failure.
         var readiness = await _predictionClient.GetCropReadinessAsync(cancellationToken);
 
         if (readiness == null)
@@ -42,9 +41,8 @@ public class GetCropReadinessQueryHandler
         };
         foreach (var (key, entry) in readiness.Crops)
         {
-            // Keys are lowercase GUID strings by trainer convention. A key that
-            // is not a GUID cannot be joined to a Crop row — skip it (logged)
-            // rather than failing the whole map.
+            // Keys are lowercase GUID strings by trainer convention. A non-GUID key cannot be joined to a
+            // Crop row, so skip it rather than failing the whole map.
             if (!Guid.TryParse(key, out var cropId))
             {
                 _logger.LogWarning("Ignoring non-GUID crop key {Key} in ML readiness map.", key);

@@ -4,17 +4,12 @@ using Microsoft.EntityFrameworkCore;
 
 namespace AgriForecast.Infrastructure.Services.PriceHistory;
 
-// Read-only projection over PriceObservations for the price-history endpoint.
-// PriceObservations is the multi-market table (10 markets, ~363K rows) that supersedes
-// the Dambulla-only MarketPrices. ObservedDate is the economic event date (the series'
-// date axis).
+// Read-only projection over PriceObservations for the price-history endpoint. PriceObservations is the
+// multi-market table that supersedes the Dambulla-only MarketPrices; ObservedDate is the series' date axis.
 //
-// FAIL-CLOSED (repeated deliberately in both queries so neither can drift): a row feeds
-// the series only when
-//   IsUnitConfirmed = 1   -- the unified hold flag (unit-unproven OR Python-flagged
-//                            outlier); there is no separate outlier column, and
-//   MinPrice > 0 AND MaxPrice > 0  -- a usable low-high band (a null/zero bound cannot
-//                            form an honest range, so the row is dropped, not invented).
+// Fail-closed, and repeated deliberately in both queries so neither can drift: a row feeds the series only
+// when IsUnitConfirmed = 1 (the unified hold flag — unit-unproven or Python-flagged outlier) and both
+// MinPrice and MaxPrice are > 0 (a usable low-high band; a null or zero bound cannot form an honest range).
 // SQL treats null > 0 as false, so the > 0 predicates also exclude null bounds.
 public class PriceHistoryStore : IPriceHistoryStore
 {
@@ -52,8 +47,8 @@ public class PriceHistoryStore : IPriceHistoryStore
         if (marketId.HasValue)
             query = query.Where(po => po.MarketId == marketId.Value);
         else
-            // Cross-market envelope: NationalAggregate is a statistical series, not a
-            // location (MarketType.cs), so it must never widen a location-level band.
+            // Cross-market envelope: NationalAggregate is a statistical series, not a location, so it must
+            // never widen a location-level band.
             query = query.Where(po => _db.Markets.Any(m =>
                 m.Id == po.MarketId && m.MarketType != Domain.Enums.MarketType.NationalAggregate));
 

@@ -23,9 +23,8 @@ public class FestivalCalendarController(IMediator mediator) : ControllerBase
         }
     };
 
-    // GET /api/festival-calendar/get/all -> all entries ordered by Date. Stays [Authorize]:
-    // festival dates are non-personal reference data and the admin Festivals page is the only
-    // consumer today; reads don't need the Admin gate (mirrors PolicyFlag / API-11 posture).
+    // GET /api/festival-calendar/get/all -> all entries ordered by Date. Plain [Authorize]: festival dates
+    // are non-personal reference data, so reads do not need the Admin gate.
     [HttpGet("get/all")]
     public async Task<IActionResult> GetAll()
     {
@@ -36,14 +35,13 @@ public class FestivalCalendarController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // Festival rows feed the forecasting model (as-of-joined lead-up windows) — every mutation is
-    // Admin-only (API-9). Source is required and dates are kept date-only by the validator/mapper.
+    // Festival rows feed the forecasting model, so every mutation is Admin-only. Source is required and the
+    // dates are kept date-only by the validator and mapper.
     [HttpPost("create")]
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Create([FromBody] FestivalCalendarCreateCommand command)
     {
-        // Stamp the acting admin from the JWT (never the body): the audit row must name who really
-        // made the change, and a body-supplied ActingUserId is discarded here.
+        // The acting admin comes from the JWT, never the request body, so the audit row cannot be forged.
         var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
@@ -56,15 +54,13 @@ public class FestivalCalendarController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // PUT /api/festival-calendar/update -> full-object update keyed by id; Admin-only.
-    // 200 with { id, trainingDataWarning } (warning non-null when the festival's Date — old or new
-    // — is in the past); validation/guard failures -> 400 house error; not-found -> 400 failure.
+    // PUT /api/festival-calendar/update -> full-object update keyed by id; Admin-only. 200 with
+    // { id, trainingDataWarning }; the warning is non-null when the old or new Date is in the past.
     [HttpPut("update")]
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Update([FromBody] FestivalCalendarUpdateCommand command)
     {
-        // Stamp the acting admin from the JWT (never the body): the audit row must name who really
-        // made the change, and a body-supplied ActingUserId is discarded here.
+        // The acting admin comes from the JWT, never the request body, so the audit row cannot be forged.
         var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
@@ -77,14 +73,13 @@ public class FestivalCalendarController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // DELETE /api/festival-calendar/delete/{id} -> Admin-only. Same { id, trainingDataWarning }
-    // warning semantics as update: deleting a past-dated festival warns (retrains features).
+    // DELETE /api/festival-calendar/delete/{id} -> Admin-only. Same warning semantics as update: deleting a
+    // past-dated festival warns.
     [HttpDelete("delete/{id}")]
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Delete(Guid id)
     {
-        // Stamp the acting admin from the JWT, never the route: the audit row must name who really
-        // deleted the row.
+        // The acting admin comes from the JWT, never the route, so the audit row cannot be forged.
         var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));

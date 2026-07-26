@@ -10,16 +10,12 @@ using Microsoft.Extensions.Logging;
 namespace AgriForecast.Application.Requests.Users.Commands.UpdateRole;
 
 /// <summary>
-/// Changes a user's role. Guards (all fail-closed, all tested):
-///  - the new role must be an assignable role (defence-in-depth re-check of the validator);
-///  - the target user must exist;
-///  - demoting the LAST remaining admin is refused (Admin count checked in the same request scope
-///    as the write, so a normal sequential admin flow can never race the count to zero).
-/// A no-op (role already equals the requested role) succeeds idempotently without a write.
-/// REFRESH REVOCATION: on an ACTUAL role change all of the user's refresh-token families are revoked
-/// so their next /api/auth/refresh is rejected and they must re-authenticate to obtain a token
-/// carrying the new role. (An already-issued access token still carries the old role until it
-/// expires &lt;= AccessTokenMinutes — the documented residual window.)
+/// Changes a user's role. Fail-closed guards: the new role must be assignable (a re-check of the
+/// validator), the target must exist, and demoting the last remaining admin is refused (the Admin count is
+/// read in the same request scope as the write). A no-op role change succeeds without a write.
+/// <para>On an actual change all of the user's refresh-token families are revoked, so they must
+/// re-authenticate to obtain a token carrying the new role. An already-issued access token keeps the old
+/// role until it expires.</para>
 /// </summary>
 public class UpdateUserRoleCommandHandler : IRequestHandler<UpdateUserRoleCommand, Result<AdminUserDto>>
 {
@@ -71,8 +67,7 @@ public class UpdateUserRoleCommandHandler : IRequestHandler<UpdateUserRoleComman
         await _userRepository.UpdateAsync(target);
         await _unitofWorkRepository.CommitAsync();
 
-        // Role actually changed → revoke the user's refresh families so their next refresh is
-        // rejected and they re-authenticate into a token that reflects the new role.
+        // The role actually changed, so revoke the refresh families and force a re-authentication.
         await _refreshTokenService.RevokeAllForUserAsync(target.Id, cancellationToken);
 
         // Log identifiers only — never request bodies, emails, or secrets.

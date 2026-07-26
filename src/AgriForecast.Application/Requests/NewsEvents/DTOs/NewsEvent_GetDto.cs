@@ -2,11 +2,8 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Application.Requests.NewsEvents.DTOs;
 
-// Read shape for the admin News page. Matches the FE NewsEvent interface (ForecastUI
-// src/api/types.ts): { id, eventType, direction, title, description, publishedAt, sourceUrl,
-// affectedCropIds, createdAtUtc } — camelCase, enums as integers. affectedMarketIds is an ADDITIVE
-// extra field (the FE ignores unknown JSON keys) so the storage side is ready for a future market
-// picker; the FE flips from fixtures to live with a client-side swap.
+// Read shape for the admin News page; matches the FE NewsEvent interface, camelCase with enums as
+// integers. affectedMarketIds is an additive extra the FE currently ignores.
 public class NewsEvent_GetDto
 {
     public Guid Id { get; set; }

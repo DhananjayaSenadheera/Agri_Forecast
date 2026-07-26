@@ -34,8 +34,7 @@ public class CropDeleteCommandHandler : IRequestHandler<CropDeleteCommand, Resul
             await _cropRepository.DeleteAsync(existingCrop);
             await _unitOfWork.CommitAsync();
             _logger.LogInformation("Crop with ID {CropId} deleted successfully.", request.Id);
-            // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed
-            // audit write can never turn a committed delete into an error).
+            // Audited after the commit, and the audit swallows-and-logs, so it cannot fail the delete.
             await _activityAudit.RecordCropChangedAsync(
                 request.ActingUserId, ContentChangeAction.Deleted, existingCrop.CropCode, cancellationToken);
 

@@ -4,9 +4,8 @@ using FluentValidation;
 
 namespace AgriForecast.Application.Requests.NewsEvents.Validators;
 
-// Rules for capturing a news event (ADM-7). Enum-int values are validated defined-only;
-// crop/market link ids must resolve to real rows so a bad id is a structured 400 rather than a
-// raw FK DbUpdateException. PublishedAt is required on create (it is the vintage/knowledge date).
+// Enum-int values are validated defined-only, and crop/market link ids must resolve to real rows so a bad
+// id is a structured 400 rather than a raw FK error. PublishedAt is required on create.
 public class NewsEventCreateCommandValidator : AbstractValidator<NewsEventCreateCommand>
 {
     private readonly INewsEventRepository _newsEventRepository;

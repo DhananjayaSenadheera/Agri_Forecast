@@ -27,12 +27,9 @@ public class GetHarvestWindowQueryHandler
     public async Task<Result<HarvestWindowDto>> Handle(
         GetHarvestWindowQuery request, CancellationToken cancellationToken)
     {
-        // Read-only: consume the Python ML service /harvest-window verbatim.
-        //
-        // A Rankable=false response is a SUCCESS, not a failure — it is the honest
-        // "we cannot tell one date from another for this crop" answer, and the UI
-        // has a state for it. Only a null (ML service unreachable) is an error.
-        // Do not "helpfully" convert one into the other in either direction.
+        // Consume the ML /harvest-window response verbatim. Rankable=false is a SUCCESS, not a failure —
+        // it is the honest "we cannot tell one date from another" answer and the UI has a state for it.
+        // Only a null (ML service unreachable) is an error.
         var window = await _predictionClient.GetHarvestWindowAsync(
             request.CropId, request.AsOf, request.HorizonDays, cancellationToken);
 
@@ -42,22 +39,13 @@ public class GetHarvestWindowQueryHandler
             return Result<HarvestWindowDto>.Failure("Forecast service unavailable. Please try again later.");
         }
 
-        // Today's price, so the panel can say whether the recommended window actually
-        // beats selling now instead of leaving the farmer to compare it against the
-        // OTHER screen's number. Same CurrentPriceRule as the harvest forecast, so the
-        // two can never disagree; asOf is the date the sweep itself starts from, for
-        // the same no-lookahead reason.
+        // Today's price, from the same CurrentPriceRule as the harvest forecast so the two screens can
+        // never quote different numbers; asOf is the sweep's start date for the same no-lookahead reason.
         //
-        // Deliberately asymmetric with the ML call above: the window IS the payload,
-        // so its absence is a real failure, whereas the current price only renders a
-        // comparison the UI already hides when it is 0 ("unknown"). Losing a good
-        // window because a secondary lookup timed out is the worse outcome, so an
-        // infrastructure fault here degrades instead of failing.
-        //
-        // The filter stays narrow (transport/DB faults only, matching the typed
-        // clients' `when (ex is ...)` convention): a NullReference or the like is a
-        // bug and must still surface loudly rather than hide behind a plausible 0.
-        // A cancelled request is not caught either — that response is going nowhere.
+        // Deliberately asymmetric with the ML call above: the window IS the payload, so its absence is a
+        // real failure, whereas a missing current price only hides a comparison the UI already hides at 0.
+        // The catch stays narrow (transport and DB faults only) so a genuine bug still surfaces loudly, and
+        // a cancelled request is not caught either.
         decimal currentPrice = 0m;
         try
         {
@@ -69,8 +57,7 @@ public class GetHarvestWindowQueryHandler
         }
         catch (Exception ex) when (ex is DbException or TimeoutException)
         {
-            // Visible to ops, invisible to the farmer: nothing from `ex` reaches the
-            // response — the window returns normally with CurrentPrice = 0.
+            // Visible to ops, invisible to the farmer: nothing from ex reaches the response.
             _logger.LogWarning(ex,
                 "Current price lookup failed for crop {CropId}; returning the window without the comparison.",
                 request.CropId);

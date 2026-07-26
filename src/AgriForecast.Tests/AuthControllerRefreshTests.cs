@@ -23,9 +23,8 @@ namespace AgriForecast.Tests;
 
 /// <summary>
 /// Unit tests for AuthController's refresh-cookie I/O. A DefaultHttpContext captures the Set-Cookie
-/// header; the mediator and IRefreshTokenService are mocked, with the service producing REAL refresh
-/// JWTs (via a real JwtTokenGenerator) so cookie-token assertions stay meaningful. The revocation
-/// state machine itself is unit-tested in RefreshTokenServiceTests.
+/// header; the mediator and IRefreshTokenService are mocked, with the service producing REAL refresh JWTs
+/// so the cookie assertions stay meaningful. The revocation state machine itself is tested elsewhere.
 /// </summary>
 public class AuthControllerRefreshTests
 {
@@ -127,7 +126,7 @@ public class AuthControllerRefreshTests
         return end < 0 ? setCookie[start..] : setCookie[start..end];
     }
 
-    // ── login / register issue the cookie with the contracted attributes ─────────────
+    // login / register issue the cookie with the contracted attributes.
 
     [Fact]
     public async Task Login_Success_SetsRefreshCookieWithContractedAttributes()
@@ -189,7 +188,7 @@ public class AuthControllerRefreshTests
         Assert.Same(dto, ok.Value); // response body must remain exactly AuthResponseDto
     }
 
-    // ── refresh ──────────────────────────────────────────────────────────────────────
+    // refresh.
 
     [Fact]
     public async Task Refresh_Success_Returns200AndRotatesCookie()
@@ -238,7 +237,7 @@ public class AuthControllerRefreshTests
         setCookie.Should().Contain("path=/api/auth");
     }
 
-    // ── attribute wiring: AllowAnonymous + the "auth" rate-limit policy ───────────────
+    // Attribute wiring: AllowAnonymous plus the "auth" rate-limit policy.
 
     [Fact]
     public void Controller_IsAnonymousAndAuthRateLimited()

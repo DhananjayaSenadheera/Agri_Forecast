@@ -63,10 +63,10 @@ public class Worker : BackgroundService
         var batchId = IngestionRunAudit.ResolveBatchId(_configuration);
         _logger.LogInformation("Ingestion pass starting. BatchId={BatchId}", batchId);
 
-        // Each source is wrapped by IngestionRunAudit: a Running row is committed before the source
-        // runs, then transitioned to Succeeded (+ counts) / Failed (+ sanitized error). The audit
-        // wrapper ALSO catches the source's exception (this is the per-source fail-isolation belt the
-        // old per-block try/catch was) and can never let an audit write break the pass.
+        // Each source is wrapped by IngestionRunAudit: a Running row is committed before the source runs,
+        // then transitioned to Succeeded with counts, or Failed with a sanitized error. The wrapper also
+        // catches the source's exception — it is the per-source fail-isolation belt — and an audit write
+        // can never break the pass.
 
         // DAMBULLA_DEC market prices (reports counts).
         await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, "DAMBULLA_DEC", async ct =>
@@ -108,8 +108,8 @@ public class Worker : BackgroundService
             return (IngestionRunStats?)null;
         }, stoppingToken);
 
-        // R1.1 P1 Step 6: HARTI multi-market bulletin ingestion (reports counts). The service also
-        // self-heals its watermark on internal failure (inner belt); the audit wrapper is the outer.
+        // HARTI multi-market bulletin ingestion (reports counts). The service also self-heals its watermark
+        // on an internal failure; the audit wrapper is the outer belt.
         await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, HartiBulletinIngestionService.SourceKey, async ct =>
         {
             var harti = scope.ServiceProvider.GetRequiredService<IHartiBulletinIngestionService>();
@@ -119,10 +119,9 @@ public class Worker : BackgroundService
             return (IngestionRunStats?)stats;
         }, stoppingToken);
 
-        // CBSL Daily Price Report ingestion (feat/cbsl-price-parser — LIVE, capture-only): the
-        // service orchestrates the Python parser via /admin/ingest-cbsl and reports counts. The
-        // MarketPriceSources:Cbsl:Enabled flag remains the pause switch (flag off => Disabled
-        // watermark, a deliberate no-op that is NOT a source failure, reported as Skipped).
+        // CBSL Daily Price Report ingestion (capture-only): the service orchestrates the Python parser via
+        // /admin/ingest-cbsl and reports counts. MarketPriceSources:Cbsl:Enabled is the pause switch — flag
+        // off leaves a Disabled watermark, a deliberate no-op reported as Skipped, never a source failure.
         await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, CbslPriceReportIngestionService.SourceKey, async ct =>
         {
             var cbsl = scope.ServiceProvider.GetRequiredService<ICbslPriceReportIngestionService>();
@@ -132,8 +131,8 @@ public class Worker : BackgroundService
             return (IngestionRunStats?)stats;
         }, stoppingToken);
 
-        // R1 P3 (86cahefbh): CBSL macro (CCPI/MEI vintage) ingestion. Feature-flagged OFF by default
-        // (Disabled gating watermark, a deliberate no-op that is NOT a source failure). Status-only row.
+        // CBSL macro (CCPI/MEI vintage) ingestion, feature-flagged off by default: a Disabled gating
+        // watermark is a deliberate no-op, not a source failure. Status-only run row.
         await IngestionRunAudit.RunTrackedAsync(runs, _logger, batchId, CbslMacroIngestionService.SourceKey, async ct =>
         {
             var cbslMacro = scope.ServiceProvider.GetRequiredService<ICbslMacroIngestionService>();

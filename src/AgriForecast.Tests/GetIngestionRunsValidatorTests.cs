@@ -4,9 +4,8 @@ using FluentAssertions;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// PR 3 — GetIngestionRunsValidator bounds + source-key validation (house posture: a bad value is a
-/// 400 via the ValidationBehavior pipeline). page >= 1; pageSize in [1,100] (validated, not clamped);
-/// source optional but, when present, must be a known ingestion source (case-insensitive).
+/// GetIngestionRunsValidator bounds and source-key validation: page >= 1; pageSize in [1,100], validated
+/// rather than clamped; source optional but, when present, a known ingestion source (case-insensitive).
 /// </summary>
 public class GetIngestionRunsValidatorTests
 {
@@ -16,7 +15,7 @@ public class GetIngestionRunsValidatorTests
         => Validator.Validate(new GetIngestionRunsQuery { Page = page, PageSize = pageSize, Source = source })
             .IsValid;
 
-    // ── page ─────────────────────────────────────────────────────────────────────
+    // page.
     [Theory]
     [InlineData(0, false)]
     [InlineData(-1, false)]
@@ -25,7 +24,7 @@ public class GetIngestionRunsValidatorTests
     public void Page_LowerBound(int page, bool expectedValid)
         => IsValid(page, 20).Should().Be(expectedValid);
 
-    // ── pageSize ─────────────────────────────────────────────────────────────────
+    // pageSize.
     [Theory]
     [InlineData(0, false)]
     [InlineData(1, true)]
@@ -35,7 +34,7 @@ public class GetIngestionRunsValidatorTests
     public void PageSize_Bounds(int pageSize, bool expectedValid)
         => IsValid(1, pageSize).Should().Be(expectedValid);
 
-    // ── source ───────────────────────────────────────────────────────────────────
+    // source.
     [Theory]
     [InlineData(null, true)]
     [InlineData("", true)]

@@ -10,30 +10,23 @@ public interface IJwtTokenGenerator
     (string token, DateTime expiresAtUtc) Generate(User user);
 
     /// <summary>
-    /// Issues a signed HS256 REFRESH JWT identifying the given user by their IMMUTABLE id (never the
-    /// mutable username). The refresh token carries a distinct audience and a token_use=refresh claim
-    /// so it is rejected by the normal access-token (Bearer) pipeline. Lifetime comes from
-    /// Jwt:RefreshTokenDays. Returns the token and UTC expiry. The jti is generated internally.
+    /// Issues a signed refresh JWT identifying the user by their immutable id, never the mutable username.
+    /// It carries a distinct audience and a token_use=refresh claim, so the Bearer pipeline rejects it.
     /// </summary>
     (string token, DateTime expiresAtUtc) GenerateRefreshToken(Guid userId);
 
-    /// <summary>
-    /// Overload that stamps a CALLER-SUPPLIED jti so the persisted revocation record and the token
-    /// agree on the same jti. Used by the refresh-token revocation store (issue + rotate).
-    /// </summary>
+    /// <summary>Overload stamping a caller-supplied jti so the persisted revocation record and the token agree.</summary>
     (string token, DateTime expiresAtUtc) GenerateRefreshToken(Guid userId, Guid jti);
 
     /// <summary>
-    /// Validates a refresh JWT (signature, issuer, refresh audience, lifetime, token_use=refresh).
-    /// Returns the user id (as a string) it identifies, or null when the token is missing/invalid/
-    /// expired or is not a refresh token (e.g. an access token placed in the cookie).
+    /// Validates a refresh JWT (signature, issuer, refresh audience, lifetime, token_use). Returns the user
+    /// id, or null when the token is missing, invalid, expired, or is not a refresh token.
     /// </summary>
     string? ValidateRefreshToken(string? token);
 
     /// <summary>
-    /// Same validation as <see cref="ValidateRefreshToken"/> but also returns the token's jti, so the
-    /// revocation store can look up the persisted record. Null on any validation failure. The jti is
-    /// read only AFTER cryptographic validation succeeds, so it can be trusted.
+    /// As ValidateRefreshToken, but also returns the jti. The jti is read only after cryptographic
+    /// validation succeeds, so it can be trusted. Null on any validation failure.
     /// </summary>
     RefreshTokenPrincipal? ReadValidatedRefreshToken(string? token);
 }

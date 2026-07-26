@@ -2,12 +2,9 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Application.Requests.NewsEvents.DTOs;
 
-// Full-object update: mirrors NewsEvent_CreateDto plus the Id, MINUS PublishedAt.
-//
-// PublishedAt is DELIBERATELY ABSENT. It is the knowledge/as-of/vintage date and is immutable
-// after create — omission beats validation here: the field simply cannot be rewritten because the
-// wire contract does not carry it (same vintage discipline as MacroSeriesPoint.PublishedAt). The
-// update handler preserves the stored PublishedAt untouched.
+// Full-object update: the create shape plus the Id, minus PublishedAt.
+// PublishedAt is deliberately absent — it is the immutable vintage date, and leaving it out of the wire
+// contract means it cannot be rewritten at all. The handler preserves the stored value.
 public class NewsEvent_UpdateDto
 {
     public Guid Id { get; set; }

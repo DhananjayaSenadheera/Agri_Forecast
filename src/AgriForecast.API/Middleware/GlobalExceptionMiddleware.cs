@@ -11,8 +11,8 @@ public class GlobalExceptionMiddleware
     private readonly ILogger<GlobalExceptionMiddleware> _logger;
     private readonly ISystemErrorLog _systemErrorLog;
 
-    // ISystemErrorLog is a SINGLETON (it self-scopes every DB access), so constructor injection into
-    // this pipeline-lifetime middleware is safe — no scoped service is captured.
+    // ISystemErrorLog is a singleton that self-scopes every DB access, so constructor-injecting it into this
+    // pipeline-lifetime middleware captures no scoped service.
     public GlobalExceptionMiddleware(
         RequestDelegate next,
         ILogger<GlobalExceptionMiddleware> logger,
@@ -31,8 +31,8 @@ public class GlobalExceptionMiddleware
         }
         catch (ValidationException ex)
         {
-            // A validation failure is a 400 (client error) — logged as a warning WITHOUT leaking the
-            // messages, and NEVER recorded to the SystemErrors table (that table is for 500s only).
+            // A validation failure is a client error: log a warning without the messages, and never record it
+            // to the SystemErrors table, which is for 500s only.
             _logger.LogWarning(ex, "Validation exception");
             await HandleValidationExceptionAsync(context, ex);
         }
@@ -45,15 +45,14 @@ public class GlobalExceptionMiddleware
     }
 
     // Fire-and-await the fire-safe error-log writer. The writer itself can never throw, but wrap it
-    // defensively anyway so error logging can NEVER change the response being produced.
+    // defensively anyway so error logging can never change the response being produced.
     private async Task RecordSystemErrorAsync(HttpContext context, Exception exception)
     {
         try
         {
-            // PATH ONLY — never context.Request.QueryString (no query strings/headers/body are logged).
-            // CancellationToken.None, NOT context.RequestAborted: an errored request often correlates
-            // with a client disconnect, and those are exactly the errors most worth keeping. Audit
-            // durability is decoupled from the request lifetime (same discipline as UserActivityAudit).
+            // PATH ONLY — never the query string, and no headers or body are logged either.
+            // CancellationToken.None, not context.RequestAborted: an errored request often correlates with a
+            // client disconnect, and those are exactly the errors most worth keeping.
             await _systemErrorLog.RecordAsync(
                 exception,
                 context.Request.Method,
@@ -89,7 +88,6 @@ public class GlobalExceptionMiddleware
         context.Response.ContentType = "application/json";
         context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
 
-        //**Errors by property name
         var errors= exception.Errors
             .GroupBy(e => e.PropertyName)
             .ToDictionary(

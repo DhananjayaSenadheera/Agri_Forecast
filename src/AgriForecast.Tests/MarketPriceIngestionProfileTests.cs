@@ -11,15 +11,14 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// R2 Step 2.2: MarketPriceIngestionService must guarantee a crop never exists without a
-/// CropAgronomyProfile. These tests cover the two profile paths the service owns:
-///   * SELF-HEAL — a pre-existing crop that lacks a profile gets a PENDING one (never fails).
-///   * AUTO-PROVISION — a crop created on the fly for a new product also gets a PENDING profile.
-/// A crop that already has a profile must NOT get a duplicate (idempotent).
+/// MarketPriceIngestionService must guarantee a crop never exists without a CropAgronomyProfile. These
+/// tests cover the two profile paths the service owns: SELF-HEAL (a pre-existing crop without a profile
+/// gets a pending one) and AUTO-PROVISION (a crop created on the fly for a new product also gets one).
+/// A crop that already has a profile must not get a duplicate.
 /// </summary>
 public class MarketPriceIngestionProfileTests
 {
-    // ── In-memory fakes (repository-backed service, unlike the HTTP-seam ingestion tests) ──────
+    // In-memory fakes (a repository-backed service, unlike the HTTP-seam ingestion tests).
 
     private sealed class FakeCropRepository : ICropRepository
     {
@@ -138,10 +137,9 @@ public class MarketPriceIngestionProfileTests
         return (svc, crops, profiles, prices, aliasRepo, uow);
     }
 
-    // ── Run-tracking stats: IngestAsync returns the SAME counts it already logs ───────────────
-    // (ingestion run-tracking foundation). The Worker attaches these to the source's IngestionRun
-    // row; the service must not recount — RowsSkipped folds existing-date + zero-price skips, and
-    // RowsFetched stays null because the loop tracks no fetched total.
+    // Run-tracking stats: IngestAsync returns the SAME counts it already logs, which the Worker attaches to
+    // the run row. RowsSkipped folds existing-date and zero-price skips, and RowsFetched stays null because
+    // the loop tracks no fetched total.
     [Fact]
     public async Task IngestAsync_ReturnsStats_MappingInsertedSkippedAndDistinctCrops()
     {
@@ -157,7 +155,7 @@ public class MarketPriceIngestionProfileTests
         stats.RowsFetched.Should().BeNull("the loop tracks no fetched total — null is the honest value");
     }
 
-    // ── Self-heal: a crop with no profile gets a PENDING one ─────────────────────────────────
+    // Self-heal: a crop with no profile gets a pending one.
 
     [Fact]
     public async Task SelfHeals_CropWithoutProfile_ByStagingPendingProfile()
@@ -176,7 +174,7 @@ public class MarketPriceIngestionProfileTests
         healed.GrowthPeriodDays.Should().BeNull();
     }
 
-    // ── Idempotent: a crop that already has a profile is not double-staged ───────────────────
+    // Idempotent: a crop that already has a profile is not double-staged.
 
     [Fact]
     public async Task DoesNotDuplicate_ProfileForCropThatAlreadyHasOne()
@@ -191,7 +189,7 @@ public class MarketPriceIngestionProfileTests
         profiles.Items.Should().ContainSingle("an existing profile must not be duplicated");
     }
 
-    // ── Auto-provision: a crop created for a new product also gets a PENDING profile ─────────
+    // Auto-provision: a crop created for a new product also gets a pending profile.
 
     [Fact]
     public async Task AutoProvisionedCrop_FromExistingProduct_AlsoGetsPendingProfile()
@@ -209,7 +207,7 @@ public class MarketPriceIngestionProfileTests
         profile.DataSource.Should().Be(CropAgronomyProfile.PendingRegistrationSource);
     }
 
-    // ── EconomicCenterId: every inserted DEC row must link to the Dambulla market ────────────
+    // EconomicCenterId: every inserted DEC row must link to the Dambulla market.
 
     [Fact]
     public async Task InsertedRows_CarryDambullaEconomicCenterId()
@@ -239,10 +237,9 @@ public class MarketPriceIngestionProfileTests
         prices.Inserted.Should().BeEmpty("unlinked rows must never be inserted");
     }
 
-    // ── R2 Step 8.2: CommodityAliases is the SINGLE GOVERNING resolution route ────────────────
-    // The legacy Crops.ExternalProductId route (and its shadow parallel-run) was retired; the
-    // active DEC-scoped CommodityAlias keyed on the stringified feed ProductId is now the ONLY
-    // crop<->product mapping. These tests pin the post-cut-over invariants.
+    // CommodityAliases is the single governing resolution route. The legacy Crops.ExternalProductId route
+    // was retired, so the active DEC-scoped alias keyed on the stringified feed ProductId is now the only
+    // crop-to-product mapping. These tests pin the post-cut-over invariants.
 
     // GOVERNING ROUTE: an inserted feed row gets its CropId from the ACTIVE DEC alias for that
     // product id — no Crops.ExternalProductId lookup remains.

@@ -50,9 +50,8 @@ public class UserRepository : IUserRepository
 
     public async Task<int> CountByRoleAsync(string role)
     {
-        // The users table is tiny (admins + registered farmers), so an in-memory count over the
-        // scoped DbContext read is cheap and keeps this on the existing IGenericRepository surface.
-        // Case-insensitive so a "admin"/"Admin" data drift can never bypass the last-admin guard.
+        // The users table is tiny, so an in-memory count over the scoped read is cheap. Case-insensitive so an
+        // "admin"/"Admin" data drift can never bypass the last-admin guard.
         var all = await _userRepository.GetAllAsync();
         return all.Count(u => string.Equals(u.Role, role, StringComparison.OrdinalIgnoreCase));
     }

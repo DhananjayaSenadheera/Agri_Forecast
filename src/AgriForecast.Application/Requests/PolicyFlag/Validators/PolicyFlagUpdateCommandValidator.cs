@@ -3,10 +3,8 @@ using FluentValidation;
 
 namespace AgriForecast.Application.Requests.PolicyFlag.Validators;
 
-// Mirrors PolicyFlagCreateCommandValidator, plus two mutation-specific rules:
-//   * Id is required (identifies the row being edited).
-//   * Source is REQUIRED on mutation (a citation for every change to as-of-joined training data) —
-//     this is stricter than create, where Source is optional.
+// Mirrors PolicyFlagCreateCommandValidator plus two mutation rules: Id is required, and Source is
+// required on edit (stricter than create).
 public class PolicyFlagUpdateCommandValidator : AbstractValidator<PolicyFlagUpdateCommand>
 {
     public PolicyFlagUpdateCommandValidator()

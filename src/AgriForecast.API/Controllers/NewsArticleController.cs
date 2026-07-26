@@ -5,10 +5,9 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace AgriForecast.API.Controllers;
 
-// Read-only feed of the articles the news INGESTION pipeline captured (the Python-owned
-// NewsArticles table — the raw material behind the ML sentiment features). Distinct from
-// /api/news-events, the admin-CURATED structured events CRUD: the two "news" stores never mix.
-// This controller is display-only — no mutations; the pipeline is the only writer.
+// Read-only feed of the articles the news INGESTION pipeline captured (the Python-owned NewsArticles table
+// behind the ML sentiment features). Distinct from /api/news-events, the admin-curated structured events
+// CRUD — the two news stores never mix. Display-only: the pipeline is the only writer.
 [ApiController]
 [Route("api/news-articles")]
 [Authorize]
@@ -22,10 +21,9 @@ public class NewsArticleController(IMediator mediator) : ControllerBase
         }
     };
 
-    // GET /api/news-articles/get/latest?take=50 -> newest articles first. Stays [Authorize]
-    // (authenticated-only, NOT Admin-gated): non-personal reference data, same posture as the
-    // news-events read. take is clamped by the handler (default 50, max 200) — never a 400.
-    // Returns 200 [] when the capture table is empty or absent (ingestion never ran).
+    // GET /api/news-articles/get/latest -> newest articles first. Plain [Authorize], not Admin-gated:
+    // non-personal reference data. take is clamped by the handler (default 50, max 200) and never 400s, and
+    // an empty or absent capture table returns 200 [].
     [HttpGet("get/latest")]
     public async Task<IActionResult> GetLatest([FromQuery] int? take)
     {

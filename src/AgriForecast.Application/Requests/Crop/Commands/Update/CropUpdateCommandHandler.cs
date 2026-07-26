@@ -40,8 +40,7 @@ public class CropUpdateCommandHandler : IRequestHandler<CropUpdateCommand, Resul
         await _cropRepository.UpdateAsync(crop);
         await _unitOfWork.CommitAsync();
         _logger.LogInformation("Crop with ID {CropId} updated successfully.", crop.Id);
-        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
-        // write can never turn a committed update into an error).
+        // Audited after the commit, and the audit swallows-and-logs, so it can never fail the update.
         await _activityAudit.RecordCropChangedAsync(
             request.ActingUserId, ContentChangeAction.Updated, crop.CropCode, cancellationToken);
 

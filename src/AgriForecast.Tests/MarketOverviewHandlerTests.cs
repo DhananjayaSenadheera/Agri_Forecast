@@ -21,7 +21,7 @@ public class MarketOverviewHandlerTests
     private static GetMarketOverviewQueryHandler Build(FakeStore store)
         => new(store, Mock.Of<ILogger<GetMarketOverviewQueryHandler>>());
 
-    // ---- Fake store -------------------------------------------------------
+    // Fake store.
 
     private sealed class FakeStore : IMarketOverviewStore
     {
@@ -51,7 +51,7 @@ public class MarketOverviewHandlerTests
         => new(cropId, cropName, mkt ?? Mkt, mktName ?? "Dambulla Dedicated Economic Centre",
                date, min, max, wholesale, retail);
 
-    // ---- Empty data -------------------------------------------------------
+    // Empty data.
 
     [Fact]
     public async Task Empty_data_returns_null_asOf_and_empty_arrays()
@@ -68,7 +68,7 @@ public class MarketOverviewHandlerTests
         result.Data.LatestPrices.Should().BeEmpty();
     }
 
-    // ---- Day clamp --------------------------------------------------------
+    // Day clamp.
 
     [Theory]
     [InlineData(1, 7)]     // below min -> 7
@@ -96,7 +96,7 @@ public class MarketOverviewHandlerTests
         store.CapturedTo.Should().Be(AsOf);
     }
 
-    // ---- Midpoint precedence ---------------------------------------------
+    // Midpoint precedence.
 
     [Fact]
     public async Task Price_uses_midpoint_when_both_min_and_max_present()
@@ -156,7 +156,7 @@ public class MarketOverviewHandlerTests
         result.Data.LatestPrices.Single(l => l.CropId == CropB).Price.Should().Be(300m);
     }
 
-    // ---- Multi-market (PriceObservations lights up per (crop, market) pair) ----
+    // Multi-market: PriceObservations lights up per (crop, market) pair.
 
     [Fact]
     public async Task Movers_are_per_crop_market_pair_across_multiple_markets()
@@ -187,7 +187,7 @@ public class MarketOverviewHandlerTests
         pettah.ChangePct.Should().Be(-20.0m);
     }
 
-    // ---- Movers -----------------------------------------------------------
+    // Movers.
 
     [Fact]
     public async Task Mover_is_computed_with_up_direction_and_rounded_changePct()
@@ -278,7 +278,7 @@ public class MarketOverviewHandlerTests
         downs.First().ChangePct.Should().Be(-30.0m); // Fall6
     }
 
-    // ---- Latest prices ----------------------------------------------------
+    // Latest prices.
 
     [Fact]
     public async Task LatestPrices_one_row_per_crop_capped_at_8_with_spark()

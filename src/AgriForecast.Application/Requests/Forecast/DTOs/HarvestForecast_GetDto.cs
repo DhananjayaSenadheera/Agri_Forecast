@@ -4,9 +4,8 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Application.Requests.Forecast.DTOs;
 
-// Farmer-facing harvest forecast + go/no-go recommendation.
-// The model's prediction fields and confidence / activePredictor / explanation
-// pass straight through untouched; recommendationLevel + reason are ours.
+// Farmer-facing harvest forecast plus go/no-go recommendation. The model's prediction, confidence,
+// activePredictor and explanation pass straight through; recommendationLevel and reason are ours.
 public class HarvestForecast_GetDto
 {
     public Guid CropId { get; set; }
@@ -15,8 +14,7 @@ public class HarvestForecast_GetDto
     public string? HarvestDate { get; set; }
     public int? GrowthPeriodDays { get; set; }
 
-    // Current price = average of the daily mid (Min+Max)/2 over the trailing 14
-    // rows as of the plant date (fallback: latest day).
+    // Average daily mid over the trailing 14 rows as of the plant date.
     public decimal CurrentPrice { get; set; }
 
     // Passed through from the model verbatim.
@@ -28,10 +26,9 @@ public class HarvestForecast_GetDto
     public string? ModelVersion { get; set; }
     public string Explanation { get; set; } = string.Empty;
 
-    // Additive (API-5) - passed straight through from the ML service. reasonCode/
-    // reasonParams are ALWAYS present from a current ML service; topFactors is null
-    // when the ML omits it (fallback path) - the FE reads null as "no breakdown"
-    // and must never receive an empty [] instead.
+    // Passed straight through from the ML service. reasonCode/reasonParams are always present from a
+    // current service; topFactors is null when the ML omits it — the FE reads null as "no breakdown", so
+    // it must never be replaced with an empty list.
     public string? ReasonCode { get; set; }
     public Dictionary<string, JsonElement>? ReasonParams { get; set; }
     public List<TopFactorDto>? TopFactors { get; set; }

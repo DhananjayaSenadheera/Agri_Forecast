@@ -9,7 +9,7 @@ public class GetHarvestWindowQuery : IRequest<Result<HarvestWindowDto>>
     public Guid CropId { get; set; }
     public DateOnly? AsOf { get; set; }
 
-    // How many days of candidate planting dates to sweep. 90 covers a full
-    // planting decision without letting the frozen price/weather anchor go stale.
+    // Days of candidate planting dates to sweep. 90 covers a decision without the frozen price/weather
+    // anchor going stale.
     public int HorizonDays { get; set; } = 90;
 }

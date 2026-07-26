@@ -4,9 +4,8 @@ using MediatR;
 
 namespace AgriForecast.Application.Requests.Indicators.Quaries.GetIndicatorSeries;
 
-// GET /api/indicators?code=&from=&to=. Daily EconomicIndicators readings (e.g. USD_LKR) for
-// one series. Read-only, feeds the admin Indicators page. from/to are inclusive and optional;
-// when both absent the handler defaults to the last 365 days ending at the series' latest date.
+// GET /api/indicators?code=&from=&to=. Daily EconomicIndicators readings for one series. from/to are
+// inclusive and optional; when both are absent the handler defaults to the last 365 days.
 public class GetIndicatorSeriesQuery : IRequest<Result<List<DailyIndicatorPoint_GetDto>>>
 {
     // Required. The IndicatorCode to fetch (e.g. "USD_LKR"). Blank => validation failure.

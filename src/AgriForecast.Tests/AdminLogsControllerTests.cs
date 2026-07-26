@@ -11,14 +11,12 @@ using Moq;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// GET /api/admin/logs/user-activity at the CONTROLLER seam, exercised end-to-end through the real
-/// GetUserActivityQueryHandler over a canned read store.
-///
+/// GET /api/admin/logs/user-activity at the CONTROLLER seam, run end-to-end through the real handler over
+/// a canned read store.
 /// Why this exists on top of the handler tests: the FE sends the multi filter as ONE comma-joined,
-/// URL-encoded value (<c>types=loginSucceeded%2CloginFailed</c>). ASP.NET Core decodes the %2C but
-/// does NOT comma-split, so the parameter MUST be bound as a single <c>string?</c> and split by us —
-/// binding it as <c>string[]</c> would silently produce one unsplittable element matching nothing and
-/// hand the admin an empty page. These tests pin the binding shape and the split.
+/// URL-encoded value. ASP.NET Core decodes the %2C but does NOT comma-split, so the parameter must be
+/// bound as a single string? and split by us — binding it as string[] would produce one unsplittable
+/// element matching nothing and hand the admin an empty page. These tests pin the binding and the split.
 /// </summary>
 public class AdminLogsControllerTests
 {

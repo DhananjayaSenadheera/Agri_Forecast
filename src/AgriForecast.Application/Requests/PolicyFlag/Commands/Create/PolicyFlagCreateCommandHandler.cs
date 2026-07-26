@@ -41,8 +41,7 @@ public class PolicyFlagCreateCommandHandler : IRequestHandler<PolicyFlagCreateCo
         await _unitofWorkRepository.CommitAsync();
         _logger.LogInformation("Policy flag created. Title: {Title}, EffectiveFrom: {EffectiveFrom:yyyy-MM-dd}",
             policyFlag.Title, policyFlag.EffectiveFrom);
-        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
-        // write can never turn a committed create into an error).
+        // Audited after the commit, and the audit swallows-and-logs, so it can never fail the create.
         await _activityAudit.RecordPolicyFlagChangedAsync(
             request.ActingUserId, ContentChangeAction.Created, policyFlag.Title, cancellationToken);
 

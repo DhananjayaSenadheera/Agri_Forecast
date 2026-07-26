@@ -51,10 +51,9 @@ public class ForecastController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // Best planting/harvest window (UI 2026-07-25). Ranks candidate planting dates
-    // by the price their harvest is forecast to fetch. A not-rankable response
-    // (rankable=false + reasonCode) is a valid 200 — the UI shows an honest "we
-    // cannot rank dates for this crop yet" state. Only ML transport failure 400s.
+    // Best planting/harvest window: ranks candidate planting dates by the price their harvest is forecast to
+    // fetch. A not-rankable response (rankable=false plus a reasonCode) is a valid 200; only an ML transport
+    // failure returns a 400.
     [HttpGet("crop/{cropId}/harvest-window")]
     public async Task<IActionResult> GetHarvestWindow(Guid cropId, [FromQuery] int horizonDays = 90, [FromQuery] DateOnly? asOf = null)
     {
@@ -64,10 +63,9 @@ public class ForecastController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // Per-crop forecast-readiness map (crop-status colouring, UI 2026-07-22).
-    // Read-only passthrough of the promoted model payload's serving decision;
-    // recomputed by every train run. The empty map (modelActive=false) is a
-    // valid 200 — only ML-service transport failure returns the 400 error shape.
+    // Per-crop forecast-readiness map: a read-only passthrough of the promoted model payload's serving
+    // decision, recomputed by every train run. The empty map (modelActive=false) is a valid 200; only an ML
+    // transport failure returns the 400 error shape.
     [HttpGet("crop-readiness")]
     public async Task<IActionResult> GetCropReadiness()
     {
@@ -86,9 +84,8 @@ public class ForecastController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // Read-only market snapshot for the farmer-app landing screen. days is clamped
-    // to [7, 90] in the handler (default 30). Empty data returns a 200 with empty
-    // arrays + null asOf, never a 404.
+    // Read-only market snapshot for the farmer-app landing screen. days is clamped to [7, 90] in the handler
+    // (default 30). Empty data returns a 200 with empty arrays and a null asOf, never a 404.
     [HttpGet("market-overview")]
     public async Task<IActionResult> GetMarketOverview([FromQuery] int days = 30)
     {

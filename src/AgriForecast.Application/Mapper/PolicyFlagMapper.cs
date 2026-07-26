@@ -3,12 +3,10 @@ using AgriForecast.Domain.Entities;
 
 namespace AgriForecast.Application.Mapper;
 
-// Hand-written replacement for the former PolicyFlag object-mapper profile (PolicyFlag CreateMap set).
+// Hand-written mapper for PolicyFlag (the house style — no AutoMapper).
 public static class PolicyFlagMapper
 {
-    // PolicyFlag_CreateDto -> PolicyFlag
-    // Mirrors CreateMap<PolicyFlag_CreateDto, PolicyFlag>: new Guid Id; EffectiveFrom/EffectiveTo
-    // normalised to date-only (leakage guard); EffectiveTo stays nullable; CreatedAtUtc = UtcNow.
+    // EffectiveFrom/EffectiveTo are normalised to date-only (leakage guard); EffectiveTo stays nullable.
     public static PolicyFlag ToEntity(this PolicyFlag_CreateDto src)
     {
         return new PolicyFlag
@@ -26,9 +24,8 @@ public static class PolicyFlagMapper
         };
     }
 
-    // PolicyFlag_UpdateDto -> existing PolicyFlag (in-place, full-object replace).
-    // Id and CreatedAtUtc are preserved (identity + audit stay put); EffectiveFrom/EffectiveTo are
-    // normalised to date-only (same leakage guard as create).
+    // Full-object in-place replace. Id and CreatedAtUtc are preserved; the dates are normalised to
+    // date-only, as on create.
     public static PolicyFlag ApplyTo(this PolicyFlag_UpdateDto src, PolicyFlag target)
     {
         target.PolicyType = src.PolicyType;
@@ -42,8 +39,6 @@ public static class PolicyFlagMapper
         return target;
     }
 
-    // PolicyFlag -> PolicyFlag_GetDto
-    // Mirrors CreateMap<PolicyFlag, PolicyFlag_GetDto>() (convention-only, all same-name members).
     public static PolicyFlag_GetDto ToGetDto(this PolicyFlag src)
     {
         return new PolicyFlag_GetDto

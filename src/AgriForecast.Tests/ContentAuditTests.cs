@@ -36,21 +36,15 @@ using PolicyFlagEntity = AgriForecast.Domain.Entities.PolicyFlag;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// The admin CONTENT audit trail: every admin mutation of policy flags, festivals, news events,
-/// crops and markets must leave a UserActivityLog row naming the acting admin and what was touched.
-///
-/// Two guarantees are pinned here, per call site:
-///   (1) RECORDED — the handler calls the right Record*ChangedAsync with the acting admin, the right
-///       verb, and a short identifier the admin would recognise (title / festival key+date / crop
-///       code / market name). A missing call is a silent hole in the trail: the change still happens,
-///       nothing says who did it.
-///   (2) FAIL-OPEN — an audit write that BLOWS UP must not fail the mutation, which already
-///       committed. That guarantee lives in UserActivityAudit (own scope, swallow-and-log), so it is
-///       proved here by running a handler against the REAL writer pointed at a database with no
-///       UserActivityLog table — not against a mock that politely returns.
-///
-/// Details format ("created 'X'") is asserted through the real writer rather than at each call site,
-/// so the thirteen sites cannot drift into thirteen wordings.
+/// The admin CONTENT audit trail: every admin mutation of policy flags, festivals, news events, crops and
+/// markets must leave a UserActivityLog row naming the acting admin and what was touched.
+/// Two guarantees are pinned per call site:
+///   (1) RECORDED — the handler calls the right Record*ChangedAsync with the acting admin, the right verb
+///       and a short identifier the admin would recognise. A missing call is a silent hole in the trail.
+///   (2) FAIL-OPEN — an audit write that blows up must not fail the already-committed mutation. That is
+///       proved by running a handler against the REAL writer pointed at a database with no UserActivityLog
+///       table, not against a mock that politely returns.
+/// The Details wording is asserted through the real writer, so the thirteen call sites cannot drift.
 /// </summary>
 public class ContentAuditTests
 {
@@ -64,7 +58,7 @@ public class ContentAuditTests
         return uow;
     }
 
-    // ── (1) RECORDED: policy flags ────────────────────────────────────────────────────────
+    // (1) RECORDED: policy flags.
 
     private static PolicyFlagEntity Flag(string title = "GARLIC-IMPORT-BAN") => new()
     {
@@ -166,7 +160,7 @@ public class ContentAuditTests
         audit.VerifyNoOtherCalls();
     }
 
-    // ── (1) RECORDED: festivals ───────────────────────────────────────────────────────────
+    // (1) RECORDED: festivals.
 
     private static FestivalCalendarEntry Festival(string key = "VESAK", int year = 2027) => new()
     {
@@ -260,7 +254,7 @@ public class ContentAuditTests
             Times.Once);
     }
 
-    // ── (1) RECORDED: news events ─────────────────────────────────────────────────────────
+    // (1) RECORDED: news events.
 
     private static NewsEvent News(string title = "Onion import restrictions announced") => new()
     {
@@ -352,7 +346,7 @@ public class ContentAuditTests
             Times.Once);
     }
 
-    // ── (1) RECORDED: crops ───────────────────────────────────────────────────────────────
+    // (1) RECORDED: crops.
 
     private static CodeSettings Codes()
     {
@@ -428,7 +422,7 @@ public class ContentAuditTests
             Times.Once);
     }
 
-    // ── (1) RECORDED: markets ─────────────────────────────────────────────────────────────
+    // (1) RECORDED: markets.
 
     [Fact]
     public async Task MarketCreate_RecordsCreatedWithMarketName()
@@ -456,7 +450,7 @@ public class ContentAuditTests
             Times.Once);
     }
 
-    // ── (2) FAIL-OPEN: a broken audit write never fails the committed mutation ────────────
+    // (2) FAIL-OPEN: a broken audit write never fails the committed mutation.
 
     // The REAL writer against a database with NO UserActivityLog table: every write throws inside
     // UserActivityAudit and must be swallowed there. A mock that returns cleanly would prove nothing.
@@ -542,7 +536,7 @@ public class ContentAuditTests
             await write.Should().NotThrowAsync();
     }
 
-    // ── Details rendering + row shape (the one place the wording is decided) ──────────────
+    // Details rendering and row shape — the one place the wording is decided.
 
     [Theory]
     [InlineData(ContentChangeAction.Created, "Vesak festival 2027", "created 'Vesak festival 2027'")]

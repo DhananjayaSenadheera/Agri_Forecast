@@ -6,10 +6,8 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Application.Requests.Market.Quaries.GetAll;
 
-// Read-only market list. All business logic (the hasPrices flag threading, mapping) is
-// trivial; the DB is behind IMarketReadStore so this is unit-testable. An empty result is
-// a valid 200 [] (never a failure) — the admin registry and the Prices page both handle
-// an empty array without erroring.
+// Read-only market list; the DB is behind IMarketReadStore. An empty result is a valid 200 [], never a
+// failure.
 public class GetMarketsQueryHandler
     : IRequestHandler<GetMarketsQuery, Result<List<Market_GetDto>>>
 {

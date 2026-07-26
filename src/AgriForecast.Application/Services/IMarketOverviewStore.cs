@@ -1,25 +1,20 @@
 namespace AgriForecast.Application.Services;
 
-// Read-only projection of confirmed price observations used by
-// GetMarketOverviewQueryHandler. The handler owns ALL business logic (window clamp,
-// price precedence, mover computation); this store is a thin DB seam so the handler is
-// unit-testable with canned rows (mirrors how IRecommendationService abstracts the DB).
+// Read-only projection of confirmed price observations for GetMarketOverviewQueryHandler. The handler owns
+// all business logic; this is a thin DB seam so it can be unit-tested with canned rows.
 public interface IMarketOverviewStore
 {
     // Latest CONFIRMED observation date (the response asOf). Null when no confirmed data.
     Task<DateOnly?> GetLatestObservationDateAsync(CancellationToken ct = default);
 
-    // Confirmed rows in [fromInclusive, toInclusive], already joined to crop + market
-    // names. Held/quarantined rows (IsUnitConfirmed=0: unit-unproven OR outlier-flagged)
-    // are excluded by the store; only rows with a resolvable crop and market are returned.
+    // Confirmed rows in [fromInclusive, toInclusive], joined to crop and market names. Quarantined rows
+    // (IsUnitConfirmed=0) and rows without a resolvable crop or market are excluded by the store.
     Task<IReadOnlyList<MarketPriceWindowRow>> GetRowsAsync(
         DateOnly fromInclusive, DateOnly toInclusive, CancellationToken ct = default);
 }
 
-// One (confirmed) PriceObservations row flattened with its crop + market display names.
-// MarketId is the real Markets FK on PriceObservations (10 physical/pseudo markets).
-// Nullable price columns are coalesced to 0 by the store (0 == "absent" to the handler's
-// precedence rules), so the handler stays free of null-price branching.
+// One confirmed observation flattened with its crop and market names. Nullable price columns are coalesced
+// to 0 by the store, where 0 means "absent" to the handler's precedence rules.
 public sealed record MarketPriceWindowRow(
     Guid CropId,
     string CropName,

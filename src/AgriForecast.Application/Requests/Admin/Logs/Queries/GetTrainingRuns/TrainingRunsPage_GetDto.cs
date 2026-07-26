@@ -1,8 +1,7 @@
 namespace AgriForecast.Application.Requests.Admin.Logs.Queries.GetTrainingRuns;
 
-// Response envelope for GET /api/admin/logs/training — a server-paged list newest-first. An empty
-// page is a 200 with an empty Items list (house convention), never a 404. Mirrors the ingestion runs
-// envelope shape (Items/Page/PageSize/Total).
+// Response envelope for GET /api/admin/logs/training. An empty page is a 200 with an empty Items list,
+// never a 404.
 public class TrainingRunsPage_GetDto
 {
     public List<TrainingRun_GetDto> Items { get; set; } = new();

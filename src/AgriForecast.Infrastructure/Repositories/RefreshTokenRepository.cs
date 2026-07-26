@@ -6,10 +6,9 @@ using Microsoft.EntityFrameworkCore;
 namespace AgriForecast.Infrastructure.Repositories;
 
 /// <summary>
-/// EF Core store for <see cref="RefreshTokenRecord"/>. Follows the direct-DbContext repository style
-/// (like IngestionWatermarkRepository) rather than the generic repo, because the revocation/purge
-/// operations are set-based (ExecuteUpdate/ExecuteDelete run as one SQL statement, no change
-/// tracking) while rotation needs a tracked row to flip <c>UsedAtUtc</c>.
+/// EF Core store for RefreshTokenRecord. Uses the direct-DbContext style rather than the generic repo
+/// because the revocation and purge operations are set-based (one SQL statement, no change tracking),
+/// while rotation needs a tracked row to flip UsedAtUtc.
 /// </summary>
 public class RefreshTokenRepository : IRefreshTokenRepository
 {
@@ -33,10 +32,9 @@ public class RefreshTokenRepository : IRefreshTokenRepository
 
     public async Task<int> TryMarkUsedAsync(Guid jti, DateTime usedAtUtc, CancellationToken ct = default)
     {
-        // Atomic compare-and-set as ONE SQL UPDATE: only a currently-unused, unrevoked row
-        // transitions to Used. Under concurrency exactly one caller sees 1 affected row — this is
-        // what prevents two simultaneous rotations of the same (stolen) token from silently
-        // forking the family past reuse detection.
+        // Atomic compare-and-set as ONE SQL UPDATE: only a currently-unused, unrevoked row transitions to
+        // Used. Under concurrency exactly one caller sees 1 affected row, which is what stops two simultaneous
+        // rotations of the same stolen token from forking the family past reuse detection.
         return await _db.RefreshTokens
             .Where(r => r.Jti == jti && r.UsedAtUtc == null && r.RevokedAtUtc == null)
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.UsedAtUtc, usedAtUtc), ct);

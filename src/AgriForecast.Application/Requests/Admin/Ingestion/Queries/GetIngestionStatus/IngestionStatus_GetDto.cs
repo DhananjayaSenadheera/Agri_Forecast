@@ -1,14 +1,11 @@
 namespace AgriForecast.Application.Requests.Admin.Ingestion.Queries.GetIngestionStatus;
 
-// Response for GET /api/admin/ingestion/status. A single at-a-glance snapshot of ingestion health
-// for the admin page. All status fields are pre-rendered strings (see IngestionStatusStrings) so the
-// wire shape is frozen and never an enum int. PascalCase C# names serialize to camelCase JSON
-// (the API's default System.Text.Json policy), matching the other admin endpoints.
+// Response for GET /api/admin/ingestion/status. Status fields are pre-rendered strings (see
+// IngestionStatusStrings) so the wire shape is frozen and never an enum int.
 public class IngestionStatus_GetDto
 {
-    // "running" | "stopped" | "unknown". running = a fresh unfinished run exists within the
-    // staleness window; stopped = runs exist but none is unfinished-fresh (a stale unfinished row is
-    // treated as crashed, NEVER a fake "running"); unknown = the runs table is empty.
+    // "running" | "stopped" | "unknown". A stale unfinished run counts as crashed (stopped), never as a
+    // fake "running"; "unknown" means the runs table is empty.
     public string State { get; set; } = string.Empty;
 
     // Echoed from the API's own config (Ingestion:ServiceAddress); "unconfigured" when unset.
@@ -17,16 +14,13 @@ public class IngestionStatus_GetDto
     // Most recent IngestionRuns.StartedUtc, or null when no runs exist.
     public DateTime? LastRunAtUtc { get; set; }
 
-    // Aggregated outcome of the most recent BatchId: "succeeded" | "partial" | "failed", or null
-    // when no runs exist. A still-in-flight batch (a Running row, no failures) reports "partial"
-    // until it resolves — never a premature "succeeded".
+    // Aggregated outcome of the most recent batch: "succeeded" | "partial" | "failed", or null when no
+    // runs exist. An in-flight batch reports "partial" until it resolves.
     public string? LastRunStatus { get; set; }
 
-    // Latest verification summary, or null (the verifications table can be empty until the Python
-    // writer lands).
+    // Latest verification summary, or null while the verifications table is empty.
     public IngestionVerificationSummary_GetDto? LastVerification { get; set; }
 
-    // Per-source watermark states.
     public List<IngestionSource_GetDto> Sources { get; set; } = new();
 }
 

@@ -8,16 +8,11 @@ using Microsoft.Extensions.Logging;
 namespace AgriForecast.Application.Requests.Users.Commands.Delete;
 
 /// <summary>
-/// Deletes a user. Guards (all fail-closed, all tested):
-///  - you cannot delete your own account (acting id == target id);
-///  - the target must exist;
-///  - the LAST remaining admin cannot be deleted (Admin count checked in the same request scope as
-///    the write).
-/// REFRESH REVOCATION: before deleting, all of the target's refresh-token families are revoked so no
-/// outstanding refresh token can survive the delete (the FK is also CASCADE, so the rows are then
-/// physically removed with the user — belt and braces). An ALREADY-ISSUED access token still stays
-/// valid until it expires (&lt;= AccessTokenMinutes) — that short window is the documented residual
-/// limit; the deleted user's next /api/auth/refresh already failed closed on the GetByIdAsync miss.
+/// Deletes a user. Fail-closed guards: you cannot delete your own account, the target must exist, and the
+/// last remaining admin cannot be deleted (the Admin count is read in the same request scope as the write).
+/// <para>Before deleting, all of the target's refresh-token families are revoked so no outstanding refresh
+/// token survives. An already-issued access token stays valid until it expires — that short window is the
+/// documented residual limit.</para>
 /// </summary>
 public class DeleteUserCommandHandler : IRequestHandler<DeleteUserCommand, Result<bool>>
 {
@@ -59,8 +54,7 @@ public class DeleteUserCommandHandler : IRequestHandler<DeleteUserCommand, Resul
                 return Result<bool>.Failure("Cannot delete the last remaining admin.");
         }
 
-        // Revoke every refresh-token family for the target BEFORE the delete so no outstanding
-        // refresh token survives (set-based, committed immediately by the store).
+        // Revoke every refresh-token family before the delete so no outstanding refresh token survives.
         await _refreshTokenService.RevokeAllForUserAsync(target.Id, cancellationToken);
 
         await _userRepository.DeleteAsync(target);

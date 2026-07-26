@@ -11,8 +11,7 @@ namespace AgriForecast.Application.Requests.Crop.Quaries.GetOneById;
 public class CropGetByIdQueryHandler : IRequestHandler<CropGetByIdQuery, Result<Crop_GetDto>>
 {
     private readonly ICropRepository _cropRepository;
-    // API-3 enrichment inputs (Crop has no navigations): the crop's CropCategory + its 1:1
-    // CropAgronomyProfile, loaded directly via the open-generic repository.
+    // Crop has no navigations, so the category and the 1:1 agronomy profile are loaded directly.
     private readonly IGenericRepository<CropCategory> _categoryRepository;
     private readonly IGenericRepository<CropAgronomyProfile> _profileRepository;
     private ILogger <CropGetByIdQueryHandler> _logger;

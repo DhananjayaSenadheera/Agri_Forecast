@@ -8,10 +8,8 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace AgriForecast.API.Controllers;
 
-// R2 D-DF3 — the registration path that replaces the retired EconomicCenters CRUD controller.
-// "Register a new economic centre" = POST create with IsEconomicCenter = true. Mirrors
-// CropController conventions (structured ToErrorResponse, [Authorize], BadRequest on failure —
-// no stack traces leaked).
+// The registration path that replaced the retired EconomicCenters CRUD controller: registering a new
+// economic centre is a create with IsEconomicCenter = true. Mirrors CropController conventions.
 [ApiController]
 [Route("api/markets")]
 [Authorize]
@@ -30,8 +28,7 @@ public class MarketController(IMediator mediator) : ControllerBase
     [Authorize(Roles = UserRoles.Admin)]
     public async Task<IActionResult> Create([FromBody] MarketCreateCommand command)
     {
-        // Stamp the acting admin from the JWT (never the body): the audit row must name who really
-        // made the change, and a body-supplied ActingUserId is discarded here.
+        // The acting admin comes from the JWT, never the request body, so the audit row cannot be forged.
         var actingId = this.GetActingUserId();
         if (actingId is null)
             return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
@@ -44,10 +41,9 @@ public class MarketController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // Market registry read (API-1). Returns ALL markets by default (the admin registry
-    // needs the full set of 12). ?hasPrices=true filters to markets carrying >=1 confirmed
-    // PriceObservation (the farmer Prices page's price-carrying subset — 10 today). An
-    // empty registry returns a 200 [] (never a 404).
+    // Market registry read. Returns ALL markets by default, since the admin registry needs the full set;
+    // ?hasPrices=true filters to markets carrying at least one confirmed PriceObservation. An empty registry
+    // returns a 200 [], never a 404.
     [HttpGet("get/all")]
     public async Task<IActionResult> GetAll([FromQuery] bool hasPrices = false)
     {

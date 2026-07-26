@@ -7,16 +7,14 @@ using Moq;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Unit tests for the ingested-articles read handler (GET /api/news-articles/get/latest).
-/// The DB is faked via a canned INewsArticleReadStore so the take clamp (default 50 / max 200 /
-/// never-400), the row→DTO mapping, and the empty→200-[] contract are exercised in isolation.
-/// NOT covered here: the store's raw SQL over the Python-owned NewsArticles table (verified by
-/// build + live DB spot-check — the table is deliberately outside the EF model, so there is no
-/// relational harness for it by design).
+/// Unit tests for the ingested-articles read handler. The DB is faked via a canned INewsArticleReadStore,
+/// so the take clamp (default 50, max 200, never a 400), the row-to-DTO mapping and the empty -> 200 []
+/// contract run in isolation. The store's raw SQL over the Python-owned table is not covered here, since
+/// that table is deliberately outside the EF model and has no relational harness by design.
 /// </summary>
 public class NewsArticleReadHandlerTests
 {
-    // ── Fake store: records the take it was asked for, returns canned rows ────────────
+    // Fake store: records the take it was asked for and returns canned rows.
     private sealed class FakeStore : INewsArticleReadStore
     {
         public List<NewsArticleRow> Rows = new();

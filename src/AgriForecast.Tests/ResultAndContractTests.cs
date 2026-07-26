@@ -9,9 +9,7 @@ namespace AgriForecast.Tests;
 /// </summary>
 public class ResultTests
 {
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 1. Success factory
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 1. Success factory.
 
     [Fact]
     public void Success_SetsIsSuccessTrue_AndDataAvailable()
@@ -23,9 +21,7 @@ public class ResultTests
         result.Error.Should().BeNull();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 2. Failure factory
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 2. Failure factory.
 
     [Fact]
     public void Failure_SetsIsSuccessFalse_AndErrorAvailable()
@@ -37,9 +33,7 @@ public class ResultTests
         result.Data.Should().BeNull();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 3. SuccessWithWarnings
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 3. SuccessWithWarnings.
 
     [Fact]
     public void SuccessWithWarnings_IsSuccess_AndWarningsAvailable()
@@ -52,9 +46,7 @@ public class ResultTests
         result.Error.Should().BeNull();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 4. MlContract constants remain stable (regression guard)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 4. MlContract constants remain stable (regression guard).
 
     [Fact]
     public void MlContract_FallbackPredictor_IsExpectedString()

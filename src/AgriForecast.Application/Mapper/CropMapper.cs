@@ -3,15 +3,10 @@ using AgriForecast.Domain.Entities;
 
 namespace AgriForecast.Application.Mapper;
 
-// Hand-written replacement for the former Crop object-mapper profile (Crop CreateMap set).
-// Static, allocation-only mapping; no reflection, no package dependency.
+// Hand-written static mappers for Crop (the house style — no AutoMapper).
 public static class CropMapper
 {
-    // Crop_CreateDto -> Crop
-    // Mirrors CreateMap<Crop_CreateDto, Crop>: new Guid Id, UtcNow timestamps,
-    // straight copy of Name / Source / CropCategoryId. CropCode is set by the handler.
-    // CropCategoryId is validated (NotEmpty + must exist) upstream. (R2 Step 8.2 dropped
-    // ExternalProductId — source-product mapping now lives in CommodityAliases.)
+    // CropCode is stamped by the handler; CropCategoryId is validated upstream.
     public static Crop ToEntity(this Crop_CreateDto src)
     {
         return Crop.CreateForManualEntry(
@@ -20,17 +15,12 @@ public static class CropMapper
             cropCategoryId: src.CropCategoryId);
     }
 
-    // Crop_UpdateDto -> Crop (mutate-in-place onto the tracked entity)
-    // Mirrors CreateMap<Crop_UpdateDto, Crop>: Name always overwritten; Source only
-    // overwritten when the update actually supplies it (PreCondition); UpdatedAt refreshed
-    // to UtcNow. Id is not reassigned (it identifies the tracked row).
+    // In-place update on the tracked entity. Source is only overwritten when the update supplies it.
     public static Crop ApplyTo(this Crop_UpdateDto src, Crop destination)
     {
-        // The old ForMember(Name, MapFrom(src.Name)) copied the value unconditionally,
-        // including null. Preserved exactly (src.Name is string?, destination.Name is string).
+        // Name is copied unconditionally, including null (matching the previous mapping).
         destination.Name = src.Name!;
 
-        // PreCondition(src => src.Source != null)
         if (src.Source != null)
         {
             destination.Source = src.Source;
@@ -40,11 +30,8 @@ public static class CropMapper
         return destination;
     }
 
-    // Crop -> Crop_GetDto
-    // API-3 enrichment: the Crop entity deliberately has no navigation properties, so the
-    // caller (query handler) supplies the already-loaded CropCategory and CropAgronomyProfile.
-    // Both are optional (null => that projection is null), which keeps the existing callers
-    // and the crop-only unit tests working unchanged.
+    // Crop has no navigation properties, so the caller passes the already-loaded CropCategory and
+    // CropAgronomyProfile. Both are optional; null means that projection comes back null.
     public static Crop_GetDto ToGetDto(this Crop src, CropCategory? category = null, CropAgronomyProfile? profile = null)
     {
         return new Crop_GetDto
@@ -62,22 +49,17 @@ public static class CropMapper
         };
     }
 
-    // growthDays serving gate (load-bearing): expose GrowthPeriodDays ONLY when the crop is
-    // verified AND has a positive growth period. This mirrors the Python serving gate so the
-    // UI never shows a growth period the forecaster refuses to use. Everything else => null:
-    //   * no profile row            -> null
-    //   * IsVerified == false       -> null (the 2 held-unverified crops)
-    //   * GrowthPeriodDays == null  -> null (continuous/perennial crops: Coconut, Papaya, …)
-    //   * GrowthPeriodDays <= 0      -> null
+    // Expose GrowthPeriodDays only when the crop is verified and the value is positive. This mirrors the
+    // Python serving gate, so the UI never shows a growth period the forecaster refuses to use.
+    // Everything else (no profile, unverified, null, or non-positive) maps to null.
     private static int? ResolveGrowthDays(CropAgronomyProfile? profile)
     {
         if (profile is null || !profile.IsVerified) return null;
         return profile.GrowthPeriodDays is int gp && gp > 0 ? gp : null;
     }
 
-    // Enriched list mapping. Lookups are keyed by CropCategories.Id (4 rows) and
-    // CropAgronomyProfiles.CropId (1:1). Missing keys map to null for that projection.
-    // Both dictionaries are optional so the crop-only callers/tests keep working.
+    // Enriched list mapping. Lookups are keyed by CropCategories.Id and CropAgronomyProfiles.CropId;
+    // both dictionaries are optional and a missing key maps to null.
     public static List<Crop_GetDto> ToGetDtoList(
         this IEnumerable<Crop> src,
         IReadOnlyDictionary<Guid, CropCategory>? categoriesById = null,

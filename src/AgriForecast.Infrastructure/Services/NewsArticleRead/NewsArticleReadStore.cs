@@ -4,14 +4,12 @@ using Microsoft.EntityFrameworkCore;
 
 namespace AgriForecast.Infrastructure.Services.NewsArticleRead;
 
-// Read-only store over the PYTHON-OWNED NewsArticles table (agriforecast_ml/news/loader.py owns
-// the DDL). The table is deliberately NOT in the EF model — no entity, no migration, no snapshot
-// entry — so this store reads it with Database.SqlQuery instead of a DbSet. That keeps the
-// ownership boundary honest: EF migrations can never try to create/alter a table Python creates.
+// Read-only store over the PYTHON-OWNED NewsArticles table (the Python loader owns the DDL). The table is
+// deliberately not in the EF model — no entity, no migration, no snapshot entry — so this store reads it with
+// Database.SqlQuery instead of a DbSet, and EF migrations can never try to create or alter it.
 //
-// FAIL-SOFT: on a fresh DB where the news ingestion has never run, the table does not exist.
-// That is a normal state (same posture as an empty curated-events list), so we probe
-// INFORMATION_SCHEMA first and return [] rather than letting SqlException 208 become a 500.
+// Fail-soft: on a fresh DB where the news ingestion has never run the table does not exist. That is a normal
+// state, so we probe INFORMATION_SCHEMA first and return [] rather than letting SqlException 208 become a 500.
 public class NewsArticleReadStore : INewsArticleReadStore
 {
     private readonly AgriForecastDbContext _db;
@@ -25,16 +23,14 @@ public class NewsArticleReadStore : INewsArticleReadStore
             .FirstAsync(ct) > 0;
         if (!tableExists) return Array.Empty<NewsArticleRow>();
 
-        // Topics/SentimentScore are added by the Python SCORER (store_sentiment.py ALTERs),
-        // not the loader's base DDL — a DB where ingestion ran but scoring never did lacks
-        // them. Probe once and select NULL literals in that case (same fail-soft posture as
-        // the table probe; the columns arrive on the first scoring pass).
+        // Topics and SentimentScore are added by the Python scorer, not the loader's base DDL, so a DB where
+        // ingestion ran but scoring never did lacks them. Probe once and select NULL literals in that case.
         var signalColumns = await _db.Database
             .SqlQuery<int>($"SELECT COUNT(*) AS [Value] FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'NewsArticles' AND COLUMN_NAME IN ('Topics', 'SentimentScore')")
             .FirstAsync(ct) == 2;
 
-        // The row limit is parameterized by the interpolation (never string-concatenated).
-        // COALESCE: articles whose feed omitted a publish date still sort by fetch time.
+        // The row limit is parameterized by the interpolation, never string-concatenated. COALESCE lets an
+        // article whose feed omitted a publish date still sort by fetch time.
         var raw = signalColumns
             ? await _db.Database.SqlQuery<SqlRow>($@"
 SELECT [Url], [Source], [Title], [Summary], [PublishedDateUtc], [RetrievedAtUtc], [Language], [Topics], [SentimentScore]

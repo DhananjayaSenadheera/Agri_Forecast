@@ -7,25 +7,21 @@ namespace AgriForecast.Infrastructure.Security;
 
 /// <summary>
 /// The persisted refresh-token (jti / token-family) revocation state machine.
-///
-/// State machine:
-///  - ISSUE  (login/register): mint a refresh JWT with a fresh jti in a NEW family; persist a row.
-///  - ROTATE (/refresh): the presented token must be crypto-valid AND its jti row must exist, be
-///    unexpired, not revoked, and not already used. On success mark the row Used and issue a child
-///    row with the SAME family (chaining). A used/revoked row presented again is a reuse/theft
-///    signal ⇒ revoke the ENTIRE family and reject.
-///  - LOGOUT: revoke the presented token's family.
-///  - DELETE/DEMOTE (admin): revoke every family for the user.
-///
-/// Fail-CLOSED: any store error during ROTATE rejects the refresh (no stateless fallback).
-/// LOGGING: user id / family id only — never the raw token or the jti (both are token identifiers).
+/// <para>
+/// Issue (login or register): mint a refresh JWT with a fresh jti in a NEW family and persist a row.
+/// Rotate (/refresh): the presented token must be crypto-valid and its jti row must exist, be unexpired,
+/// unrevoked and unused. On success the row is marked Used and a child row is issued in the SAME family.
+/// A used or revoked row presented again is a reuse signal, so the whole family is revoked and the request
+/// rejected. Logout revokes the presented token's family; an admin delete or demote revokes every family.
+/// </para>
+/// Fail-closed: any store error during rotate rejects the refresh — there is no stateless fallback.
+/// Log the user id and family id only, never the raw token or the jti.
 /// </summary>
 public class RefreshTokenService : IRefreshTokenService
 {
-    // Opportunistic housekeeping: on each successful issue/rotation, delete rows that expired more than
-    // this grace beyond their expiry. Keeps the tiny table from accumulating dead rows without a
-    // background service. Grace (not exactly-at-expiry) leaves a short window for any last
-    // reuse-detection to still find a just-expired row.
+    // Opportunistic housekeeping: on each successful issue or rotation, delete rows that expired more than
+    // this grace beyond their expiry. The grace leaves a short window for reuse detection to still find a
+    // just-expired row.
     private const int PurgeGraceDays = 2;
 
     private readonly IRefreshTokenRepository _store;
@@ -60,16 +56,15 @@ public class RefreshTokenService : IRefreshTokenService
                 ExpiresAtUtc = expiresAtUtc
             }, ct);
             await _store.SaveChangesAsync(ct);
-            // Purge on issue as well as rotate: a deployment where users log in but rarely hit
-            // /refresh would otherwise accumulate dead rows until some rotation happens to run.
+            // Purge on issue as well as rotate: a deployment where users log in but rarely refresh would
+            // otherwise accumulate dead rows.
             await TryPurgeExpiredAsync(ct);
             return (token, expiresAtUtc);
         }
         catch (Exception ex)
         {
-            // Do not fail the login/register itself — the access token is already minted. A refresh
-            // token that could not be persisted could never be honoured anyway, so omit the cookie
-            // (fail-safe, no stateless bypass). User re-authenticates when the access token expires.
+            // Do not fail the login or register itself — the access token is already minted, and a refresh
+            // token that could not be persisted could never be honoured. Omit the cookie instead.
             _logger.LogWarning(ex, "Could not persist refresh-token record on issue. UserId: {UserId}", userId);
             return (null, default);
         }
@@ -114,11 +109,9 @@ public class RefreshTokenService : IRefreshTokenService
                 return RefreshRotationResult.Fail();
             }
 
-            // 5) Rotate: atomically mark the presented row Used (compare-and-set — exactly one of
-            //    any concurrent callers wins). Losing the race means someone else just spent this
-            //    jti in the last few milliseconds: that is the same theft signal as step 3, so
-            //    revoke the family. Without this, two simultaneous rotations of a stolen token
-            //    would both succeed and fork the family past reuse detection.
+            // 5) Rotate: atomically mark the presented row Used (compare-and-set, so exactly one of any
+            //    concurrent callers wins). Losing the race means someone else just spent this jti, which is
+            //    the same theft signal as step 3, so revoke the family.
             var now = DateTime.UtcNow;
             var marked = await _store.TryMarkUsedAsync(row.Jti, now, ct);
             if (marked == 0)

@@ -2,10 +2,9 @@ using System.Text.Json;
 
 namespace AgriForecast.Application.Services;
 
-// Mirrors the Python FastAPI POST /timeline response contract verbatim.
-// confidence / activePredictor / explanation pass straight through to the
-// farmer - never upgrade a Low / fallback into a confident number.
-// Crops with no history return an empty history list + Low confidence.
+// Mirrors the Python POST /timeline response contract verbatim. confidence, activePredictor and
+// explanation pass straight through — never upgrade a Low or fallback result into a confident number.
+// Crops with no history return an empty history list and Low confidence.
 public sealed class CropTimelineDto
 {
     public string? CropName { get; set; }
@@ -14,8 +13,8 @@ public sealed class CropTimelineDto
     public string? ModelVersion { get; set; }
     public string Explanation { get; set; } = string.Empty;
 
-    // --- Additive (API-5), OPTIONAL for old-ML-service compatibility. ---
-    // /timeline emits reasonCode/reasonParams but NEVER topFactors (by design).
+    // Optional so an older ML service without these keys still deserializes. /timeline emits
+    // reasonCode and reasonParams but never topFactors.
     public string? ReasonCode { get; set; }
     public Dictionary<string, JsonElement>? ReasonParams { get; set; }
 

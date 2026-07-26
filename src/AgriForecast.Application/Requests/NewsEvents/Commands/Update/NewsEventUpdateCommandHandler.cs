@@ -43,9 +43,8 @@ public class NewsEventUpdateCommandHandler : IRequestHandler<NewsEventUpdateComm
             return Result<Guid>.Failure("News event does not exist.");
         }
 
-        // Apply scalar fields (PublishedAt is NOT among them — immutable vintage, the UpdateDto does
-        // not carry it, so the stored knowledge date is preserved by construction) then reconcile
-        // the crop/market links onto the tracked graph.
+        // Apply the scalar fields — PublishedAt is not among them, since the UpdateDto does not carry the
+        // immutable vintage — then reconcile the crop/market links on the tracked graph.
         dto.ApplyTo(existing);
         _newsEventRepository.SetCropLinks(existing, dto.AffectedCropIds);
         _newsEventRepository.SetMarketLinks(existing, dto.AffectedMarketIds);
@@ -53,8 +52,7 @@ public class NewsEventUpdateCommandHandler : IRequestHandler<NewsEventUpdateComm
 
         _logger.LogInformation("News event {Id} updated (PublishedAt preserved: {PublishedAt:yyyy-MM-dd}).",
             existing.Id, existing.PublishedAt);
-        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
-        // write can never turn a committed update into an error).
+        // Audited after the commit, and the audit swallows-and-logs, so it can never fail the update.
         await _activityAudit.RecordNewsEventChangedAsync(
             request.ActingUserId, ContentChangeAction.Updated, existing.Title, cancellationToken);
 

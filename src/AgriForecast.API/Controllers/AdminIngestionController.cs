@@ -7,11 +7,9 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace AgriForecast.API.Controllers;
 
-// Admin ingestion observability (PR 3 of 4). Two READ-ONLY GETs backing the admin ingestion page:
-// a health snapshot and a paged run history. Entirely Admin-locked at the controller level (these
-// surface operational internals — source states, error summaries, coverage windows — that farmers
-// must not see). Mirrors IndicatorsController posture: full-literal routes, structured error shape,
-// no stack traces leaked (validation failures become a 400 via the ValidationBehavior pipeline).
+// Admin ingestion observability: two read-only GETs backing the admin ingestion page — a health snapshot
+// and a paged run history. Admin-locked at the controller level, because these surface operational
+// internals (source states, error summaries, coverage windows) that farmers must not see.
 [ApiController]
 [Route("api/admin/ingestion")]
 [Authorize(Roles = UserRoles.Admin)]

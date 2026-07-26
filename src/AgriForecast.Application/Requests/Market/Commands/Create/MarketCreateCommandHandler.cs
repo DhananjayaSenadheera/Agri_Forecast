@@ -9,9 +9,8 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Application.Requests.Market.Commands.Create;
 
-// R2 D-DF3 replacement for the retired EcoCreateCommandHandler. Registers a Market (a Dedicated
-// Economic Centre when IsEconomicCenter=true). Mirrors CropCreateCommandHandler: generate the
-// business code via CodeSettings, stamp it once, persist through the generic repository, commit.
+// Registers a Market (a Dedicated Economic Centre when IsEconomicCenter=true): generate the business code
+// via CodeSettings, stamp it once, persist, commit. Mirrors CropCreateCommandHandler.
 public class MarketCreateCommandHandler : IRequestHandler<MarketCreateCommand, Result<bool>>
 {
     private readonly CodeSettings _codeSettings;
@@ -58,8 +57,7 @@ public class MarketCreateCommandHandler : IRequestHandler<MarketCreateCommand, R
         _logger.LogInformation(
             "Market created successfully with Market Code: {MarketCode} (IsEconomicCenter={IsEconomicCenter}).",
             marketCode, market.IsEconomicCenter);
-        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
-        // write can never turn a committed registration into an error).
+        // Audited after the commit, and the audit swallows-and-logs, so it cannot fail the registration.
         await _activityAudit.RecordMarketChangedAsync(
             request.ActingUserId, ContentChangeAction.Created, market.Name, cancellationToken);
 

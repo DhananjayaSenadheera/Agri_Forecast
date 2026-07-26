@@ -5,13 +5,10 @@ using MediatR;
 namespace AgriForecast.Application.Requests.Users.Commands.Create;
 
 /// <summary>
-/// Admin-only creation of a user account. Deliberately SEPARATE from
-/// <c>Auth.Commands.Register.RegisterCommand</c>, which is the anonymous self-registration path:
-/// that one always writes Role = "Farmer" AND returns an <c>AuthResponseDto</c> whose refresh cookie
-/// the controller issues to the CALLER — so reusing it from the admin console would overwrite the
-/// acting admin's own refresh cookie with the new user's, silently taking over their session at the
-/// next token refresh. This command issues NO token and NO cookie; it only writes the row and
-/// returns the same <see cref="AdminUserDto"/> projection the rest of the admin user endpoints use.
+/// Admin-only creation of a user account. Deliberately separate from the anonymous RegisterCommand,
+/// which always writes Role = "Farmer" and returns an AuthResponseDto whose refresh cookie the controller
+/// issues to the CALLER — reusing it from the admin console would overwrite the acting admin's own cookie
+/// and take over their session. This command issues no token and no cookie.
 /// </summary>
 public class CreateUserCommand : IRequest<Result<AdminUserDto>>
 {

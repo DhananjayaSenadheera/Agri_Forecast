@@ -1,10 +1,8 @@
 namespace AgriForecast.Domain.Interfaces;
 
-// Read-only access to the CropCategories reference dimension. CropCategories is a
-// seeded, fixed-GUID reference table (no CRUD path), so this exposes only the
-// existence check the manual crop-create validator needs to reject unknown categories.
+// Read-only access to the seeded CropCategories reference table. There is no CRUD path, so this exposes
+// only the existence check the crop-create validator needs.
 public interface ICropCategoryRepository
 {
-    // True if a CropCategory row with this Id exists (top-level or sub-category).
     Task<bool> ExistsAsync(Guid id, CancellationToken ct = default);
 }

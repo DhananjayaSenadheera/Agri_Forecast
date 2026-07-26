@@ -9,8 +9,7 @@ namespace AgriForecast.Application.Requests.NewsArticles.Quaries.GetLatest;
 public class NewsArticleGetLatestQueryHandler
     : IRequestHandler<NewsArticleGetLatestQuery, Result<List<NewsArticle_GetDto>>>
 {
-    // Window discipline: a bad/absent take never rejects the request — it clamps. The feed is a
-    // display window, not a query API; there is nothing an admin could "fix" about take=0.
+    // A bad or absent take clamps rather than rejecting: the feed is a display window, not a query API.
     public const int DefaultTake = 50;
     public const int MaxTake = 200;
 

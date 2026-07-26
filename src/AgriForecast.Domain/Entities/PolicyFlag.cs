@@ -2,10 +2,8 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Domain.Entities;
 
-// A government policy captured as a point-in-time flag for the ML feature store.
-// EffectiveFrom / EffectiveTo are the point-in-time keys the ML layer as-of-joins on:
-// a flag is "active" on date D when EffectiveFrom <= D and (EffectiveTo is null or D <= EffectiveTo).
-// Dates are stored date-only (no time component) to avoid any hidden "now" leakage.
+// A government policy as a point-in-time flag for the ML feature store. A flag is active on date D when
+// EffectiveFrom <= D and (EffectiveTo is null or D <= EffectiveTo). Dates are stored date-only.
 public class PolicyFlag
 {
     public Guid Id { get; set; }
@@ -22,10 +20,9 @@ public class PolicyFlag
     // Coarse expected price impact — the signal the ML layer reads.
     public PolicyDirection Direction { get; set; }
 
-    // Provenance.
     public string? Source { get; set; }
     public string? ReferenceUrl { get; set; }
 
-    // Audit: when the row was recorded (record-keeping only; never used as a feature).
+    // Record-keeping only; never used as a feature.
     public DateTime CreatedAtUtc { get; set; }
 }

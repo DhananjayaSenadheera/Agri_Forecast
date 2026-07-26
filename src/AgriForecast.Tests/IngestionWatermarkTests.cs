@@ -12,7 +12,7 @@ namespace AgriForecast.Tests;
 /// </summary>
 public class IngestionWatermarkTests
 {
-    // ── Create ───────────────────────────────────────────────────────────────────────────────
+    // Create.
 
     [Fact]
     public void Create_DefaultsToOk_WithNoSuccessRecordedYet()
@@ -46,7 +46,7 @@ public class IngestionWatermarkTests
         act.Should().Throw<ArgumentException>().And.ParamName.Should().Be("source");
     }
 
-    // ── RecordSuccess ────────────────────────────────────────────────────────────────────────
+    // RecordSuccess.
 
     [Fact]
     public void RecordSuccess_AdvancesLastSuccessUtc_AndObservedDate_AndSetsOk()
@@ -100,7 +100,7 @@ public class IngestionWatermarkTests
             "a no-new-data success (null observed date) must not blank the watermark");
     }
 
-    // ── RecordFailure ────────────────────────────────────────────────────────────────────────
+    // RecordFailure.
 
     [Fact]
     public void RecordFailure_DoesNotTouchTheResumePoint()
@@ -120,7 +120,7 @@ public class IngestionWatermarkTests
         wm.LastMessage.Should().Be("ML service 502");
     }
 
-    // ── Disable ──────────────────────────────────────────────────────────────────────────────
+    // Disable.
 
     [Fact]
     public void Disable_SetsDisabled_AndKeepsResumePoint()
@@ -136,7 +136,7 @@ public class IngestionWatermarkTests
         wm.LastMessage.Should().Be("feature-flagged off");
     }
 
-    // ── Persisted-int pinning for the status enum ────────────────────────────────────────────
+    // Persisted-int pinning for the status enum.
 
     [Theory]
     [InlineData(IngestionSourceStatus.Ok, 0)]

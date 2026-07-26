@@ -11,9 +11,8 @@ public class GetPriceHistoryQuery : IRequest<Result<List<PriceHistoryPoint_GetDt
 {
     public Guid CropId { get; set; }
 
-    // Optional. When set, the series is that ONE market's history. When null, the series
-    // is the cross-market daily envelope for the crop (min of all markets' lows, max of
-    // all markets' highs per date) — see the handler note.
+    // Optional. When set, the series is that one market's history; when null it is the cross-market daily
+    // envelope for the crop.
     public Guid? MarketId { get; set; }
 
     // Trailing window in days, anchored at the latest observation for the series. Clamped

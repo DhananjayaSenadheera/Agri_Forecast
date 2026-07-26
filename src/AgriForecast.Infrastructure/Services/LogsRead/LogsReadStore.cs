@@ -5,10 +5,8 @@ using Microsoft.EntityFrameworkCore;
 
 namespace AgriForecast.Infrastructure.Services.LogsRead;
 
-// Read-only projection over the Logs-hub audit tables for the admin Logs page. Pure EF LINQ,
-// AsNoTracking — no business logic here (validation + wire-string/UTC mapping live in the handlers).
-// Uses the normal request-scoped DbContext: these are reads, so none of the write-side isolation
-// (UserActivityAudit's per-write scopes) is needed. Mirrors IngestionReadStore.
+// Read-only projection over the Logs-hub audit tables for the admin Logs page. Pure EF LINQ, AsNoTracking —
+// validation and the wire-string/UTC mapping live in the handlers. Reads only, on the request-scoped context.
 public class LogsReadStore : ILogsReadStore
 {
     private readonly AgriForecastDbContext _db;
@@ -22,8 +20,7 @@ public class LogsReadStore : ILogsReadStore
 
         var total = await q.CountAsync(ct);
 
-        // Defense-in-depth against Skip overflow/negative even though GetTrainingRunsValidator owns
-        // the real bounds (page>=1, pageSize 1..100): clamp the offset to a sane non-negative int.
+        // Defence in depth against a Skip overflow even though GetTrainingRunsValidator owns the real bounds.
         var skip = (int)Math.Clamp((long)(page - 1) * pageSize, 0L, int.MaxValue);
 
         var items = await q
@@ -46,9 +43,8 @@ public class LogsReadStore : ILogsReadStore
     {
         var q = _db.UserActivityLog.AsNoTracking();
 
-        // OR-combined type filter. A single type is just a one-member set, so ?type= and ?types=
-        // share this one predicate (EF renders it as EventType IN (...) against the int column).
-        // A null/empty set is NO filter — never an "IN ()" that would return zero rows.
+        // OR-combined type filter. A single type is just a one-member set, so ?type= and ?types= share this one
+        // predicate. A null or empty set is NO filter — never an "IN ()" that would return zero rows.
         if (types is { Count: > 0 })
         {
             var typeList = types.Distinct().ToList();

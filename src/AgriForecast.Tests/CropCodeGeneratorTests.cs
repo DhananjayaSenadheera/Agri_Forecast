@@ -7,12 +7,10 @@ using Moq;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// R2 D-DF4 (subtask 4.1) — the category-prefixed CropCode generator. New crop registrations get
-/// the next VEG######/FRT###### code for their TOP-LEVEL category prefix (Up/Low-country Vegetable
-/// sub-categories roll up to VEG via CropCategory.PrefixForCategory). Each prefix has its own
-/// DefaultSetting counter (Veg_*/Frt_*), advanced independently. Both registration paths — the
-/// manual CQRS handler and the ingestion auto-provision path — resolve the prefix from the crop's
-/// CropCategoryId and call GetCropCode(prefix).
+/// The category-prefixed CropCode generator. A new crop registration gets the next VEG######/FRT###### code
+/// for its TOP-LEVEL category prefix (the Up/Low-country Vegetable sub-categories roll up to VEG), and each
+/// prefix has its own DefaultSetting counter advanced independently. Both registration paths — the manual
+/// CQRS handler and the ingestion auto-provision path — resolve the prefix and call GetCropCode(prefix).
 /// </summary>
 public class CropCodeGeneratorTests
 {
@@ -31,7 +29,7 @@ public class CropCodeGeneratorTests
         return (new CodeSettings(repo.Object), repo, seed);
     }
 
-    // ── Prefix rollup (CropCategory.PrefixForCategory) ───────────────────────────────────────
+    // Prefix rollup (CropCategory.PrefixForCategory).
 
     [Fact]
     public void Vegetable_TopLevel_ResolvesToVegPrefix()
@@ -53,7 +51,7 @@ public class CropCodeGeneratorTests
     public void UnknownCategory_DefaultsToVeg()
         => CropCategory.PrefixForCategory(Guid.NewGuid()).Should().Be("VEG");
 
-    // ── Code stamping per prefix ─────────────────────────────────────────────────────────────
+    // Code stamping per prefix.
 
     [Fact]
     public async Task GetCropCode_Veg_StampsPaddedCodeFromVegCounter()
@@ -76,7 +74,7 @@ public class CropCodeGeneratorTests
         (await settings.GetCropCode("XYZ")).Should().Be("VEG000071");
     }
 
-    // ── Counters advance independently ───────────────────────────────────────────────────────
+    // Counters advance independently.
 
     [Fact]
     public async Task GetCropCode_Veg_AdvancesOnlyVegCounter()
@@ -107,7 +105,7 @@ public class CropCodeGeneratorTests
         (await settings.GetCropCode("VEG")).Should().Be("VEG000073");
     }
 
-    // ── End-to-end: a sub-category crop registers under the VEG prefix ───────────────────────
+    // End-to-end: a sub-category crop registers under the VEG prefix.
 
     [Fact]
     public async Task SubCategoryCrop_RegistersUnderVegPrefix()

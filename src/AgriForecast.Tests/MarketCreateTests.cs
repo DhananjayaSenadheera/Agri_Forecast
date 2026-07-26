@@ -14,10 +14,10 @@ using Moq;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// R2 D-DF3 (subtask 3.2) — the Market create registration path that replaces the retired
-/// EconomicCenters CRUD stack. Covers MarketCreateValidator (NotEmpty name/district, valid
-/// MarketType) and MarketCreateCommandHandler (code stamped once via CodeSettings, flag threaded,
-/// commit called). "Register a new economic centre" = create with IsEconomicCenter = true.
+/// The Market create registration path that replaced the retired EconomicCenters CRUD stack. Covers
+/// MarketCreateValidator (non-empty name and district, a valid MarketType) and MarketCreateCommandHandler
+/// (the code is stamped once via CodeSettings, the flag is threaded through, commit is called).
+/// Registering a new economic centre is a create with IsEconomicCenter = true.
 /// </summary>
 public class MarketCreateTests
 {
@@ -25,9 +25,7 @@ public class MarketCreateTests
     // name the exact actor rather than matching any Guid.
     private static readonly Guid ActingAdmin = Guid.Parse("11111111-2222-3333-4444-555555555555");
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // MarketCreateValidator
-    // ──────────────────────────────────────────────────────────────────────────────
+    // MarketCreateValidator.
 
     private readonly MarketCreateValidator _validator = new();
 
@@ -85,9 +83,7 @@ public class MarketCreateTests
         result.IsValid.Should().BeTrue();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // MarketCreateCommandHandler
-    // ──────────────────────────────────────────────────────────────────────────────
+    // MarketCreateCommandHandler.
 
     private static (MarketCreateCommandHandler handler,
                     Mock<IGenericRepository<MarketEntity>> repo,

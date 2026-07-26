@@ -3,12 +3,10 @@ using AgriForecast.Domain.Entities;
 
 namespace AgriForecast.Application.Mapper;
 
-// Hand-written mapper for FestivalCalendarEntry (same style as PolicyFlagMapper — no AutoMapper).
+// Hand-written mapper for FestivalCalendarEntry (the house style — no AutoMapper).
 public static class FestivalCalendarMapper
 {
-    // FestivalCalendar_CreateDto -> FestivalCalendarEntry.
-    // Date normalised to date-only (leakage guard — the ML as-of-join key must never carry a
-    // hidden time); new Guid Id; CreatedAtUtc = UtcNow (record-keeping only, never a feature).
+    // Date is normalised to date-only: it is the ML as-of-join key and must never carry a time.
     public static FestivalCalendarEntry ToEntity(this FestivalCalendar_CreateDto src)
     {
         return new FestivalCalendarEntry
@@ -23,8 +21,7 @@ public static class FestivalCalendarMapper
         };
     }
 
-    // FestivalCalendar_UpdateDto -> apply onto the tracked entity. Date normalised to date-only.
-    // CreatedAtUtc is preserved (audit of first insert, not touched on edit).
+    // In-place update. Date is normalised to date-only; CreatedAtUtc keeps its first-insert value.
     public static FestivalCalendarEntry ApplyTo(this FestivalCalendar_UpdateDto src, FestivalCalendarEntry target)
     {
         target.FestivalKey = src.FestivalKey;
@@ -35,7 +32,6 @@ public static class FestivalCalendarMapper
         return target;
     }
 
-    // FestivalCalendarEntry -> FestivalCalendar_GetDto (convention-only, all same-name members).
     public static FestivalCalendar_GetDto ToGetDto(this FestivalCalendarEntry src)
     {
         return new FestivalCalendar_GetDto

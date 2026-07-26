@@ -15,6 +15,5 @@ builder.Configuration
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddHostedService<Worker>();
 
-//builder.Services.AddApplicationLayer();
 var host = builder.Build();
 host.Run();

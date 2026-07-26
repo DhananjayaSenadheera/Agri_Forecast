@@ -1,8 +1,6 @@
 namespace AgriForecast.Application.Requests.FestivalCalendar.DTOs;
 
-// Read shape for the admin Festivals page. Matches the FE FestivalEntry interface
-// (ForecastUI src/api/types.ts): { id, festivalKey, date, leadUpDays, isProvisional, source,
-// createdAtUtc } — so flipping the page from fixtures to live data is a client-side swap.
+// Read shape for the admin Festivals page; matches the FE FestivalEntry interface.
 public class FestivalCalendar_GetDto
 {
     public Guid Id { get; set; }

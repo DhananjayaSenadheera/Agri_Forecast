@@ -7,15 +7,12 @@ using FluentValidation;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Tests for GetHarvestForecastValidator and GetCropTimelineValidator.
-/// These validators are invoked by the MediatR validation behavior pipeline.
-/// We test them directly — no need to spin up MediatR.
+/// Tests for GetHarvestForecastValidator and GetCropTimelineValidator, invoked directly rather than through
+/// the MediatR validation pipeline.
 /// </summary>
 public class ValidatorTests
 {
-    // ──────────────────────────────────────────────────────────────────────────────
-    // GetHarvestForecastValidator
-    // ──────────────────────────────────────────────────────────────────────────────
+    // GetHarvestForecastValidator.
 
     private readonly GetHarvestForecastValidator _harvestValidator = new();
 
@@ -109,9 +106,7 @@ public class ValidatorTests
         result.IsValid.Should().BeTrue("exactly 365 days in the future is the allowed boundary");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // GetCropTimelineValidator
-    // ──────────────────────────────────────────────────────────────────────────────
+    // GetCropTimelineValidator.
 
     private readonly GetCropTimelineValidator _timelineValidator = new();
 

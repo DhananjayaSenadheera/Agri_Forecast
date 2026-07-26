@@ -45,9 +45,8 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.HasIndex(x => x.Email).IsUnique();
         });
 
-        // Refresh-token revocation store (jti / token-family). Additive, net-new table — no seed,
-        // no backfill. UsedAtUtc / RevokedAtUtc are nullable (null = current / not revoked); the
-        // timestamps are full datetime2 security-audit instants, NOT date-only ML reference dates.
+        // Refresh-token revocation store. UsedAtUtc / RevokedAtUtc are nullable (null = current / not
+        // revoked) and are full datetime2 security-audit instants, not date-only ML dates.
         modelBuilder.Entity<RefreshTokenRecord>(e =>
         {
             e.ToTable("RefreshTokens");
@@ -66,11 +65,9 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             // Revoke-all-for-user scan (admin delete/demote) + supports the FK.
             e.HasIndex(x => x.UserId);
 
-            // CASCADE (deliberate deviation from the prevailing Restrict posture on reference
-            // dimensions): a RefreshTokenRecord is a per-user session artifact OWNED by the user,
-            // not shared reference data. Deleting a user physically removes their token rows — the
-            // strongest possible revocation, and a defence-in-depth backstop even if the explicit
-            // RevokeAllForUserAsync in the delete handler were ever removed.
+            // CASCADE, deliberately unlike the Restrict posture on reference dimensions: a token row is a
+            // per-user session artifact owned by the user, so deleting the user physically removes their
+            // tokens — the strongest revocation, and a backstop for the explicit revoke in the handler.
             e.HasOne<User>()
                 .WithMany()
                 .HasForeignKey(x => x.UserId)
@@ -80,18 +77,16 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
         modelBuilder.Entity<DefaultSetting>().HasData(new DefaultSetting
         {
             Id = 1,
-            // R2 D-DF4: per-category-prefix crop-code counters. Seeded to next-free after the 96
-            // existing crops were re-coded (VEG000001..VEG000070 ⇒ next 71; FRT000001..FRT000026
-            // ⇒ next 27); padding 6 → VEG######/FRT######.
+            // Per-category-prefix crop-code counters, seeded to the next free value after the 96 existing
+            // crops were re-coded; padding 6 gives VEG######/FRT######.
             Veg_Code = 71,
             Veg_Padding = 6,
             Veg_Prefix = CropCategory.VegetablePrefix,
             Frt_Code = 27,
             Frt_Padding = 6,
             Frt_Prefix = CropCategory.FruitPrefix,
-            // Next manual market code = MKT00000013 (12 seeded markets occupy 1..12 after
-            // R2 Step 6.2 added MKT00000007..MKT00000012). Bumped 7 → 13 so runtime market
-            // registration (CodeSettings.GetMktCode) can never re-issue a seeded code.
+            // Next manual market code is MKT00000013: the 12 seeded markets occupy 1..12, so runtime
+            // registration can never re-issue a seeded code.
             Mkt_Code = 13,
             Mkt_Padding = 8,
             Mkt_Prefix = "MKT",
@@ -105,8 +100,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.Property(x => x.Code).HasMaxLength(50).IsRequired();
             e.Property(x => x.Name).HasMaxLength(100).IsRequired();
 
-            // Self-FK for sub-categories. Restrict: a parent category can never be
-            // deleted while a child still references it.
+            // Self-FK for sub-categories. Restrict: a parent can never be deleted while a child references it.
             e.HasOne<CropCategory>()
                 .WithMany()
                 .HasForeignKey(x => x.ParentId)
@@ -120,8 +114,8 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
 
         modelBuilder.Entity<Crop>(e =>
         {
-            // Optional grouping under a CropCategory. Restrict: a category can never be
-            // deleted while a crop still references it. Nullable until the later backfill.
+            // Optional grouping under a CropCategory. Restrict: a category cannot be deleted while a crop
+            // references it.
             e.HasOne<CropCategory>()
                 .WithMany()
                 .HasForeignKey(x => x.CropCategoryId)
@@ -135,14 +129,11 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
 
             e.Property(x => x.DataSource).HasMaxLength(500);
 
-            // VerifiedOn is a curation record-date, stored date-only (no hidden time) —
-            // mirrors the date-only discipline used across the reference entities.
+            // VerifiedOn is a curation record-date, stored date-only.
             e.Property(x => x.VerifiedOn).HasColumnType("date");
 
-            // 1:1 with Crop. Unique CropId enforces one agronomy profile per crop. Restrict:
-            // a Crop can never be deleted while its profile references it (mirrors the
-            // CommodityAlias -> Crop Restrict FK; agronomy is owned reference data, not a
-            // detach-on-delete child).
+            // 1:1 with Crop; the unique CropId enforces one profile per crop. Restrict, like the other
+            // crop-referencing FKs, so a Crop cannot be deleted while its profile references it.
             e.HasOne<Crop>()
                 .WithMany()
                 .HasForeignKey(x => x.CropId)
@@ -174,18 +165,16 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.Property(x => x.Value).HasPrecision(18, 6);
             e.Property(x => x.IsPublishedAtImputed).IsRequired();
 
-            // Both dates stored date-only (no time) — ReferenceDate is the period described and
-            // PublishedAt is the vintage/KnowledgeDate the ML layer as-of-joins on; neither may
-            // carry a hidden time (mirrors PolicyFlag / EconomicIndicator date discipline).
+            // Both dates are date-only: ReferenceDate is the period described and PublishedAt is the vintage
+            // the ML layer as-of-joins on, so neither may carry a hidden time.
             e.Property(x => x.ReferenceDate).HasColumnType("date").IsRequired();
             e.Property(x => x.PublishedAt).HasColumnType("date").IsRequired();
 
             // RetrievedAtUtc is a full datetime2 audit stamp (record-keeping only, never a feature).
             e.Property(x => x.RetrievedAtUtc).IsRequired();
 
-            // One row per VINTAGE of a period: a revised print carries a new PublishedAt and is a
-            // distinct row, but the same (series, period, vintage) may not be inserted twice. Keeps
-            // ingestion idempotent at the DB level; matches ExistsAsync's triple key.
+            // One row per vintage of a period: a revised print carries a new PublishedAt and is a distinct
+            // row, but the same (series, period, vintage) cannot be inserted twice.
             e.HasIndex(x => new { x.SeriesCode, x.ReferenceDate, x.PublishedAt }).IsUnique();
 
             // As-of read path: "latest vintage of a series knowable as of date D" scans PublishedAt.
@@ -204,8 +193,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.Property(x => x.Source).HasMaxLength(200);
             e.Property(x => x.ReferenceUrl).HasMaxLength(500);
 
-            // Dates stored date-only (no time) — these are the point-in-time keys
-            // the ML layer as-of-joins on, so they must never carry a hidden time.
+            // Date-only: these are the point-in-time keys the ML layer as-of-joins on.
             e.Property(x => x.EffectiveFrom).HasColumnType("date").IsRequired();
             e.Property(x => x.EffectiveTo).HasColumnType("date");
 
@@ -222,12 +210,10 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.Property(x => x.LeadUpDays).IsRequired();
             e.Property(x => x.IsProvisional).IsRequired();
 
-            // Date stored date-only (no time) — it is the point-in-time key the ML layer
-            // as-of-joins on, so it must never carry a hidden time (mirrors PolicyFlag).
+            // Date-only: it is the point-in-time key the ML layer as-of-joins on.
             e.Property(x => x.Date).HasColumnType("date").IsRequired();
 
-            // One row per (festival, date) — a festival cannot be seeded twice on the same day
-            // (idempotency / dedup at the DB level; mirrors EconomicIndicator's unique index).
+            // One row per (festival, date) — a festival cannot be seeded twice on the same day.
             e.HasIndex(x => new { x.FestivalKey, x.Date }).IsUnique();
 
             // Primary read pattern is "which festivals fall near date D" → scans Date.
@@ -236,8 +222,8 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
 
         SeedFestivalCalendar(modelBuilder);
 
-        // News events (ADM-7): capture + storage only. NOT yet an ML feature, so — unlike PolicyFlag
-        // / FestivalCalendarEntry — no seed data and no training-data-warning idiom hang off it.
+        // News events: capture and storage only. Not an ML feature yet, so there is no seed data and no
+        // training-data-warning idiom.
         modelBuilder.Entity<NewsEvent>(e =>
         {
             e.Property(x => x.EventType).HasConversion<int>().IsRequired();
@@ -246,9 +232,8 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.Property(x => x.Description).HasMaxLength(4000);
             e.Property(x => x.SourceUrl).HasMaxLength(1000);
 
-            // PublishedAt = the knowledge/as-of/vintage date. Stored date-only (no hidden time) so a
-            // future feature layer can as-of-join on it cleanly; immutable after create (enforced by
-            // the UpdateDto omitting the field). Mirrors MacroSeriesPoint.PublishedAt discipline.
+            // PublishedAt is the knowledge/vintage date, stored date-only so a future feature layer can
+            // as-of-join on it. Immutable after create (the UpdateDto omits the field).
             e.Property(x => x.PublishedAt).HasColumnType("date").IsRequired();
 
             // Primary read pattern is reverse-chronological by knowledge date.
@@ -265,8 +250,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 .HasForeignKey(x => x.NewsEventId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            // Crop side Restrict: a referenced Crop cannot be deleted until the link is removed
-            // (uniform with the CommodityAlias / CropAgronomyProfile / CropPrice dimension FKs).
+            // Crop side Restrict: a referenced Crop cannot be deleted until the link is removed.
             e.HasOne<Crop>()
                 .WithMany()
                 .HasForeignKey(x => x.CropId)
@@ -297,9 +281,8 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.Property(x => x.AveragePrice).HasPrecision(18, 2);
             e.HasIndex(x => new { x.CropId, x.EconomicCenterId, x.Month }).IsUnique();
 
-            // R2 D-DF3: EconomicCenterId now references Markets (the EconomicCenters CRUD dimension
-            // retired; a Dedicated Economic Centre is a Markets row with IsEconomicCenter=1).
-            // Restrict so a Market can never be deleted out from under a CropPrice row.
+            // EconomicCenterId references Markets (a Dedicated Economic Centre is a Markets row with
+            // IsEconomicCenter=1). Restrict so a Market cannot be deleted out from under a CropPrice row.
             e.HasOne(x => x.EconomicCenter)
                 .WithMany()
                 .HasForeignKey(x => x.EconomicCenterId)
@@ -315,12 +298,9 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.HasIndex(x => new { x.Source, x.ExternalProductId, x.PriceDate })
                 .IsUnique();
 
-            // R2 Step 3.3 / D-DF3: EconomicCenterId references Markets (the EconomicCenters
-            // CRUD dimension is retired; a Dedicated Economic Centre is a Markets row with
-            // IsEconomicCenter=1). MarketPrice has no nav property, so the FK is declared
-            // without a reference navigation. Restrict so a Market can never be deleted out
-            // from under a price row. Column stays nullable in the DB (an unlinked source
-            // may exist before its per-source backfill runs).
+            // EconomicCenterId references Markets. MarketPrice has no navigation property, so the FK is
+            // declared without one. Restrict so a Market cannot be deleted out from under a price row; the
+            // column stays nullable because an unlinked source may exist before its backfill runs.
             e.HasOne<Market>()
                 .WithMany()
                 .HasForeignKey(x => x.EconomicCenterId)
@@ -329,26 +309,22 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
 
         modelBuilder.Entity<Market>(e =>
         {
-            // 50 chars: fits both the MKT###### seed codes and the back-fill twins keyed
-            // 'ECOMAP-' + a 36-char GUID (= 43 chars); 20 was too narrow for the latter.
+            // 50 chars fits both the MKT###### seed codes and the 'ECOMAP-' + GUID backfill twins (43 chars).
             e.Property(x => x.MarketCode).HasMaxLength(50).IsRequired();
             e.Property(x => x.Name).HasMaxLength(200).IsRequired();
             e.Property(x => x.District).HasMaxLength(100);
             e.Property(x => x.MarketType).HasConversion<int>().IsRequired();
 
-            // IsEconomicCenter folds the retiring EconomicCenters dimension into Markets
-            // (R2 D-DF3). NOT NULL, default false — existing rows and ingestion-provisioned
-            // markets stay plain markets until explicitly promoted; the Dambulla DEC row is
-            // flagged in the same migration via a MarketCode-keyed UPDATE.
+            // NOT NULL, default false — existing and ingestion-provisioned markets stay plain markets until
+            // explicitly promoted; the Dambulla DEC row is flagged by a MarketCode-keyed UPDATE.
             e.Property(x => x.IsEconomicCenter).IsRequired().HasDefaultValue(false);
 
             // MarketCode is the human-facing business key — unique.
             e.HasIndex(x => x.MarketCode).IsUnique();
         });
 
-        // Back-compat link: EconomicCenter -> Market (nullable, no cascade).
-        // Restrict so a Market can never be deleted out from under an EconomicCenter;
-        // existing rows stay valid because MarketId is nullable.
+        // Back-compat link EconomicCenter -> Market. Restrict so a Market cannot be deleted out from under an
+        // EconomicCenter; existing rows stay valid because MarketId is nullable.
         modelBuilder.Entity<EconomicCenter>(e =>
         {
             e.HasOne<Market>()
@@ -370,9 +346,8 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.Property(x => x.MaxPrice).HasPrecision(10, 2);
             e.Property(x => x.ArrivalsKg).HasPrecision(12, 2);
 
-            // Unit quarantine (R1.1 P1). UnitRaw nullable; UnitConversionFactor decimal(10,4)
-            // nullable; IsUnitConfirmed NOT NULL default false (fail-closed — rows are
-            // quarantined until ingestion confirms the unit). The 0-row table needs no back-fill.
+            // Unit quarantine: IsUnitConfirmed is NOT NULL and defaults false, so rows are held until
+            // ingestion confirms the unit.
             e.Property(x => x.UnitRaw).HasMaxLength(50);
             e.Property(x => x.UnitConversionFactor).HasPrecision(10, 4);
             e.Property(x => x.IsUnitConfirmed).IsRequired().HasDefaultValue(false);
@@ -387,14 +362,10 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 .HasForeignKey(x => x.CropId)
                 .OnDelete(DeleteBehavior.SetNull);
 
-            // Idempotent upsert key. ExternalCommodityId is NULLABLE and SQL Server
-            // treats NULLs as EQUAL in a unique index, which would collapse all
-            // name-keyed (HARTI/CBSL) bulletins into one row. So we split into TWO
-            // filtered unique indexes:
-            //   * id-keyed sources (DEC) dedupe on ExternalCommodityId,
-            //   * name-keyed sources dedupe on ExternalCommodityName,
-            // guaranteeing at most one observation per commodity/market/date/source
-            // in either regime without a sentinel value.
+            // Idempotent upsert key. ExternalCommodityId is nullable and SQL Server treats NULLs as EQUAL in
+            // a unique index, which would collapse every name-keyed (HARTI/CBSL) bulletin into one row. So
+            // there are TWO filtered unique indexes: id-keyed sources dedupe on ExternalCommodityId,
+            // name-keyed sources on ExternalCommodityName.
             e.HasIndex(x => new { x.MarketId, x.ExternalCommodityId, x.ObservedDate, x.Source })
                 .IsUnique()
                 .HasFilter("[ExternalCommodityId] IS NOT NULL")
@@ -423,14 +394,10 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 .HasForeignKey(x => x.CropId)
                 .OnDelete(DeleteBehavior.Restrict);
 
-            // Ambiguity guard: one alias must not map to two crops. SQL Server treats NULLs
-            // as EQUAL in a unique index, which would collapse every global (Source IS NULL)
-            // alias into one row — so we split into TWO filtered unique indexes, exactly as
-            // PriceObservation splits its id/name-keyed dedup:
-            //   * source-scoped aliases dedupe on (Alias, Source) where Source IS NOT NULL,
-            //   * global aliases dedupe on (Alias) where Source IS NULL.
-            // Both are case-INSENSITIVE (SQL Server default collation) — desirable here, so
-            // "Beans"/"beans" cannot be inserted as two conflicting mappings.
+            // Ambiguity guard: one alias must not map to two crops. SQL Server treats NULLs as EQUAL in a
+            // unique index, which would collapse every global (Source IS NULL) alias into one row, so there
+            // are two filtered unique indexes: source-scoped on (Alias, Source), global on (Alias).
+            // Both are case-insensitive by the default collation, so "Beans" and "beans" cannot both exist.
             e.HasIndex(x => new { x.Alias, x.Source })
                 .IsUnique()
                 .HasFilter("[Source] IS NOT NULL")
@@ -452,17 +419,15 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.Property(x => x.Status).HasConversion<int>().IsRequired();
             e.Property(x => x.LastMessage).HasMaxLength(1000);
 
-            // Vintage high-water mark stored date-only (no hidden time) — mirrors the
-            // date-only discipline on PriceObservation.ObservedDate / PolicyFlag effective dates.
+            // Vintage high-water mark stored date-only.
             e.Property(x => x.LastObservedDate).HasColumnType("date");
 
             // One watermark per source — this is the business key the services resume on.
             e.HasIndex(x => x.Source).IsUnique();
         });
 
-        // Ingestion RUN rows — one per source per pass. Net-new, additive table (no seed, no
-        // backfill). Mirrors the IngestionWatermark config discipline: enum-as-int, date-only
-        // coverage columns, 1000-char message cap on the sanitized error.
+        // Ingestion RUN rows — one per source per pass. Enum-as-int, date-only coverage columns and a
+        // 1000-char cap on the sanitized error, mirroring the IngestionWatermark config.
         modelBuilder.Entity<IngestionRun>(e =>
         {
             e.Property(x => x.Source).HasMaxLength(100).IsRequired();
@@ -482,12 +447,11 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.HasIndex(x => x.BatchId);
         });
 
-        // Ingestion VERIFICATION rows — one per verification run. WRITTEN BY PYTHON later; .NET owns
-        // the SCHEMA only here. Net-new, additive (no seed, no backfill).
+        // Ingestion VERIFICATION rows — one per verification run. Written by Python; .NET owns the schema.
         modelBuilder.Entity<IngestionVerification>(e =>
         {
-            // Raw per-check JSON is guarded by an ISJSON check constraint so a malformed blob can
-            // never persist. nvarchar(max) (default for an unbounded required string).
+            // The raw per-check JSON is guarded by an ISJSON check constraint so a malformed blob can never
+            // persist.
             e.ToTable(t => t.HasCheckConstraint(
                 "CK_IngestionVerifications_ChecksJson_IsJson",
                 "ISJSON([ChecksJson]) = 1"));
@@ -508,10 +472,9 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.HasIndex(x => x.BatchId);
         });
 
-        // Model TRAINING run rows (Logs hub PR A) — one per training run. WRITTEN BY PYTHON later;
-        // .NET owns the SCHEMA only here. Net-new, additive (no seed, no backfill). Version is the
-        // business key (unique). MAE columns get explicit precision (house decimal discipline);
-        // CreatedUtc is DB-defaulted so a Python INSERT that omits it still stamps a creation instant.
+        // Model TRAINING run rows — one per training run. Written by Python; .NET owns the schema. Version is
+        // the unique business key, the MAE columns get explicit precision, and CreatedUtc is DB-defaulted so a
+        // Python INSERT that omits it still stamps a creation instant.
         modelBuilder.Entity<ModelTrainingRun>(e =>
         {
             e.Property(x => x.Version).HasMaxLength(20).IsRequired();
@@ -536,11 +499,9 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 .HasDatabaseName("IX_ModelTrainingRuns_TrainedAtUtc");
         });
 
-        // User ACTIVITY rows (Logs hub PR A) — one per security-relevant account event. WRITTEN by
-        // the .NET side (IUserActivityAudit) at the five auth/user-management call sites; net-new,
-        // additive (no seed, no backfill). EventType is enum-as-int (pinned). Only UsernameAttempted
-        // (failed logins) + Details (short code-authored note) are free text, both length-capped; no
-        // password/token/body is ever stored.
+        // User ACTIVITY rows — one per account or content event, written by IUserActivityAudit. EventType is
+        // enum-as-int and those values are persisted. Only UsernameAttempted and Details are free text and
+        // both are length-capped; no password, token or body is ever stored.
         modelBuilder.Entity<UserActivityEvent>(e =>
         {
             e.ToTable("UserActivityLog");
@@ -555,13 +516,10 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 .HasDatabaseName("IX_UserActivityLog_OccurredUtc");
         });
 
-        // SYSTEM ERROR rows (Logs hub PR A / Phase 3) — one per unhandled 500. WRITTEN by the .NET side
-        // (ISystemErrorLog from GlobalExceptionMiddleware) with a fire-safe, self-scoping writer; net-new,
-        // additive (no seed, no backfill). OccurredUtc is DB-defaulted so any write path stamps an
-        // instant. StackTrace is nvarchar(max) (the factory still hard-caps to 8000). Only exception
-        // type/message/stack + request method/path (path only) + trace id are stored — no request
-        // field (query string/header/body) is captured directly, but Message/StackTrace hold the
-        // verbatim (length-capped) exception text; see the SystemError entity's PRIVACY note.
+        // SYSTEM ERROR rows — one per unhandled 500, written by ISystemErrorLog. OccurredUtc is DB-defaulted.
+        // StackTrace is nvarchar(max) though the factory caps it to 8000. Only the exception type, message
+        // and stack plus the request method, path and trace id are stored — but Message and StackTrace are
+        // verbatim exception text, so see the SystemError entity's privacy note.
         modelBuilder.Entity<SystemError>(e =>
         {
             e.Property(x => x.Source).HasMaxLength(20).IsRequired();
@@ -584,19 +542,16 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
 
     }
 
-    // Deterministic seed of the initial market dimension: three physical DEC hubs
-    // plus HARTI (Pettah wholesale, Narahenpita retail) and a CBSL national-aggregate
-    // pseudo-market. Fixed Ids + fixed timestamps keep the seed idempotent across migrations.
-    // Codes MKT00000001..MKT00000006 mirror the MKT###### scheme (DefaultSetting.Mkt_*).
+    // Deterministic seed of the initial market dimension: three physical DEC hubs plus HARTI (Pettah
+    // wholesale, Narahenpita retail) and a CBSL national-aggregate pseudo-market. Fixed Ids and timestamps
+    // keep the seed idempotent across migrations; codes follow the MKT###### scheme.
     //
-    // DEDUP TRAP (must be enforced downstream, NOT in schema): the seeded HARTI Pettah
-    // wholesale market (MKT00000004) and a future ECOMAP twin of a legacy Colombo/Pettah
-    // EconomicCenter could BOTH carry wholesale prices for the same location, double-counting
-    // it in any cross-market average. Likewise the CBSL row is a NationalAggregate — an
-    // already-averaged figure that must never be pooled with location-level markets.
-    // The canonical-mapping layer MUST resolve overlapping physical locations to a single
-    // market and exclude NationalAggregate markets from location-level aggregation BEFORE
-    // any cross-market aggregation ships. Tracked on the ClickUp canonical-mapping task.
+    // Dedup trap, which must be enforced downstream and not in the schema: the seeded HARTI Pettah market
+    // and a future ECOMAP twin of a legacy Colombo/Pettah EconomicCenter could both carry wholesale prices
+    // for the same location, double-counting it in a cross-market average. The CBSL row is a
+    // NationalAggregate — an already-averaged figure that must never be pooled with location-level markets.
+    // The canonical-mapping layer must resolve overlapping locations to one market and exclude
+    // NationalAggregate markets before any cross-market aggregation ships.
     private static void SeedMarkets(ModelBuilder modelBuilder)
     {
         var seededAt = new DateTime(2026, 07, 02, 0, 0, 0, DateTimeKind.Utc);
@@ -668,22 +623,14 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 CreatedAt = seededAt,
                 UpdatedAt = seededAt
             },
-            // ── R2 Step 6.2 — 6 additional HARTI bulletin markets ─────────────────────────
-            // Added in lockstep with the 6.1 parser widening (10 real markets). Classification
-            // is owner-verified best-evidence (web): Meegoda / Nuwara Eliya / Veyangoda are
-            // formally-designated Dedicated Economic Centres (MarketType.DEC); Kandy /
-            // Norochchole / Bandarawela are municipal/assembly wholesale markets
-            // (MarketType.Wholesale, "(HARTI wholesale)" suffix like Pettah). Norochchole's
-            // classification is the least certain of the three and is reclassifiable if
-            // stronger evidence surfaces.
+            // 6 additional HARTI bulletin markets, added in lockstep with the parser widening.
+            // Classification is owner-verified best evidence: Meegoda / Nuwara Eliya / Veyangoda are
+            // formally-designated Dedicated Economic Centres; Kandy / Norochchole / Bandarawela are municipal
+            // wholesale markets. Norochchole is the least certain and is reclassifiable.
             //
-            // IsEconomicCenter is deliberately NOT set here: per the R2 Step 3.1 convention
-            // only MKT00000001 (Dambulla) carries IsEconomicCenter=1 today — Keppetipola /
-            // Thambuttegama are MarketType.DEC yet IsEconomicCenter=0. MarketType classifies
-            // the market *kind*; IsEconomicCenter=1 flags the single feature-reference DEC.
-            // These 3 new DEC rows therefore keep the column default (false), matching the
-            // existing seeded DEC rows. (Column defaultValue=false from migration
-            // 20260706161839_AddIsEconomicCenterToMarket.)
+            // IsEconomicCenter is deliberately not set here: only Dambulla (MKT00000001) carries it today,
+            // even though Keppetipola and Thambuttegama are MarketType.DEC. MarketType classifies the kind of
+            // market; IsEconomicCenter=1 flags the single feature-reference DEC.
             new
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000007"),
@@ -710,8 +657,8 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000009"),
                 MarketCode = "MKT00000009",
-                // Best-evidence classification: municipal/assembly wholesale market, not a
-                // formally-designated DEC (least certain of the three — reclassifiable).
+                // Best-evidence classification: a municipal wholesale market rather than a designated DEC,
+                // and the least certain of the three.
                 Name = "Norochchole (HARTI wholesale)",
                 District = (string?)"Puttalam",
                 MarketType = MarketType.Wholesale,
@@ -755,19 +702,15 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
         );
     }
 
-    // ─────────────────────────────────────────────────────────────────────────────────────
-    // CROP CATEGORIES — reference dimension, manual update path (NO ingestion / CQRS / endpoint).
+    // CROP CATEGORIES — a reference dimension with a manual update path (no ingestion, CQRS or endpoint).
+    // Fixed lowercase GUIDs and a fixed CreatedAt keep the seed deterministic and idempotent; a UtcNow here
+    // would churn the migrations diff every build. Mirrors the HARTI grouping: top-level Vegetable / Fruit
+    // plus Up-country / Low-country Vegetable sub-categories whose ParentId points at Vegetable.
     //
-    // Fixed lowercase GUIDs + a FIXED CreatedAt keep the seed deterministic and idempotent
-    // across migrations (a UtcNow here would churn the diff every build). Mirrors the HARTI
-    // bulletin grouping: top-level Vegetable / Fruit, plus Up-country / Low-country Vegetable
-    // sub-categories whose ParentId points at Vegetable.
+    // Never HasData on Crop rows — crops are auto-provisioned at runtime with per-database GUIDs, so
+    // assigning categories to existing crops is a separate name-keyed backfill.
     //
-    // NEVER HasData on Crop rows — crops are auto-provisioned at runtime with per-DB GUIDs.
-    // Assigning categories onto the existing crops is a separate name-keyed backfill (subtask 1.2),
-    // not seeded here.
-    //
-    // TO ADD A CATEGORY: add a seed row with a new fixed lowercase GUID + a unique Code, add a
+    // To add a category: add a seed row with a new fixed lowercase GUID and a unique Code, then add a
     // migration and apply it.
     private static void SeedCropCategories(ModelBuilder modelBuilder)
     {
@@ -812,9 +755,8 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
         );
     }
 
-    // Real Sri Lankan national policies, captured point-in-time for the ML feature store.
-    // Fixed Ids + a fixed CreatedAtUtc keep the seed deterministic (no "now" leakage) and
-    // idempotent across migrations. Dates are date-only.
+    // Real Sri Lankan national policies captured point-in-time for the ML feature store. Fixed Ids and a
+    // fixed CreatedAtUtc keep the seed deterministic and idempotent. Dates are date-only.
     private static void SeedPolicyFlags(ModelBuilder modelBuilder)
     {
         var seededAt = new DateTime(2026, 06, 30, 0, 0, 0, DateTimeKind.Utc);
@@ -901,46 +843,36 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
         );
     }
 
-    // ─────────────────────────────────────────────────────────────────────────────────────
-    // FESTIVAL CALENDAR — manual annual update path (NO ingestion service / CQRS / endpoint).
+    // FESTIVAL CALENDAR — yearly-static reference data with a manual annual update path (no ingestion
+    // service, CQRS or endpoint). Seeded via HasData with fixed GUIDs and a fixed CreatedAtUtc; a UtcNow
+    // here would churn the migrations diff every build. This table is the single source of truth — the
+    // Python feature layer reads it via load_festivals() — so do not add a static festival-days twin.
     //
-    // This is yearly-static reference data seeded via HasData with FIXED GUIDs and a FIXED
-    // CreatedAtUtc (a UtcNow here would churn the migrations diff every build). The DB table is
-    // the SINGLE SOURCE OF TRUTH — the Python feature layer reads it via load_festivals(); do
-    // NOT add a static festival-days twin.
-    //
-    // TO UPDATE (annual gazette check, ~November each year — ClickUp task 86caj358h):
-    //   1. Get the next year's holiday dates from the Department of Government Printing annual
-    //      holiday gazette (https://www.documents.gov.lk/).
-    //   2. Flip that year's AVURUDU / THAI_PONGAL rows from IsProvisional=true to false and set
-    //      the real gazette Source citation; correct the Date if the gazette differs from the
-    //      provisional estimate.
-    //   3. Extend the seed forward by one year (add new provisional rows) so the seed always
-    //      covers training-history-start (2015) .. current+N and never zeroes the feature for
-    //      historical training rows (the silent-bug trap: a forward-only seed leaves ~95% of
-    //      training rows with no festival signal while CV still looks fine).
+    // To update (annual gazette check, around November each year):
+    //   1. Get the next year's dates from the Department of Government Printing holiday gazette.
+    //   2. Flip that year's AVURUDU / THAI_PONGAL rows from IsProvisional=true to false, set the real
+    //      gazette Source citation, and correct the Date if the gazette differs from the estimate.
+    //   3. Extend the seed forward by one year so it always covers 2015 (training-history start) to
+    //      current+N. A forward-only seed silently leaves most training rows with no festival signal while
+    //      cross-validation still looks fine.
     //   4. Add a migration and apply it.
     //
-    // NOT SEEDED (intentionally): EID_UL_FITR / EID_UL_ADHA / DEEPAVALI. Eid dates require ACJU
-    // moon-sighting verification and Deepavali requires per-year lunar verification — neither is
-    // verifiable offline. Add them as seed rows (same shape) once dates are gazette-confirmed.
+    // EID_UL_FITR / EID_UL_ADHA / DEEPAVALI are intentionally not seeded: their dates need moon-sighting or
+    // per-year lunar verification and cannot be confirmed offline. Add them once gazette-confirmed.
     //
-    // Seed span: 2015 (training history starts 2015-06-22) .. 2030 inclusive.
-    //   AVURUDU     — Sinhala & Tamil New Year, the Apr 13 (eve) + Apr 14 (day) PAIR each year.
-    //                 The lead-up window anchors on the Apr 13 row (LeadUpDays=14); the paired
-    //                 Apr 14 row carries LeadUpDays=0 so the demand window is not double-counted.
-    //                 2015–2026 confirmed (IsProvisional=false); 2027–2030 provisional.
-    //   CHRISTMAS   — Dec 25 each year, fixed date, IsProvisional=false for all (zero risk).
-    //   THAI_PONGAL — Jan 14 each year (occasionally Jan 15). Folded in deliberately: the old
-    //                 hardcoded Python _is_festival() covered Pongal and dropping it would lose
-    //                 signal. Marked provisional where the gazette date could not be cited here.
+    // Seed span 2015..2030 inclusive.
+    //   AVURUDU     — the Apr 13 (eve) + Apr 14 (day) pair each year. The lead-up window anchors on the
+    //                 Apr 13 row; Apr 14 carries LeadUpDays=0 so it is not double-counted. 2015-2026 are
+    //                 confirmed, 2027-2030 provisional.
+    //   CHRISTMAS   — Dec 25, fixed date, confirmed for every year.
+    //   THAI_PONGAL — Jan 14 (occasionally Jan 15), marked provisional where the gazette date could not be
+    //                 cited here. Folded in because the old hardcoded Python check covered it.
     private static void SeedFestivalCalendar(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<FestivalCalendarEntry>().HasData(GetFestivalCalendarSeed());
     }
 
-    // Deterministic, wall-clock-free seed rows. Exposed so tests assert on the exact rows that
-    // land in HasData (no EF-InMemory / DB round-trip needed, and one source of truth for both).
+    // Deterministic, wall-clock-free seed rows. Public so tests can assert on the exact rows HasData gets.
     public static IReadOnlyList<FestivalCalendarEntry> GetFestivalCalendarSeed()
     {
         // Fixed recording timestamp — never UtcNow (would churn the migrations diff every build).
@@ -960,8 +892,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             var confirmed = year <= lastConfirmedYear;
             var gazette = $"Department of Government Printing, Sri Lanka — annual holiday gazette {year}";
 
-            // ── AVURUDU (Sinhala & Tamil New Year): Apr 13 eve + Apr 14 day, every year. ──
-            // Apr 13 anchors the lead-up window (LeadUpDays=14).
+            // AVURUDU (Sinhala & Tamil New Year): the Apr 13 eve row anchors the lead-up window.
             rows.Add(new FestivalCalendarEntry
             {
                 Id = FestivalId(0xA013, year),
@@ -984,7 +915,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 CreatedAtUtc = seededAt
             });
 
-            // ── THAI_PONGAL: Jan 14 (folded in; provisional where not gazette-cited here). ──
+            // THAI_PONGAL: Jan 14, provisional where it could not be gazette-cited here.
             rows.Add(new FestivalCalendarEntry
             {
                 Id = FestivalId(0x7014, year),
@@ -996,7 +927,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 CreatedAtUtc = seededAt
             });
 
-            // ── CHRISTMAS: Dec 25, fixed date — confirmed for all years (zero risk). ──
+            // CHRISTMAS: Dec 25, fixed date, confirmed for all years.
             rows.Add(new FestivalCalendarEntry
             {
                 Id = FestivalId(0xC025, year),
@@ -1012,10 +943,9 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
         return rows;
     }
 
-    // Deterministic fixed GUID per (festival tag, year): c3f30001-0000-0000-{tag}-00000000{yyyy}.
-    // Constant-folded at model build → EF snapshots literal GUIDs; stable across migrations.
-    // NOTE: {year:0000} embeds DECIMAL year digits in a hex GUID group — valid only because
-    // digits 0-9 are hex-safe by construction. Do not reuse this pattern with non-digit values.
+    // Deterministic fixed GUID per (festival tag, year). Constant-folded at model build, so EF snapshots
+    // literal GUIDs that stay stable across migrations. The {year:0000} embeds decimal digits in a hex GUID
+    // group — valid only because 0-9 are hex-safe. Do not reuse this pattern with non-digit values.
     private static Guid FestivalId(int tag, int year)
         => Guid.Parse($"c3f30001-0000-0000-{tag:x4}-00000000{year:0000}");
 }

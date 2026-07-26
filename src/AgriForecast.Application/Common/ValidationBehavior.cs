@@ -16,10 +16,8 @@ public class ValidationBehavior<TRequest, TResponse> : IPipelineBehavior<TReques
     {
         var context = new ValidationContext<TRequest>(request);
 
-        // ValidateAsync (not the synchronous Validate) so validators may use async rules
-        // such as MustAsync for DB existence checks (e.g. CropCreateValidator verifying the
-        // CropCategory exists). Calling Validate on a validator that has an async rule throws
-        // AsyncValidatorInvokedSynchronouslyException, so async is required, not optional.
+        // ValidateAsync, not Validate: some validators use async rules (e.g. a DB existence check), and
+        // calling Validate on those throws AsyncValidatorInvokedSynchronouslyException.
         var results = await Task.WhenAll(
             _validators.Select(v => v.ValidateAsync(context, cancellationToken)));
 

@@ -45,9 +45,7 @@ public class ForecastingServiceTests
             Source = "test"
         };
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 1. No prices → empty list returned
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 1. No prices -> empty list returned.
 
     [Fact]
     public async Task GetForecastHistory_NoPrices_ReturnsEmpty()
@@ -65,9 +63,7 @@ public class ForecastingServiceTests
         result.Should().BeEmpty();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 2. Unknown crop → empty list (no NullReferenceException)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 2. Unknown crop -> empty list, no NullReferenceException.
 
     [Fact]
     public async Task GetForecastHistory_UnknownCrop_ReturnsEmpty()
@@ -82,9 +78,7 @@ public class ForecastingServiceTests
         result.Should().BeEmpty();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 3. AveragePrice = (min + max) / 2 averaged across the month's rows
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 3. AveragePrice = (min + max) / 2 averaged across the month's rows.
 
     [Fact]
     public async Task GetForecastHistory_AveragePrice_IsCorrect()
@@ -111,9 +105,7 @@ public class ForecastingServiceTests
         result[0].AveragePrice.Should().Be(150m);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 4. Trend: second half > first half by >5% → Up
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 4. Trend: second half more than 5% above the first half -> Up.
 
     [Fact]
     public async Task GetForecastHistory_Trend_SecondHalfHigher_ReturnsUp()
@@ -142,9 +134,7 @@ public class ForecastingServiceTests
         result[0].Trend.Should().Be(PriceTrend.Up);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 5. Trend: second half < first half by >5% → Down
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 5. Trend: second half more than 5% below the first half -> Down.
 
     [Fact]
     public async Task GetForecastHistory_Trend_SecondHalfLower_ReturnsDown()
@@ -171,9 +161,7 @@ public class ForecastingServiceTests
         result[0].Trend.Should().Be(PriceTrend.Down);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 6. Trend: within ±5% → Stable
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 6. Trend: within 5% either way -> Stable.
 
     [Fact]
     public async Task GetForecastHistory_Trend_Flat_ReturnsStable()
@@ -198,9 +186,7 @@ public class ForecastingServiceTests
         result[0].Trend.Should().Be(PriceTrend.Stable);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 7. Confidence: <10 total data points → Low
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 7. Confidence: fewer than 10 data points -> Low.
 
     [Fact]
     public async Task GetForecastHistory_FewDataPoints_ConfidenceLow()
@@ -227,9 +213,7 @@ public class ForecastingServiceTests
         result[0].Confidence.Should().Be(ForecastConfidence.Low);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 8. Confidence: 10-29 total data points → Medium
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 8. Confidence: 10-29 data points -> Medium.
 
     [Fact]
     public async Task GetForecastHistory_10to29DataPoints_ConfidenceMedium()
@@ -261,9 +245,7 @@ public class ForecastingServiceTests
         result[0].Confidence.Should().Be(ForecastConfidence.Medium);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 9. Confidence: ≥30 total data points → High
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 9. Confidence: 30 or more data points -> High.
 
     [Fact]
     public async Task GetForecastHistory_30PlusDataPoints_ConfidenceHigh()
@@ -288,9 +270,7 @@ public class ForecastingServiceTests
         result[0].Confidence.Should().Be(ForecastConfidence.High);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 10. Multiple months are grouped correctly (one DTO per calendar month)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 10. Multiple months are grouped correctly, one DTO per calendar month.
 
     [Fact]
     public async Task GetForecastHistory_TwoMonths_ReturnsTwoDtos()
@@ -316,9 +296,7 @@ public class ForecastingServiceTests
         result.Select(r => r.Month.Month).Should().BeEquivalentTo(new[] { 1, 2 });
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 11. Single price row → Stable trend (not enough monthly data for slope)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 11. A single price row -> Stable trend (not enough monthly data for a slope).
 
     [Fact]
     public async Task GetForecastHistory_OneMonth_TrendIsStable()

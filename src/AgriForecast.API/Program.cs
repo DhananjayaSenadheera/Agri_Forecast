@@ -54,9 +54,8 @@ builder.Services.AddHostedService<AgriForecast.API.Startup.AdminBootstrapHostedS
 var jwtSettings = builder.Configuration.GetSection(JwtSettings.SectionName).Get<JwtSettings>()
                   ?? throw new InvalidOperationException("Missing Jwt configuration section.");
 
-// Fail-loud (security fix F-12): never boot with a missing, empty, too-short or
-// known-placeholder JWT signing key. Mirrors the SqlDbService connection-string guard.
-// The real key MUST come from user-secrets (dev) or the Jwt__Key env var (prod).
+// Fail loud: never boot with a missing, empty, too-short or known-placeholder JWT signing key.
+// The real key must come from user-secrets in dev or the Jwt__Key environment variable in prod.
 const string JwtPlaceholderKey = "dev-only-change-me-agriforecast-jwt-signing-key-0123456789";
 if (string.IsNullOrWhiteSpace(jwtSettings.Key)
     || jwtSettings.Key == JwtPlaceholderKey
@@ -86,10 +85,9 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 builder.Services.AddAuthorization();
 
-// CORS is restricted to the origins listed under "Cors:AllowedOrigins" in
-// configuration (set per environment; see appsettings.Development.json).
-// Fail-closed: an empty/missing list means no cross-origin access at all —
-// never fall back to AllowAnyOrigin (security fix F-07).
+// CORS is restricted to the origins listed under "Cors:AllowedOrigins" (set per environment).
+// Fail-closed: an empty or missing list means no cross-origin access at all — never fall back to
+// AllowAnyOrigin.
 var corsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
                   ?? Array.Empty<string>();
 
@@ -101,23 +99,20 @@ builder.Services.AddCors(options =>
             policy.WithOrigins(corsOrigins)
                 .AllowAnyMethod()
                 .AllowAnyHeader()
-                // Cookie-based auth (the refresh-token flow) requires credentialed CORS.
-                // Safe here because origins are an explicit allow-list (never AllowAnyOrigin) —
-                // AllowCredentials() with a wildcard origin is forbidden by the CORS spec anyway.
+                // Cookie-based auth (the refresh-token flow) requires credentialed CORS. Safe here because
+                // the origins are an explicit allow-list; AllowCredentials with a wildcard is forbidden anyway.
                 .AllowCredentials();
         });
 });
 
-// Rate limiting (security fix F-08). Defaults are ON even if the "RateLimiting"
-// section is absent (fail-closed). A global fixed-window limiter guards the whole
-// API per client IP; a stricter "auth" policy protects the login/register endpoints.
+// Rate limiting. Defaults are ON even if the "RateLimiting" section is absent (fail-closed): a global
+// fixed-window limiter guards the whole API per client IP, and a stricter "auth" policy protects login.
 var globalPermit = builder.Configuration.GetValue<int?>("RateLimiting:GlobalPermitPerMinute") ?? 100;
 var authPermit = builder.Configuration.GetValue<int?>("RateLimiting:AuthPermitPerMinute") ?? 10;
 var queueLimit = builder.Configuration.GetValue<int?>("RateLimiting:QueueLimit") ?? 0;
 
-// Partition key for the rate limiter. When RemoteIpAddress is null (e.g. an
-// in-memory/test connection) we intentionally fall all such requests into a single
-// shared "unknown" bucket rather than skipping the limit — fail-closed, never fail-open.
+// Partition key for the rate limiter. When RemoteIpAddress is null (e.g. an in-memory test connection) all
+// such requests fall into one shared "unknown" bucket rather than skipping the limit — fail-closed.
 static string ClientKey(HttpContext ctx) =>
     ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
 
@@ -162,12 +157,11 @@ builder.Services.AddRateLimiter(options =>
     };
 });
 
-// Forwarded-headers support for the rate-limiter partition key (F-08 hardening).
-// Behind a reverse proxy, Connection.RemoteIpAddress is the PROXY's IP, so every client
-// would share one rate-limit bucket (self-DoS). Trusting X-Forwarded-For blindly lets
-// clients spoof their partition key. Safe middle ground: OFF by default; only honour
-// forwarded headers when the operator explicitly lists the trusted proxy IPs under
-// "ForwardedHeaders:KnownProxies". Empty/missing list => direct-connection behaviour.
+// Forwarded-headers support for the rate-limiter partition key. Behind a reverse proxy
+// Connection.RemoteIpAddress is the PROXY's IP, so every client would share one rate-limit bucket, but
+// trusting X-Forwarded-For blindly lets clients spoof their partition key. So it is OFF by default and
+// forwarded headers are honoured only when the operator lists trusted proxy IPs under
+// "ForwardedHeaders:KnownProxies".
 var knownProxies = builder.Configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>()
                    ?? Array.Empty<string>();
 var forwardedHeadersEnabled = knownProxies.Length > 0;
@@ -177,8 +171,8 @@ if (forwardedHeadersEnabled)
     {
         options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
 
-        // Trust ONLY the explicitly configured proxy IPs. Clear the framework defaults
-        // (which trust loopback KnownNetworks/KnownProxies) so nothing else is honoured.
+        // Trust ONLY the explicitly configured proxy IPs; clear the framework defaults (which trust loopback)
+        // so nothing else is honoured.
         options.KnownNetworks.Clear();
         options.KnownProxies.Clear();
         foreach (var proxy in knownProxies)
@@ -218,9 +212,8 @@ app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 
-// Anonymous liveness probe. Exempt from rate limiting: LB/orchestrator probes often
-// originate from a single source IP and would otherwise share one bucket and hit 429,
-// causing probe flaps and needless restarts (F-08 hardening).
+// Anonymous liveness probe, exempt from rate limiting: probes often originate from a single source IP and
+// would otherwise share one bucket and hit 429, causing probe flaps and needless restarts.
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }))
     .AllowAnonymous()
     .DisableRateLimiting();

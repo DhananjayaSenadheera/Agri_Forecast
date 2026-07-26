@@ -2,8 +2,7 @@ using FluentValidation;
 
 namespace AgriForecast.Application.Requests.Admin.Logs.Queries.GetTrainingRuns;
 
-// Validates the training-runs query per the house posture (bad input -> 400 via ValidationBehavior ->
-// GlobalExceptionMiddleware). page >= 1; pageSize in [1,100] (validated, not silently clamped).
+// page >= 1; pageSize in [1,100], validated rather than silently clamped.
 public class GetTrainingRunsValidator : AbstractValidator<GetTrainingRunsQuery>
 {
     public const int MinPageSize = 1;

@@ -1,17 +1,13 @@
 namespace AgriForecast.Application.Services;
 
-// Config seam for the ingestion status handler, so the Application layer stays free of a direct
-// Microsoft.Extensions.Configuration dependency (the house dependency rule — config is resolved at
-// the Infrastructure boundary). The Infrastructure implementation reads the API's own configuration
-// (Ingestion:ServiceAddress / Ingestion:RunningStalenessMinutes) and applies the documented
-// fallbacks, so the handler receives already-resolved values and is trivially unit-testable.
+// Config seam for the ingestion status handler, so the Application layer needs no direct dependency on
+// Microsoft.Extensions.Configuration. The Infrastructure implementation reads the API's configuration and
+// applies the fallbacks, so the handler receives already-resolved values.
 public interface IIngestionStatusSettings
 {
-    // Echoed to the admin UI as the identity of the process that runs ingestion. Resolves to the
-    // literal "unconfigured" when the config key is absent/blank (never null/empty).
+    // Echoed to the admin UI. Resolves to the literal "unconfigured" when the config key is missing.
     string ServiceAddress { get; }
 
-    // Window (minutes) past which an unfinished run is treated as crashed (state "stopped") rather
-    // than "running". Resolves to 120 when the config key is absent.
+    // Minutes past which an unfinished run counts as crashed rather than running. Defaults to 120.
     int RunningStalenessMinutes { get; }
 }

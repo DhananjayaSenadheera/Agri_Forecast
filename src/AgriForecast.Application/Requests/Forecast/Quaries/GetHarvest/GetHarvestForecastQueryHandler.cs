@@ -11,11 +11,10 @@ namespace AgriForecast.Application.Requests.Forecast.Quaries.GetHarvest;
 public class GetHarvestForecastQueryHandler
     : IRequestHandler<GetHarvestForecastQuery, Result<HarvestForecast_GetDto>>
 {
-    // The "current price" rule lives in CurrentPriceRule so the best-harvest-window
-    // screen computes the identical number — the two screens are read side by side.
+    // The current-price rule lives in CurrentPriceRule so the best-harvest-window screen computes the
+    // identical number — the two screens are read side by side.
 
-    // Staleness guard: if the freshest servable price is older than this before the
-    // plant date, treat the signal as low-trust (caps the recommendation).
+    // If the freshest servable price is older than this before the plant date, the signal is low-trust.
     private const int StaleAfterDays = 90;
 
     private readonly IMarketPriceRepository _marketPriceRepository;
@@ -35,8 +34,7 @@ public class GetHarvestForecastQueryHandler
     public async Task<Result<HarvestForecast_GetDto>> Handle(
         GetHarvestForecastQuery request, CancellationToken cancellationToken)
     {
-        // a. Current price, as of the PLANT date so a historical plant date cannot
-        //    see prices observed after the planting decision was made.
+        // a. Current price as of the PLANT date, so a historical plant date cannot see later prices.
         var (currentPrice, latestObservation) = await CurrentPriceRule.ComputeAsync(
             _marketPriceRepository, request.CropId, request.PlantDate, cancellationToken);
 
@@ -73,8 +71,7 @@ public class GetHarvestForecastQueryHandler
             ActivePredictor = prediction.ActivePredictor,
             ModelVersion = prediction.ModelVersion,
             Explanation = prediction.Explanation,
-            // Additive ML fields pass straight through. TopFactors stays null when the
-            // ML omitted it (fallback path) - preserve omitted-vs-empty for the FE.
+                // Additive ML fields pass straight through; TopFactors stays null when the ML omitted it.
             ReasonCode = prediction.ReasonCode,
             ReasonParams = prediction.ReasonParams,
             TopFactors = prediction.TopFactors,
@@ -101,9 +98,8 @@ public class GetHarvestForecastQueryHandler
         var upside = (p.PredictedPrice - currentPrice) / currentPrice;
         var width = (p.UpperBound - p.LowerBound) / p.PredictedPrice;
 
-        // Honesty: a fallback / Low-confidence / stale signal is never strongly
-        // recommended. Compare against the centralized contract constants with
-        // OrdinalIgnoreCase so the cap fails closed if the ML wording/casing drifts.
+        // A fallback, Low-confidence or stale signal is never strongly recommended. Compare against
+        // MlContract with OrdinalIgnoreCase so the cap fails closed if the ML wording or casing drifts.
         bool lowTrust = string.Equals(p.ActivePredictor, MlContract.FallbackPredictor, StringComparison.OrdinalIgnoreCase)
                         || string.Equals(p.Confidence, MlContract.LowConfidence, StringComparison.OrdinalIgnoreCase)
                         || staleData;

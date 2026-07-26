@@ -53,15 +53,13 @@ public class CropCreateCommandHandler : IRequestHandler<CropCreateCommand, Resul
         crop.CropCode = cropcode;
         await _cropRepository.Addasync(crop);
 
-        // A crop must never exist without an agronomy profile. Stage a PENDING (unverified,
-        // all-fields-NULL) profile in the SAME SaveChanges scope as the crop insert so the two
-        // commit atomically — Step-5 curation later fills and verifies it.
+        // A crop must never exist without an agronomy profile: stage a pending (unverified) one in the
+        // same SaveChanges scope so the two commit together.
         await _agronomyProfileRepository.AddAsync(CropAgronomyProfile.CreatePending(crop.Id));
 
         await _unitOfWork.CommitAsync();
         _logger.LogInformation("Crop created successfully with Crop Code: {CropCode} (pending agronomy profile staged).", crop.CropCode);
-        // Content-audit row (fail-open: UserActivityAudit swallows-and-logs, so a failed audit
-        // write can never turn a committed create into an error).
+        // Audited after the commit, and the audit swallows-and-logs, so it can never fail the create.
         await _activityAudit.RecordCropChangedAsync(
             request.ActingUserId, ContentChangeAction.Created, crop.CropCode, cancellationToken);
 

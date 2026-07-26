@@ -7,20 +7,14 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace AgriForecast.API.Controllers;
 
-// Read-only economic-indicator + macro-series browser (ADM-6 / API-11). Backs the admin
-// Indicators page. Three GET routes over data that already exists (EconomicIndicators,
-// MacroSeriesPoints) but had no read surface until now.
+// Read-only economic-indicator and macro-series browser backing the admin Indicators page.
 //
-// AUTH DECISION: plain [Authorize] (authenticated), NOT Admin-only. These reads are non-personal,
-// non-privileged national reference data — no more sensitive than /api/forecast/market-overview
-// or /api/markets, which are also authenticated-only. The farmer-facing app may surface an
-// indicators view later, so gating to Admin would be a premature lock. Mutation of this data
-// happens only via ingestion (the Worker / Python admin seam), never here.
+// Plain [Authorize], not Admin-only: these reads are non-personal national reference data, no more
+// sensitive than /api/forecast/market-overview or /api/markets, and the farmer app may surface an
+// indicators view later. This data is only ever mutated by ingestion, never here.
 //
-// Routes are declared with full literal paths so this one controller serves /api/indicators,
-// /api/macro-series, and /api/indicators/catalog (the catalog literal never collides with the
-// series route). Empty results are a 200 [] (never a 404); from>to is a 400 with the house
-// error shape.
+// Routes use full literal paths so this one controller serves /api/indicators, /api/macro-series and
+// /api/indicators/catalog. Empty results are a 200 []; from > to is a 400 with the house error shape.
 [ApiController]
 [Route("api")]
 [Authorize]

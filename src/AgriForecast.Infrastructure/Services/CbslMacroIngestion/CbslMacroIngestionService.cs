@@ -8,45 +8,30 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Infrastructure.Services.CbslMacroIngestion;
 
-// CBSL macro (CCPI / MEI vintage) ingestion (R1 P3, ClickUp 86cahefbh) — a thin, properly-wired
-// SKELETON that is DISABLED by default, not faked. Hybrid of two existing house templates:
-//   * gating/lifecycle from CbslPriceReportIngestionService (feature-flag OFF => documented no-op
-//     success that is NEVER a source failure), and
-//   * the HTTP->Python seam from HartiBulletinIngestionService (authenticated X-API-Key POST to an
-//     /admin/* route on the same ML service, fail-safe transport handling that never throws to the
-//     Worker).
+// CBSL macro (CCPI / MEI vintage) ingestion — a properly-wired skeleton that is DISABLED by default, not
+// faked. Gating and lifecycle follow CbslPriceReportIngestionService; the HTTP seam follows
+// HartiBulletinIngestionService (an authenticated X-API-Key POST to an /admin/* route on the ML service).
 //
-// SINGLE SOURCE OF TRUTH: the CBSL PDF fetch/parse/upsert is Python and STAYS Python
-// (ingest_cbsl_macro.py). This .NET service does NOT parse PDFs; it triggers the Python pass over
-// the shared HTTP seam via POST /admin/ingest-cbsl-macro, then records per-series watermarks from
-// the returned perSeriesCoverage.
+// The CBSL PDF fetch, parse and upsert is Python and stays Python (ingest_cbsl_macro.py). This service does
+// not parse PDFs; it triggers the Python pass via POST /admin/ingest-cbsl-macro, then records per-series
+// watermarks from the returned perSeriesCoverage.
 //
-// FEATURE FLAG (why Disabled matters): the flag MacroSources:CbslMacro:Enabled defaults FALSE. A
-// Disabled source is a NO-OP and is NEVER counted as a source failure — a source we chose not to
-// run must not pollute the fail-isolation signal or trip alerting. The gating watermark row
-// (Source = "CBSL_MACRO") is created/kept Disabled with the reason recorded so ops can see at a
-// glance that macro ingestion is intentionally off (distinct from "failing").
+// The flag MacroSources:CbslMacro:Enabled defaults FALSE. A Disabled source is a no-op and is never counted
+// as a failure — a source we chose not to run must not pollute fail isolation or trip alerting. The gating
+// watermark (Source = "CBSL_MACRO") is created or kept Disabled with the reason recorded, so ops can tell
+// intentionally-off apart from failing.
 //
-// PER-SERIES WATERMARKS (adjudicated from the real Python response): the /admin/ingest-cbsl-macro
-// response carries perSeriesCoverage = { "<SeriesCode>": <rowCount>, ... } (e.g.
-// { "CCPI_BASE2021": 3, "FOOD_INFLATION_YOY": 3 }). Because per-series detail IS present cleanly,
-// we record ONE IngestionWatermark PER SERIES keyed "CBSL_MACRO_<SeriesCode>" (matching the
-// recorded contract "per-series IngestionWatermark rows, e.g. CBSL_CCPI"), so one late/absent
-// series never masks or fails another. Note the Python pass is a FULL re-scrape each time (small
-// bounded corpus, no sinceDate knob), so these watermarks are success/coverage bookkeeping, not a
-// resume lower bound — the request carries no sinceDate.
+// perSeriesCoverage is { "<SeriesCode>": <rowCount> }, so one IngestionWatermark is recorded PER SERIES,
+// keyed "CBSL_MACRO_<SeriesCode>", and one late or absent series never masks another. The Python pass is a
+// full re-scrape each time (a small bounded corpus, no sinceDate knob), so these watermarks are coverage
+// bookkeeping rather than a resume lower bound.
 //
-// ENABLING LATER: set MacroSources:CbslMacro:Enabled = true (the Python route + 159 rows already
-// exist). The enabled path then POSTs to /admin/ingest-cbsl-macro; a transport/HTTP failure is
-// recorded on the gating watermark WITHOUT advancing anything and returns (never throws) — the
-// Worker's per-source try/catch is the outer belt, this is the inner suspenders.
-//
-// UPDATE PATH: the corpus is monthly; run-monthly.sh (~15th) drives the pass once enabled.
-// Zero-new-rows ("no new bulletin since last pass") is a SUCCESS with zero rows, never an error.
+// To enable later, set MacroSources:CbslMacro:Enabled = true. A transport or HTTP failure is recorded on the
+// gating watermark without advancing anything and returns rather than throwing. A zero-row pass is a
+// success, not an error.
 public class CbslMacroIngestionService : ICbslMacroIngestionService
 {
-    // Gating watermark key (owns the Disabled/failed lifecycle for the whole pass). Per-series
-    // rows are "CBSL_MACRO_<SeriesCode>".
+    // Gating watermark key; the per-series rows are "CBSL_MACRO_<SeriesCode>".
     public const string SourceKey = "CBSL_MACRO";
     public const string SeriesSourcePrefix = "CBSL_MACRO_";
 
@@ -54,8 +39,8 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
     private const string DisabledReason =
         "CBSL macro ingestion feature-flagged OFF (MacroSources:CbslMacro:Enabled=false) — documented no-op.";
 
-    // The ML service's /admin/* routes require X-API-Key == ML_ADMIN_API_KEY (security fix F-02),
-    // read from configuration (never hardcoded) — same key the HARTI/news passes use.
+    // The ML service's /admin/* routes require X-API-Key == ML_ADMIN_API_KEY, read from configuration and
+    // never hardcoded — the same key the HARTI and news passes use.
     private const string AdminApiKeyConfigKey = "MlService:AdminApiKey";
     private const string AdminApiKeyHeaderName = "X-API-Key";
 
@@ -85,9 +70,8 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
     {
         var enabled = _configuration.GetValue<bool>(EnabledConfigKey);
 
-        // Default (and current) path: feature-flagged OFF. Ensure the gating watermark reflects the
-        // Disabled state (create it Disabled if absent, or move it to Disabled if it was left in some
-        // other state) and return — a no-op that is explicitly NOT a source failure.
+        // Default path: the feature flag is off. Make sure the gating watermark reflects the Disabled state
+        // (creating it if absent) and return — a no-op, explicitly not a source failure.
         if (!enabled)
         {
             var gate = await _watermarks.GetOrCreateAsync(
@@ -105,8 +89,7 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
             return;
         }
 
-        // Enabled path. If ops explicitly Disabled the gating watermark out-of-band, honour that
-        // (a no-op, never a failure) even though the flag is on.
+        // Enabled path. If ops explicitly Disabled the gating watermark out of band, honour that.
         var watermark = await _watermarks.GetOrCreateAsync(SourceKey, ct: ct);
         if (watermark.Status == IngestionSourceStatus.Disabled)
         {
@@ -116,8 +99,7 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
             return;
         }
 
-        // Fail loud on a missing admin key (mirrors HartiBulletinIngestionService / F-01 guard):
-        // sending no header would surface as a confusing 401 from the ML service.
+        // Fail loud on a missing admin key: sending no header would surface as a confusing 401.
         var apiKey = _configuration[AdminApiKeyConfigKey];
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException(
@@ -127,9 +109,8 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
                 "via the MlService__AdminApiKey environment variable. The value must match the ML " +
                 "service's ML_ADMIN_API_KEY.");
 
-        // The macro corpus is a small bounded set (tens of PDFs); the Python route full-re-scrapes
-        // every pass and exposes no sinceDate knob, so we send only the orchestration flags at
-        // their defaults (real download, real DB write).
+        // The Python route full-re-scrapes every pass and exposes no sinceDate knob, so only the orchestration
+        // flags are sent, at their defaults.
         var payload = new IngestCbslMacroRequest();
 
         HttpResponseMessage resp;
@@ -191,9 +172,8 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
 
             var successUtc = DateTime.UtcNow;
 
-            // Record a PER-SERIES watermark from perSeriesCoverage so one absent series never masks
-            // another. A series with zero coverage this pass simply is not present in the dict; its
-            // existing watermark (if any) keeps its last-good value — a no-new-rows pass is a success.
+            // Record a per-series watermark from perSeriesCoverage so one absent series never masks another.
+            // A series with no coverage this pass is simply not in the dict and keeps its last-good value.
             foreach (var (seriesCode, rowCount) in coverage)
             {
                 var seriesKey = SeriesSourcePrefix + seriesCode;
@@ -201,8 +181,7 @@ public class CbslMacroIngestionService : ICbslMacroIngestionService
                 seriesWm.RecordSuccess(successUtc, message: $"rows={rowCount}");
             }
 
-            // Advance the gating watermark on a confirmed success (bookkeeping only; the request
-            // carries no resume lower bound).
+            // Advance the gating watermark on a confirmed success (bookkeeping only — there is no resume bound).
             watermark.RecordSuccess(
                 successUtc,
                 message: $"inserted={result?.RowsInserted ?? 0}, updated={result?.RowsUpdated ?? 0}, series={coverage.Count}");

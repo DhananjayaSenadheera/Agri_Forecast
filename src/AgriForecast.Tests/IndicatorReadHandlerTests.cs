@@ -9,16 +9,14 @@ using Moq;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// API-11 — unit tests for the three read handlers (GetIndicatorSeries / GetMacroSeries /
-/// GetSeriesCatalog). The DB is faked via a canned IIndicatorReadStore so window resolution,
-/// from>to rejection, the two-date discipline, catalog shape, and the empty->200-[] contract
-/// are exercised in isolation. NOT covered here: the store's EF LINQ (verified by build +
-/// live DB spot-check). If a relational harness ever lands, the date-inclusivity fence-post
-/// belongs on the store there.
+/// Unit tests for the three read handlers (GetIndicatorSeries / GetMacroSeries / GetSeriesCatalog). The DB
+/// is faked via a canned IIndicatorReadStore, so window resolution, from > to rejection, the two-date
+/// discipline, the catalog shape and the empty -> 200 [] contract run in isolation. The store's EF LINQ is
+/// not covered here.
 /// </summary>
 public class IndicatorReadHandlerTests
 {
-    // ── Fake store: records the window it was asked for, returns canned rows ──────────
+    // Fake store: records the window it was asked for and returns canned rows.
     private sealed class FakeStore : IIndicatorReadStore
     {
         public DateOnly? IndicatorLatest;
@@ -71,7 +69,7 @@ public class IndicatorReadHandlerTests
 
     private static DateOnly D(int y, int m, int d) => new(y, m, d);
 
-    // ══════════════════════ Indicators ══════════════════════
+    // Indicators.
 
     [Fact]
     public async Task Indicators_blank_code_is_rejected()
@@ -133,7 +131,7 @@ public class IndicatorReadHandlerTests
         r.Data.First().Value.Should().Be(300m);
     }
 
-    // ══════════════════════ Macro (two-date discipline) ══════════════════════
+    // Macro (the two-date discipline).
 
     [Fact]
     public async Task Macro_blank_key_is_rejected()
@@ -215,7 +213,7 @@ public class IndicatorReadHandlerTests
         r.Data.Select(x => x.PublishedAt).Should().BeEquivalentTo(new[] { "2026-05-20", "2026-06-25" });
     }
 
-    // ══════════════════════ Catalog ══════════════════════
+    // Catalog.
 
     [Fact]
     public async Task Catalog_empty_db_returns_200_empty_list()

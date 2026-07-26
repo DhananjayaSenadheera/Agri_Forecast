@@ -2,8 +2,8 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Application.Requests.NewsEvents.DTOs;
 
-// Create shape for the admin News page (ADM-7). Enums serialize as INTEGERS on the wire (no
-// JsonStringEnumConverter) — EventType 0..8 (mirrors PolicyType), Direction -1/0/1.
+// Create shape for the admin News page. Enums serialize as INTEGERS (there is no JsonStringEnumConverter):
+// EventType 0..8, Direction -1/0/1.
 public class NewsEvent_CreateDto
 {
     // Event category. Int on the wire; validator enforces a defined-enum value.
@@ -15,8 +15,8 @@ public class NewsEvent_CreateDto
     public string Title { get; set; } = string.Empty;
     public string? Description { get; set; }
 
-    // The knowledge/as-of/vintage date. REQUIRED on create; date-only in storage. IMMUTABLE
-    // afterwards — the UpdateDto deliberately omits this field so it can never be rewritten.
+    // The knowledge/vintage date. Required on create, date-only in storage, and immutable afterwards —
+    // the UpdateDto deliberately omits it.
     public DateTime PublishedAt { get; set; }
 
     // Optional provenance link; validated as an absolute http(s) URL when present.

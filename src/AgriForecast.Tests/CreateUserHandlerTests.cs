@@ -11,12 +11,11 @@ using UserEntity = AgriForecast.Domain.Entities.User;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Admin-only user creation (POST /api/users/create). Pure unit tests (Moq'd repository / unit of
-/// work / hasher / audit), following the UserManagementHandlerTests style. The cases that matter to
-/// the security review: the role whitelist is re-checked in the handler, the uniqueness guards match
-/// the self-registration path exactly, the raw password never reaches the entity, and — the reason
-/// this command exists at all — NO token or refresh cookie is produced, so creating a user can never
-/// disturb the acting admin's own session.
+/// Admin-only user creation (POST /api/users/create). Pure unit tests with mocked repository, unit of
+/// work, hasher and audit. The cases that matter: the role whitelist is re-checked in the handler, the
+/// uniqueness guards match the self-registration path exactly, the raw password never reaches the entity,
+/// and — the reason this command exists — no token or refresh cookie is produced, so creating a user can
+/// never disturb the acting admin's own session.
 /// </summary>
 public class CreateUserHandlerTests
 {
@@ -64,7 +63,7 @@ public class CreateUserHandlerTests
         UpdatedAt = DateTime.UtcNow.AddDays(-3)
     };
 
-    // ── Happy paths ───────────────────────────────────────────────────────────────
+    // Happy paths.
 
     [Theory]
     [InlineData(UserRoles.Farmer)]
@@ -121,7 +120,7 @@ public class CreateUserHandlerTests
         added.CreatedAt.Should().BeCloseTo(DateTime.UtcNow, TimeSpan.FromSeconds(5));
     }
 
-    // ── The whole reason this command is not Auth.Register ────────────────────────
+    // The whole reason this command is not Auth.Register.
 
     [Fact]
     public async Task Create_ReturnsNoTokenOrSession_OnlyTheAdminProjection()
@@ -152,7 +151,7 @@ public class CreateUserHandlerTests
         audit.Verify(a => a.RecordUserRegisteredAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
-    // ── Fail-closed guards ────────────────────────────────────────────────────────
+    // Fail-closed guards.
 
     [Theory]
     [InlineData("Superuser")]
@@ -211,7 +210,7 @@ public class CreateUserHandlerTests
             It.IsAny<Guid>(), It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
-    // ── CreateUserCommandValidator ────────────────────────────────────────────────
+    // CreateUserCommandValidator.
 
     private readonly CreateUserCommandValidator _validator = new();
 

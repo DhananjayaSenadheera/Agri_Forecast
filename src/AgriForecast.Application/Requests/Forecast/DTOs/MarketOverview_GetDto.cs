@@ -1,8 +1,7 @@
 namespace AgriForecast.Application.Requests.Forecast.DTOs;
 
-// Response for GET /api/forecast/market-overview. Contract is LOCKED (the farmer
-// app is built against it in parallel): field names + camelCase JSON must not drift.
-// All dates are yyyy-MM-dd strings; money is decimal (existing DTO idiom).
+// Response for GET /api/forecast/market-overview. The contract is locked: field names and camelCase JSON
+// must not drift. Dates are yyyy-MM-dd strings.
 public class MarketOverview_GetDto
 {
     // Latest observation date across MarketPrices (yyyy-MM-dd), or null when empty.
@@ -22,8 +21,8 @@ public class MarketMover_GetDto
     public decimal LatestPrice { get; set; }
     public decimal PreviousPrice { get; set; }
     public decimal ChangePct { get; set; }
-    // Plain string "up" | "down" — NOT an enum (this API has no JsonStringEnumConverter,
-    // an enum would serialize as an int and break the frontend).
+    // Plain string "up" | "down", not an enum: this API has no JsonStringEnumConverter, so an enum would
+    // serialize as an int and break the frontend.
     public string Direction { get; set; } = string.Empty;
 }
 

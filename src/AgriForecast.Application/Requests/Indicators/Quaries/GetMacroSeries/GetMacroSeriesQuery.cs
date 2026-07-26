@@ -4,9 +4,8 @@ using MediatR;
 
 namespace AgriForecast.Application.Requests.Indicators.Quaries.GetMacroSeries;
 
-// GET /api/macro-series?key=&from=&to=. Vintage-aware MacroSeriesPoints (e.g. CCPI) for one
-// series. Read-only. from/to are inclusive, optional, and filter on ReferenceDate (the chart
-// axis) — NEVER on PublishedAt. Both referenceDate and publishedAt are returned verbatim.
+// GET /api/macro-series?key=&from=&to=. Vintage-aware MacroSeriesPoints for one series. from/to are
+// inclusive, optional, and filter on ReferenceDate — never on PublishedAt.
 public class GetMacroSeriesQuery : IRequest<Result<List<MacroSeriesPoint_GetDto>>>
 {
     // Required. The SeriesCode / seriesKey to fetch (e.g. "CCPI_BASE2021"). Blank => failure.

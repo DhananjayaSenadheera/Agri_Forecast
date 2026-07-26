@@ -2,14 +2,9 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Domain.Entities;
 
-// One row per post-pass data-quality VERIFICATION run. WRITTEN BY THE PYTHON SIDE later — this PR
-// owns the SCHEMA only (the .NET entity exists so the migration + column types + the ISJSON check
-// constraint are the single source of truth for both languages). No .NET code path inserts these
-// yet; the Create factory is provided for completeness / tests and future .NET reads.
-//
-// Discipline mirrors the reference entities: PipelineDate is date-only; RunUtc / CreatedAtUtc are
-// full datetime2 audit instants (never features). ChecksJson is the raw per-check detail, guarded
-// by an ISJSON check constraint so a malformed blob can never land.
+// One row per post-pass data-quality verification. Rows are written by the Python side; .NET owns the
+// schema and reads them. PipelineDate is date-only; ChecksJson is guarded by an ISJSON check constraint
+// so a malformed blob can never land.
 public class IngestionVerification
 {
     public Guid Id { get; private set; }
@@ -32,8 +27,7 @@ public class IngestionVerification
     // Short human-facing roll-up (audit only).
     public string? Summary { get; private set; }
 
-    // Raw per-check detail as JSON. Guarded by an ISJSON([ChecksJson]) = 1 check constraint at the
-    // DB level (configured in the DbContext) so a non-JSON blob can never be persisted.
+    // Raw per-check detail as JSON, guarded by an ISJSON check constraint configured in the DbContext.
     public string ChecksJson { get; private set; } = string.Empty;
 
     public int? DurationMs { get; private set; }
@@ -42,10 +36,7 @@ public class IngestionVerification
 
     private IngestionVerification() { }
 
-    // Factory (completeness / tests / future .NET reads). Refuses empty ChecksJson — the column is
-    // NOT NULL and the ISJSON check would reject an empty string at the DB anyway. createdAtUtc is
-    // passed in (never an internal UtcNow) so the caller controls the clock and tests are
-    // deterministic — mirrors IngestionRun.StartRunning.
+    // For tests and future .NET reads. createdAtUtc is passed in so tests are deterministic.
     public static IngestionVerification Create(
         Guid? batchId,
         DateOnly pipelineDate,

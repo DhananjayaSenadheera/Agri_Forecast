@@ -8,19 +8,13 @@ public class EconomicCenter
     public string Location { get; set; }
     public string Description { get; set; }
 
-    // Back-compat link to the promoted Market dimension. Nullable so existing rows
-    // remain valid and no existing code path is forced to populate it; the multi-market
-    // migration back-fills it by mapping each EconomicCenter to its Market twin.
+    // Link to the Market that replaced this dimension. Nullable; backfilled by the multi-market migration.
     public Guid? MarketId { get; set; }
 
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 
-    // Factory for economic centers created via the manual CRUD path (Eco_CreateDto).
-    // Encapsulates the private-set Id/Name and the created/updated timestamps that the
-    // old CreateMap<Eco_CreateDto, EconomicCenter> profile populated (Location and
-    // Description were carried by the same-name copy convention). EcoCode is assigned
-    // by the create handler after construction (matches prior behaviour).
+    // Manual CRUD create path. EcoCode is stamped by the create handler after construction.
     public static EconomicCenter CreateNew(string name, string location, string description)
     {
         return new EconomicCenter
@@ -34,9 +28,7 @@ public class EconomicCenter
         };
     }
 
-    // Mutate-in-place update used by the update handler on a tracked entity.
-    // Reproduces CreateMap<Eco_UpdateDto, EconomicCenter> (Name/Location/Description
-    // overwritten unconditionally). UpdatedAt is set by the mapper after this call.
+    // In-place update used by the update handler; UpdatedAt is set by the mapper afterwards.
     public void ApplyUpdate(string name, string location, string description)
     {
         Name = name;

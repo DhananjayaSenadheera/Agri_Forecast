@@ -4,13 +4,10 @@ using FluentAssertions;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Guards for the MacroSeriesPoint domain entity (R1 P3 CBSL macro, DECISIONS.md 2026-07-04).
-/// The load-bearing invariants are the VINTAGE rules:
+/// Guards for the MacroSeriesPoint entity. The load-bearing invariants are the vintage rules:
 ///   - a vintage (PublishedAt) can never precede the period it describes (ReferenceDate),
-///   - both dates are stored date-only (no hidden time can flip the day-boundary comparison),
-///   - NO positive-Value guard (YoY / change series can legitimately be <= 0, unlike a price/FX).
-/// Style mirrors the pure-domain ctor discipline in this project (cf. FestivalCalendarSeedTests /
-/// MarketDomainTests): no EF round-trip, deterministic, no wall-clock.
+///   - both dates are stored date-only, so no hidden time can flip the day-boundary comparison,
+///   - there is deliberately no positive-Value guard, because YoY and change series can be <= 0.
 /// </summary>
 public class MacroSeriesPointTests
 {

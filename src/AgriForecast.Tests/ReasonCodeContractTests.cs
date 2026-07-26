@@ -10,10 +10,9 @@ using Moq;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// API-5: the additive ML fields (reasonCode / reasonParams / topFactors) must
-/// deserialize off the ML wire when PRESENT (current service) and when ABSENT
-/// (older service - additive non-breaking both directions), and pass through to
-/// the FE-facing DTO preserving the omitted-vs-empty distinction for topFactors.
+/// The additive ML fields (reasonCode / reasonParams / topFactors) must deserialize off the ML wire when
+/// present and when absent, and pass through to the FE-facing DTO preserving the omitted-vs-empty
+/// distinction for topFactors.
 /// </summary>
 public class ReasonCodeContractTests
 {
@@ -23,9 +22,7 @@ public class ReasonCodeContractTests
         PropertyNameCaseInsensitive = true
     };
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // 1. Contract deserialization - model-served shape (all new fields present)
-    // ──────────────────────────────────────────────────────────────────────────
+    // 1. Contract deserialization — model-served shape, all new fields present.
 
     [Fact]
     public void Predict_ModelServed_DeserializesReasonCodeParamsAndTopFactors()
@@ -61,9 +58,7 @@ public class ReasonCodeContractTests
         dto.TopFactors![2].Direction.Should().Be("neutral");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // 2. Contract deserialization - fallback shape (topFactors OMITTED, params carry ints)
-    // ──────────────────────────────────────────────────────────────────────────
+    // 2. Contract deserialization — fallback shape, topFactors omitted and params carrying ints.
 
     [Fact]
     public void Predict_Fallback_TopFactorsOmitted_StaysNull_AndIntParamsPreserved()
@@ -94,9 +89,7 @@ public class ReasonCodeContractTests
         dto.ReasonParams!["historyObs"].GetInt32().Should().Be(3);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // 3. Contract deserialization - OLD ML service (none of the fields present)
-    // ──────────────────────────────────────────────────────────────────────────
+    // 3. Contract deserialization — old ML service, none of the fields present.
 
     [Fact]
     public void Predict_OldMlService_MissingAllNewFields_DoesNotThrow_NullsFlow()
@@ -121,9 +114,7 @@ public class ReasonCodeContractTests
         dto.TopFactors.Should().BeNull();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // 4. reasonParams preserves arbitrary future keys and value types as-is
-    // ──────────────────────────────────────────────────────────────────────────
+    // 4. reasonParams preserves arbitrary future keys and value types as-is.
 
     [Fact]
     public void Predict_ReasonParams_PreservesArbitraryKeysAndValueKinds()
@@ -151,9 +142,7 @@ public class ReasonCodeContractTests
         dto.ReasonParams!["floatVal"].GetDecimal().Should().Be(1.5m);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // 5. Timeline contract - reasonCode/reasonParams present AND absent (no throw)
-    // ──────────────────────────────────────────────────────────────────────────
+    // 5. Timeline contract — reasonCode/reasonParams present and absent, neither throws.
 
     [Fact]
     public void Timeline_Present_DeserializesReasonCodeAndParams_NoTopFactors()
@@ -198,9 +187,7 @@ public class ReasonCodeContractTests
         dto.ReasonParams.Should().BeNull();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // 6. Passthrough mapping into the FE-facing HarvestForecast_GetDto
-    // ──────────────────────────────────────────────────────────────────────────
+    // 6. Passthrough mapping into the FE-facing HarvestForecast_GetDto.
 
     private static (GetHarvestForecastQueryHandler handler, Mock<IHarvestPredictionClient> clientMock) BuildHandler()
     {

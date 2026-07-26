@@ -11,11 +11,10 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Behavioural tests for UserActivityAudit — the fire-safe audit writer used at the five auth/user
-/// call sites. Load-bearing guarantees: (1) an audit write runs in its OWN scope so it can NEVER
-/// flush the caller's pending ChangeTracker state (B1 isolation, mirrors IngestionRunRepository);
-/// (2) an audit-write FAILURE is swallowed-and-logged and can never throw into the auth op; (3) each
-/// intent method writes exactly the fields its event type allows (no password/token ever stored).
+/// Behavioural tests for UserActivityAudit, the fire-safe audit writer. Load-bearing guarantees: an audit
+/// write runs in its OWN scope so it can never flush the caller's pending ChangeTracker state; an
+/// audit-write failure is swallowed and logged and can never throw into the auth operation; and each intent
+/// method writes exactly the fields its event type allows, so no password or token is ever stored.
 /// </summary>
 public class UserActivityAuditTests
 {

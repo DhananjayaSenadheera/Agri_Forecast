@@ -26,8 +26,7 @@ public class FestivalCalendarGetAllQueryHandler
     {
         var entries = await _festivalCalendarRepository.GetAllAsync();
 
-        // Empty calendar is a normal state → 200 [] (deliberately NOT the legacy
-        // policy-flag 400-on-empty quirk; the admin Festivals page renders an empty list).
+        // An empty calendar is a normal state, so return 200 [] rather than the legacy 400-on-empty.
         var dtos = (entries ?? Enumerable.Empty<Domain.Entities.FestivalCalendarEntry>()).ToGetDtoList();
         _logger.LogInformation("{Count} festival calendar entries retrieved successfully.", dtos.Count);
         return Result<List<FestivalCalendar_GetDto>>.Success(dtos);

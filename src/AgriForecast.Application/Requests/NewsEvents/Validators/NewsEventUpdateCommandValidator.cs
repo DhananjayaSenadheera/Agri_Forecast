@@ -4,9 +4,8 @@ using FluentValidation;
 
 namespace AgriForecast.Application.Requests.NewsEvents.Validators;
 
-// Mirrors NewsEventCreateCommandValidator plus the mutation Id rule. Note the ABSENCE of any
-// PublishedAt rule: the UpdateDto does not carry PublishedAt (it is the immutable vintage/knowledge
-// date), so there is nothing to validate — immutability is enforced by omission on the wire.
+// Mirrors NewsEventCreateCommandValidator plus the Id rule. There is no PublishedAt rule because the
+// UpdateDto does not carry it — immutability is enforced by omission on the wire.
 public class NewsEventUpdateCommandValidator : AbstractValidator<NewsEventUpdateCommand>
 {
     private readonly INewsEventRepository _newsEventRepository;

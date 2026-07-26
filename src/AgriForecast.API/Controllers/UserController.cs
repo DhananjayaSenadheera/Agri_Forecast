@@ -11,11 +11,9 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace AgriForecast.API.Controllers;
 
-// API-9 — Admin-only user management. The WHOLE controller is locked to the Admin role: an
-// authenticated Farmer receives 403, an unauthenticated caller 401 (both enforced by the
-// authorization middleware from the JWT role claim). The acting admin's identity is ALWAYS read
-// from the JWT sub claim — never from the request body/route — so a caller cannot spoof "who am I"
-// to slip past the self-delete guard.
+// Admin-only user management: the whole controller is locked to the Admin role, so an authenticated Farmer
+// gets a 403 and an unauthenticated caller a 401. The acting admin's identity is always read from the JWT
+// sub claim — never the body or route — so a caller cannot spoof "who am I" past the self-delete guard.
 [ApiController]
 [Route("api/users")]
 [Authorize(Roles = UserRoles.Admin)]
@@ -30,13 +28,10 @@ public class UserController(IMediator mediator) : ControllerBase
     };
 
     // The acting admin's immutable user id comes from the JWT subject via the shared
-    // ActingUserExtensions.GetActingUserId() (was a private copy here until the admin CONTENT
-    // controllers needed identical behaviour — one reader, so the five call sites cannot drift onto
-    // the wrong claim). Returns null if the claim is missing/malformed.
+    // ActingUserExtensions.GetActingUserId(), so the call sites cannot drift onto the wrong claim.
 
-    // GET /api/users/get/all?page=&pageSize=
-    // Paging is optional; defaults return every user in one generous page so the frontend admin
-    // console (which paginates client-side over a flat AdminUser[]) works unchanged.
+    // GET /api/users/get/all?page=&pageSize= — paging is optional, and the defaults return every user in one
+    // generous page because the admin console paginates client-side.
     [HttpGet("get/all")]
     public async Task<IActionResult> GetAll([FromQuery] int page = 1, [FromQuery] int pageSize = 500)
     {
@@ -46,11 +41,9 @@ public class UserController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // POST /api/users/create  body: { username, email, password, role }
-    // Admin-only provisioning of an account. Distinct from the anonymous POST /api/auth/register:
-    // that path issues a refresh cookie to the CALLER, which here would replace the acting admin's
-    // own cookie with the new user's. This one issues no token and no cookie — it returns the
-    // AdminUserDto projection only. The acting id comes from the JWT, never the body.
+    // POST /api/users/create — Admin-only provisioning of an account. Distinct from the anonymous
+    // POST /api/auth/register, which issues a refresh cookie to the CALLER and would therefore replace the
+    // acting admin's own cookie. This issues no token and no cookie, only the AdminUserDto projection.
     [HttpPost("create")]
     public async Task<IActionResult> Create([FromBody] CreateUserDto body)
     {

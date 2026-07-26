@@ -1,9 +1,8 @@
 namespace AgriForecast.Application.Requests.Users.DTOs;
 
 /// <summary>
-/// Request body for <c>PUT /api/users/update-role</c>. Carries ONLY the target user id and the new
-/// role — the ACTING admin's identity is never taken from the body; the controller reads it from the
-/// JWT <c>sub</c> claim and threads it onto the command server-side.
+/// Request body for PUT /api/users/update-role. Carries only the target user id and the new role — the
+/// acting admin's identity comes from the JWT sub claim, never the body.
 /// </summary>
 public class UpdateUserRoleDto
 {

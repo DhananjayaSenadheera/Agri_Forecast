@@ -13,17 +13,12 @@ public class JwtSettings
     public string Key { get; set; } = string.Empty;
     public int AccessTokenMinutes { get; set; } = 60;
 
-    /// <summary>
-    /// Lifetime (in days) of the stateless refresh JWT carried in the HttpOnly
-    /// "agriforecast_refresh" cookie. Sensible default of 7; override via Jwt:RefreshTokenDays.
-    /// </summary>
+    /// <summary>Lifetime in days of the refresh JWT in the HttpOnly cookie; override via Jwt:RefreshTokenDays.</summary>
     public int RefreshTokenDays { get; set; } = 7;
 
     /// <summary>
-    /// Audience stamped on refresh JWTs. It MUST differ from <see cref="Audience"/> so the
-    /// normal access-token Bearer pipeline (which validates <see cref="Audience"/>) rejects a
-    /// refresh token, and vice-versa. When left empty it is derived as "{Audience}.refresh",
-    /// guaranteeing separation with no mandatory extra config.
+    /// Audience stamped on refresh JWTs. It MUST differ from Audience so the access-token Bearer pipeline
+    /// rejects a refresh token and vice versa. Left empty it is derived as "{Audience}.refresh".
     /// </summary>
     public string RefreshAudience { get; set; } = string.Empty;
 

@@ -3,13 +3,11 @@ using AgriForecast.Domain.Entities;
 
 namespace AgriForecast.Application.Mapper;
 
-// Hand-written mapper for NewsEvent (same style as FestivalCalendarMapper / PolicyFlagMapper — no
-// AutoMapper). Crop/market link rows are built here on create; on update the links are reconciled
-// by the repository (SetCropLinks/SetMarketLinks), not here.
+// Hand-written mapper for NewsEvent. Link rows are built here on create; on update the repository
+// reconciles them.
 public static class NewsEventMapper
 {
-    // NewsEvent_CreateDto -> NewsEvent. PublishedAt normalised to date-only (vintage leakage guard);
-    // new Guid Id; CreatedAtUtc = UtcNow (record-keeping only, never a feature).
+    // PublishedAt is normalised to date-only (vintage guard).
     public static NewsEvent ToEntity(this NewsEvent_CreateDto src)
     {
         var entity = new NewsEvent
@@ -33,9 +31,8 @@ public static class NewsEventMapper
         return entity;
     }
 
-    // NewsEvent_UpdateDto -> apply onto the tracked entity. PublishedAt is DELIBERATELY NOT touched
-    // (immutable vintage — the UpdateDto does not even carry it) and neither is CreatedAtUtc.
-    // Link collections are reconciled by the repository, not here.
+    // In-place update. PublishedAt is deliberately untouched (immutable vintage), as is CreatedAtUtc;
+    // the link collections are reconciled by the repository.
     public static NewsEvent ApplyTo(this NewsEvent_UpdateDto src, NewsEvent target)
     {
         target.EventType = src.EventType;
@@ -46,7 +43,7 @@ public static class NewsEventMapper
         return target;
     }
 
-    // NewsEvent -> NewsEvent_GetDto. Link collections flattened to id lists.
+    // Link collections are flattened to id lists.
     public static NewsEvent_GetDto ToGetDto(this NewsEvent src)
     {
         return new NewsEvent_GetDto

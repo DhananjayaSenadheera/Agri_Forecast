@@ -7,9 +7,8 @@ using MediatR;
 namespace AgriForecast.Application.Requests.Users.Quaries.GetAll;
 
 /// <summary>
-/// Returns a page of users (newest first) projected to <see cref="AdminUserDto"/> (no PasswordHash).
-/// Paging is clamped server-side so bad/hostile params can never over-fetch or under-fetch:
-/// Page >= 1, PageSize in [1, 500]. An empty store returns an empty list (success), never a failure.
+/// Returns a page of users (newest first) projected to AdminUserDto, without PasswordHash. Paging is
+/// clamped server-side: Page >= 1, PageSize in [1, 500]. An empty store returns an empty list.
 /// </summary>
 public class GetAllUsersQueryHandler : IRequestHandler<GetAllUsersQuery, Result<List<AdminUserDto>>>
 {

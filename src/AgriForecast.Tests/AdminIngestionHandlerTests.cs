@@ -10,15 +10,14 @@ using Microsoft.Extensions.Configuration;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// PR 3 — unit tests for the admin ingestion read handlers (GetIngestionStatus / GetIngestionRuns)
-/// and the IngestionStatusSettings config resolver. The DB is faked via a canned IIngestionReadStore
-/// so state derivation, batch-outcome aggregation, the verification join (incl. null), paging math,
-/// source filtering/canonicalization, and the serviceAddress fallback are exercised in isolation.
-/// NOT covered here: the store's EF LINQ (verified by build + the existing live-DB conventions).
+/// Unit tests for the admin ingestion read handlers and the IngestionStatusSettings config resolver. The
+/// DB is faked via a canned IIngestionReadStore, so state derivation, batch-outcome aggregation, the
+/// verification join, paging math, source filtering and the serviceAddress fallback run in isolation.
+/// The store's EF LINQ is not covered here.
 /// </summary>
 public class AdminIngestionHandlerTests
 {
-    // ── Fake read store: canned data for status + real in-memory filter/page for runs ─────
+    // Fake read store: canned data for status, real in-memory filtering and paging for runs.
     private sealed class FakeStore : IIngestionReadStore
     {
         public int RunCount;
@@ -34,15 +33,12 @@ public class AdminIngestionHandlerTests
         public string? CapturedSource;
         public List<Guid>? CapturedBatchIds;
 
-        // The source-exclusion set the handler asked for on the LAST status read (null = it asked for
-        // none). Lets a test prove the handler actually passes the policy down, not just that the
-        // numbers happen to work out.
+        // The source-exclusion set the handler asked for on the LAST status read (null = it asked for none),
+        // so a test can prove the handler passes the policy down rather than the numbers happening to work.
         public IReadOnlyCollection<string>? CapturedExcluded;
 
-        // RAW run rows. When this list is non-empty the four status reads are computed from it,
-        // honestly applying excludeSources exactly as the SQL store does — that is what makes the
-        // handler's state / lastRun derivation testable end-to-end. When it is EMPTY the canned
-        // scalar fields above are returned instead, so the pre-existing tests are untouched.
+        // Raw run rows. When this list is non-empty the four status reads are computed from it, applying
+        // excludeSources exactly as the SQL store does; when it is empty the canned scalars above are used.
         public List<FakeRun> Runs = new();
 
         public sealed record FakeRun(
@@ -149,14 +145,11 @@ public class AdminIngestionHandlerTests
         => new(id ?? Guid.NewGuid(), batchId, source, startedUtc, finishedUtc, status,
             null, null, null, null, null, null, null);
 
-    // ── STATE derivation ───────────────────────────────────────────────────────────
-    // ── FEATURE_BUILD is excluded from the service-state derivation ─────────────────
-    //
-    // The Python feature-build step writes IngestionRuns rows with Source=FEATURE_BUILD. It runs LAST
-    // each day as a SOLO one-row batch, so if it counted it would be the permanent "latest run":
-    // lastRunStatus would read "succeeded" forever and the FE red-dot alarm could never fire for the
-    // four sources with no watermark row. These tests drive the handler from RAW rows so the whole
-    // derivation — not a canned scalar — is exercised.
+    // FEATURE_BUILD is excluded from the service-state derivation. The Python feature-build step writes
+    // IngestionRuns rows with Source=FEATURE_BUILD and runs LAST each day as a solo one-row batch, so if it
+    // counted it would be the permanent "latest run": lastRunStatus would read "succeeded" forever and the
+    // FE alarm could never fire for the four sources with no watermark row. These tests drive the handler
+    // from raw rows so the whole derivation is exercised.
 
     private static FakeStore.FakeRun FRun(
         string source, Guid batchId, DateTime startedUtc, DateTime? finishedUtc,
@@ -374,7 +367,7 @@ public class AdminIngestionHandlerTests
         dto.State.Should().Be("stopped");
     }
 
-    // ── lastRunStatus aggregation ───────────────────────────────────────────────────
+    // lastRunStatus aggregation.
     [Theory]
     [InlineData("succeeded", IngestionRunStatus.Succeeded, IngestionRunStatus.Skipped)]
     [InlineData("partial", IngestionRunStatus.Succeeded, IngestionRunStatus.Failed)]
@@ -396,7 +389,7 @@ public class AdminIngestionHandlerTests
         dto.LastRunStatus.Should().Be(expected);
     }
 
-    // ── serviceAddress ──────────────────────────────────────────────────────────────
+    // serviceAddress.
     [Fact]
     public async Task ServiceAddress_IsEchoedFromSettings()
     {
@@ -450,7 +443,7 @@ public class AdminIngestionHandlerTests
         settings.RunningStalenessMinutes.Should().Be(120);
     }
 
-    // ── verification join (status) incl. null ───────────────────────────────────────
+    // Verification join on status, including the null case.
     [Fact]
     public async Task LastVerification_Null_WhenNoVerificationRows()
     {
@@ -502,7 +495,7 @@ public class AdminIngestionHandlerTests
         harti.LastObservedDate.Should().Be("2026-07-19");
     }
 
-    // ── RUNS: paging + source filter + verification join ────────────────────────────
+    // RUNS: paging, source filter and verification join.
     [Fact]
     public async Task Runs_PagingMath_ReturnsRequestedPageAndTotal()
     {
@@ -580,7 +573,7 @@ public class AdminIngestionHandlerTests
         noVer.Status.Should().Be("failed");
     }
 
-    // ── UTC Kind (so System.Text.Json emits the trailing Z) ─────────────────────────
+    // UTC Kind, so System.Text.Json emits the trailing Z.
     [Fact]
     public async Task Status_UtcFields_HaveUtcKind_SoJsonEmitsZ()
     {

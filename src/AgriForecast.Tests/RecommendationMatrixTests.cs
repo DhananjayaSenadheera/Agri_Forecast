@@ -12,9 +12,8 @@ using Moq;
 namespace AgriForecast.Tests;
 
 /// <summary>
-/// Tests for the recommendation matrix inside GetHarvestForecastQueryHandler.
-/// The private Recommend() method is tested indirectly via Handle(), which is the
-/// correct seam — we do not couple tests to private method signatures.
+/// Tests for the recommendation matrix inside GetHarvestForecastQueryHandler. The private Recommend()
+/// method is tested indirectly through Handle(), so the tests are not coupled to a private signature.
 /// </summary>
 public class RecommendationMatrixTests
 {
@@ -74,9 +73,7 @@ public class RecommendationMatrixTests
         PlantDate = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1)) // yesterday = valid
     };
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 1. Invalid-input guards
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 1. Invalid-input guards.
 
     [Fact]
     public async Task Recommend_ZeroCurrentPrice_ReturnsNotRecommended()
@@ -141,9 +138,7 @@ public class RecommendationMatrixTests
         result.Data.LowTrust.Should().BeTrue();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 2. Upside bands
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 2. Upside bands.
 
     [Fact]
     public async Task Recommend_UpsideBelow5pct_Down_ReturnsNotRecommended()
@@ -228,9 +223,7 @@ public class RecommendationMatrixTests
         result.Data.RecommendationLevel.Should().Be(RecommendationLevel.StronglyRecommended);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 3. Honesty ceiling: fallback predictor must never be StronglyRecommended
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 3. Honesty ceiling: a fallback predictor must never be StronglyRecommended.
 
     [Fact]
     public async Task Recommend_FallbackPredictor_CapsAtRecommended_NeverStrongly()
@@ -329,9 +322,7 @@ public class RecommendationMatrixTests
         result.Data.RecommendationLevel.Should().NotBe(RecommendationLevel.StronglyRecommended);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 4. Wide interval (>60%) width cap
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 4. Wide interval (>60%) width cap.
 
     [Fact]
     public async Task Recommend_WideInterval_CapsAtRecommendedWithRiskOrBelow()
@@ -356,9 +347,7 @@ public class RecommendationMatrixTests
             "width >60% must cap at RecommendedWithRisk or below");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
-    // 5. Null prediction = fail-safe (not a crash)
-    // ──────────────────────────────────────────────────────────────────────────────
+    // 5. A null prediction is fail-safe, not a crash.
 
     [Fact]
     public async Task Handle_NullPrediction_ReturnsFailure()
@@ -379,9 +368,7 @@ public class RecommendationMatrixTests
         result.Error.Should().NotBeNullOrEmpty();
     }
 
-    // ──────────────────────────────────────────────────────────────────────────────
     // 6. UpsidePct and IntervalWidthPct are rounded to 1 d.p.
-    // ──────────────────────────────────────────────────────────────────────────────
 
     [Fact]
     public async Task Handle_OutputPcts_RoundedToOneDecimalPlace()
