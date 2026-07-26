@@ -1,35 +1,24 @@
 """Lightweight file-based model registry.
 
-models/<version>/model.pkl + metadata.json. A models/promoted.json pointer
-records which version is live. No external services.
+models/<version>/model.pkl plus metadata.json, with models/promoted.json pointing at the
+live version. No external services.
 
-Security (F-03) — two trust-boundary hardenings live here:
+Two security controls live here.
 
-1. Safe deserialization. ``model.pkl`` is loaded with joblib/pickle, which
-   executes arbitrary code embedded in the byte stream. If an attacker can
-   overwrite a promoted ``model.pkl``, loading it is remote code execution.
-   We therefore verify the artifact BEFORE joblib ever touches it:
-     * ``save_model`` records ``model_sha256`` (always) and, when
-       ``AGRI_MODEL_HMAC_KEY`` is set, an ``model_hmac`` (HMAC-SHA256) in
-       metadata.json.
-     * ``load_promoted`` recomputes over the on-disk bytes and enforces a
-       match, fail-CLOSED, before calling ``joblib.load``.
-   A bare sha256 detects a stray/partial overwrite but NOT an attacker who
-   can also rewrite the co-located metadata.json (they'd just restore the
-   hash). The keyed HMAC path resists that: without ``AGRI_MODEL_HMAC_KEY``
-   the attacker cannot forge a valid ``model_hmac``. Keep the key OUT of the
-   models dir (env/secret store).
+1. Safe deserialization. model.pkl is loaded with joblib/pickle, which executes whatever
+   is embedded in the byte stream, so the artifact is verified BEFORE joblib touches it.
+   save_model always records model_sha256, plus an HMAC when AGRI_MODEL_HMAC_KEY is set,
+   and load_promoted recomputes over the on-disk bytes and fails CLOSED on a mismatch.
+   A bare sha256 catches a stray overwrite but not an attacker who can also rewrite the
+   co-located metadata.json; the keyed HMAC does, so keep that key out of the models dir.
 
-2. Path traversal. The live version string comes from ``promoted.json`` and
-   is joined into a filesystem path. A crafted pointer like
-   ``{"version": "../../etc"}`` would escape ``models/``. Versions only ever
-   have the shape ``^v\\d+$`` (see ``_next_version``); ``_safe_version_dir``
-   enforces that shape AND re-checks the resolved directory is contained in
-   ``models/``. Anything else raises before touching disk.
+2. Path traversal. The live version string comes from promoted.json and is joined into a
+   filesystem path, so a pointer like {'version': '../../etc'} would escape models/.
+   Versions are always 'v' followed by digits, and _safe_version_dir enforces that shape
+   and re-checks that the resolved directory is inside models/.
 
-On any integrity/path failure we RAISE. serving/predict.py loads the promoted
-payload at import, so a raise surfaces loudly and refuses to serve a tampered
-or unverifiable model — the correct fail-closed behaviour.
+Any integrity or path failure RAISES. serving/predict.py loads the promoted payload at
+import, so it surfaces loudly and refuses to serve a tampered or unverifiable model.
 """
 from __future__ import annotations
 
@@ -49,8 +38,8 @@ _log = logging.getLogger(__name__)
 # AgriForecast.ML/models  (registry/ -> agriforecast_ml/ -> AgriForecast.ML/)
 _MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
 
-# The ONLY shape _next_version() ever produces. Enforced on every version
-# string that becomes a path — kills "..", slashes and absolute paths.
+# The only shape _next_version() ever produces. Enforced on every version string that
+# becomes a path, which kills '..', slashes and absolute paths.
 _VERSION_RE = re.compile(r"^v\d+$")
 
 _HMAC_KEY_ENV = "AGRI_MODEL_HMAC_KEY"
@@ -64,11 +53,11 @@ def _next_version() -> str:
 
 
 def _safe_version_dir(version: str) -> Path:
-    """Resolve ``models/<version>`` safely, or raise ValueError.
+    """Resolve models/<version> safely, or raise ValueError.
 
-    Two independent gates so neither is load-bearing alone:
-      1. ``version`` must match ``^v\\d+$`` (rejects traversal/slashes/abs paths).
-      2. the resolved directory must be contained within ``_MODELS_DIR``.
+    Two independent gates so neither is load-bearing alone: the version must be 'v' followed
+    by digits (rejecting traversal, slashes and absolute paths), and the resolved directory
+    must be contained within _MODELS_DIR.
     """
     if not isinstance(version, str) or not _VERSION_RE.match(version):
         raise ValueError(
@@ -88,8 +77,8 @@ def _safe_version_dir(version: str) -> Path:
 def _pkl_digest(pkl_path: Path, hmac_key: bytes | None = None) -> tuple[str, str | None]:
     """Return (sha256_hex, hmac_sha256_hex_or_None) over the file's bytes.
 
-    Single source of truth for hashing, shared by save_model / sign_version /
-    load_promoted so signing and verification can never drift.
+    One implementation shared by save_model, sign_version and load_promoted, so signing and
+    verification can never drift.
     """
     data = pkl_path.read_bytes()
     sha = hashlib.sha256(data).hexdigest()
@@ -116,10 +105,10 @@ def _integrity_fields(pkl_path: Path) -> dict:
 
 
 def sign_version(version: str) -> dict:
-    """(Re)compute integrity fields for ``version`` and write them into that
-    version's metadata.json in place, preserving all existing keys. Returns the
-    fields that were written. Used by save_model and the resign_promoted.py
-    migration helper."""
+    """Recompute the integrity fields for a version and write them into its metadata.json.
+
+    Existing keys are preserved. Returns the fields that were written.
+    """
     vdir = _safe_version_dir(version)
     pkl_path = vdir / "model.pkl"
     meta_path = vdir / "metadata.json"
@@ -150,13 +139,11 @@ def save_model(payload: dict, metadata: dict, promote: bool) -> str:
     (vdir / "metadata.json").write_text(json.dumps(metadata, indent=2))
     if promote:
         (_MODELS_DIR / "promoted.json").write_text(json.dumps({"version": version}, indent=2))
-    # Admin Logs hub (PR B): write/refresh this version's ModelTrainingRuns row
-    # and re-sync the Promoted flags. Done AFTER the version dir + metadata AND
-    # the promoted.json pointer are final, so Promoted is derived from the live
-    # pointer, never echoed from metadata. FAIL-OPEN: training/saving must never
-    # break on a DB hiccup (see _record_training_run). The hook is itself
-    # fail-open; this outer guard is the last resort so even a bug in the
-    # hook's own error handling can never cost a finished model.
+    # Write this version's ModelTrainingRuns row and re-sync the Promoted flags, AFTER the
+    # version dir, metadata and promoted.json pointer are final, so Promoted is derived from
+    # the live pointer and never echoed from metadata. FAIL-OPEN: a DB hiccup must never cost
+    # a finished model, and this outer guard is the last resort in case the hook's own error
+    # handling has a bug.
     try:
         _record_training_run(metadata)
     except Exception:
@@ -178,13 +165,11 @@ def _current_promoted_version() -> "str | None":
 
 
 def _record_training_run(metadata: dict) -> None:
-    """Fail-open hook: upsert the ModelTrainingRuns row for this version and
-    re-sync Promoted flags from promoted.json. Any failure (no DB configured,
-    DB down, table absent) is swallowed with a REDACTED warning -- the training
-    log is best-effort and must never break saving/training/promotion.
+    """Fail-open hook: upsert this version's ModelTrainingRuns row and re-sync Promoted flags.
 
-    Kept as a module-level function (not inlined) so tests can neutralise it to
-    stay hermetic against the real DB.
+    Any failure (no DB configured, DB down, table absent) is swallowed with a redacted
+    warning - the training log is best-effort and must never break saving or promotion.
+    Kept as a module-level function so tests can neutralise it and stay hermetic.
     """
     try:
         from ..db import get_engine
@@ -210,12 +195,11 @@ def _record_training_run(metadata: dict) -> None:
 
 
 def _verify_integrity(pkl_path: Path, metadata: dict, version: str) -> None:
-    """Enforce, fail-CLOSED, that ``pkl_path`` matches the integrity fields in
-    ``metadata`` BEFORE the caller unpickles it. Raises RuntimeError on any
-    mismatch or on an unverifiable (legacy, no-hash) model unless the operator
-    explicitly opts in via AGRI_ALLOW_UNVERIFIED_MODEL.
+    """Fail CLOSED unless pkl_path matches the integrity fields in metadata.
 
-    Precedence: HMAC (strong) > sha256 > legacy escape hatch.
+    Raises RuntimeError on any mismatch, or on an unverifiable legacy model unless the
+    operator opts in with AGRI_ALLOW_UNVERIFIED_MODEL. Precedence: HMAC, then sha256, then
+    the legacy escape hatch.
     """
     stored_hmac = metadata.get("model_hmac")
     stored_sha = metadata.get("model_sha256")

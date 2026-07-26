@@ -1,215 +1,45 @@
-"""Data-quality checks (R1.1 P1 Step 5, ClickUp 86cahef64, PRD Section 2.5).
+"""Data-quality checks for the ingestion paths.
 
-Owner: data engineer. Fail-loud discipline throughout: a violation is either
-raised (hard-stop conditions — negative price at write time, cross-source
-duplicates reaching the feature build) or returned as a structured report
-entry with an explicit severity a Worker/human can act on (gap tiers,
-outlier holds) — never silently dropped or silently fixed.
+Fail-loud throughout: a violation is either raised (a non-positive price at write time,
+cross-source duplicates reaching the feature build) or returned as a structured report
+entry with a severity someone can act on. Nothing is silently dropped or silently fixed.
 
-This module is intentionally source-agnostic where the task calls for it
-(``validate_price_row`` — HARTI today, CBSL/DEC-in-Python whenever they
-land) and clearly scoped to the current single-source reality where it
-isn't (``gap_report``/``flag_price_outliers`` read ``PriceObservations``,
-which today only HARTI writes; ``assert_no_source_duplicates`` is written as
-real multi-source SQL now even though it cannot yet find anything to flag).
+validate_price_row - the shared, source-agnostic pre-write guard.
+  A price of 0 or below is REJECTED, not written: some feeds use zero to mean 'no trade
+  that day', which is explicit missingness and must not be stored as a real price.
+  min_price > max_price is QUARANTINED, never silently swapped. The HARTI parser already
+  fixes its own typo case upstream, so a min>max arriving here would be a structurally
+  different problem, and swapping would launder a real bug into a plausible number.
+  Quarantine means writing the row with IsUnitConfirmed=0 - reusing the existing unit
+  quarantine column and its 'features read WHERE IsUnitConfirmed = 1' contract - plus a
+  WARNING. The row is kept, because an ambiguous price is still evidence of a trade and
+  dropping it would be indistinguishable from a market closure.
 
-============================================================================
-1. SHARED ROW VALIDATOR — validate_price_row()
-============================================================================
-Applied to a parsed row BEFORE it is written, by any source writer (see
-harti/loader.py::upsert_harti_price_observations, the call site wired in
-this task). Two independent guards:
+gap_report - runs of missing days per series.
+  Tiers: 1-2 missing days INFO, 3-7 WARNING, 8+ ERROR. An ERROR is a report entry needing
+  manual acknowledgement, never an exception that kills an otherwise-good ingestion run.
+  Calibrated on the real corpus, where the 8+ tier only caught genuine publication
+  interruptions (the 2020 COVID lockdown and the 2021 curfew waves). A missing day that
+  falls on a Poya day is excluded from the run entirely - it is expected, not missing.
+  Sunday is deliberately NOT suppressed; see poya.py for the corpus evidence.
 
-  (a) Non-positive price -> REJECT the row + WARN. A live query against the
-      real corpus (MarketPrices, all sources) found this is a genuine,
-      non-hypothetical problem: 196 DAMBULLA_DEC rows (Big Onion, Chaw-
-      Chaw, Red Cabbage, ... on 2025-05-05, the DEC launch date) carry
-      MinPrice=MaxPrice=0.00. Zero is being used there to mean "no trade /
-      market didn't report this crop that day" — which is exactly the kind
-      of explicit-missingness signal this project's disciplines say must be
-      preserved, NOT encoded as a fabricated zero price sitting in a price
-      column. A price of 0 or below is therefore rejected at the row-
-      validator level (not written to PriceObservations at all) rather than
-      accepted as "the price was zero" — see the design-decision note in
-      this module's tail comment for the full rationale and the
-      alternative considered.
+flag_price_outliers - rolling 90-day IQR hold per (CropId, MarketId).
+  Backward-looking only: the window for a candidate at date T uses observations strictly
+  before T, so a candidate never influences its own reference statistics.
+  The fence is median + 4*IQR, deliberately looser than the textbook 1.5x, because real
+  festival and shortage spikes are market signal and this check is for parsing and unit
+  errors. A series with too few points in the window is skipped, not flagged. Flagged
+  rows are HELD (IsUnitConfirmed=0), never deleted, and clear_outlier_hold() unquarantines
+  exactly one row at a time.
 
-  (b) min_price > max_price -> QUARANTINE, do not silently swap. See the
-      dedicated section below (2) for why this differs from the existing
-      HARTI parser behaviour.
+assert_no_source_duplicates - guards the (CropId, ObservedDate, MarketId) triple.
+  HARTI, the DEC mirror and CBSL legitimately observe some of the same markets, so this
+  is not a naive COUNT(DISTINCT Source) > 1 check: a triple is allowed only when its
+  source set is a subset of the adjudicated set for THAT market. The same pair at a
+  market it was not adjudicated for is exactly the mis-resolved-market bug this catches.
 
-============================================================================
-2. MIN > MAX HANDLING — DESIGN DECISION (pinned in
-   TestValidatePriceRow::test_min_greater_than_max_is_quarantined_not_swapped)
-============================================================================
-IMPORTANT PRE-EXISTING BEHAVIOUR: harti/parser.py::_parse_price_cell()
-ALREADY silently swaps lo/hi when lo > hi ("Guard: occasionally lo > hi due
-to typo; swap silently") before a ParsedPrice ever exists. A live corpus
-query confirms this swap essentially never needs to fire in practice: 0 of
-14,576 HARTI MarketPrices rows and 0 of 33,022 DAMBULLA_DEC rows have
-MinPrice > MaxPrice today. So for the HARTI source specifically, by the
-time a row reaches this validator, min <= max is already guaranteed by the
-parser — this validator's min>max branch is currently a defensive backstop
-that is not observed to fire on the real HARTI corpus, not a fix for an
-observed problem.
-
-This validator deliberately does NOT swap. Rationale for diverging from the
-parser's existing swap-silently behaviour:
-  - The parser's swap is scoped to a SINGLE cell of a SINGLE, well-understood
-    source (a "220.00 - 200.00"-shaped typo in one bulletin), where the
-    author judged a swap is almost certainly what was meant to be typed.
-  - This validator is the SHARED, source-agnostic gate the task brief
-    explicitly asks future sources (CBSL, DEC) to reuse. A future source's
-    min>max could mean something structurally different (e.g. two columns
-    genuinely transposed by a parser bug, not a data-entry typo) — silently
-    swapping there would launder a real bug into a plausible-looking wrong
-    number that nobody would ever notice again. A held/quarantined row is
-    loud and reversible (someone can inspect and fix it later); a silent
-    swap is neither.
-  - This project's stated disposition (canonical.py's unit-quarantine
-    contract, IsUnitConfirmed defaulting closed) is: when data is
-    ambiguous, fail closed and make a human/future-process resolve it,
-    never guess. min>max is exactly this kind of ambiguity.
-  Net effect for HARTI today: because the parser already resolves the
-  ambiguity upstream, this branch is inert on the current corpus (0 real
-  hits) — it exists for the day CBSL/DEC or a future HARTI layout change
-  produces a genuine min>max row, at which point "hold + WARN" is the
-  correct fail-closed behaviour rather than a silent, unaudited swap.
-
-  CHOSEN MECHANISM: "hold" = write the row with IsUnitConfirmed=0 (reusing
-  the existing unit-quarantine column and its existing feature-layer
-  exclusion contract — WHERE IsUnitConfirmed = 1 — rather than inventing a
-  second quarantine flag) + log WARNING with the offending numbers. The row
-  is NOT skipped/dropped: an ambiguous price is still evidence something
-  happened that day (the crop was probably traded), and dropping it would
-  turn an ambiguous-but-real observation into a silent gap indistinguishable
-  from a market closure. Quarantining (write it, exclude it from features
-  until confirmed) preserves both the audit trail and the "don't leak bad
-  data downstream" requirement.
-
-============================================================================
-3. gap_report() — tiers, Poya suppression, corpus-calibrated
-============================================================================
-Tiers (per task brief): 1-2 consecutive missing days -> INFO, 3-7 ->
-WARNING, 8+ -> ERROR (a structured report entry requiring manual
-acknowledgement, NOT a raised exception — an 8+ day gap must not kill an
-otherwise-successful ingestion run; see run_all_data_quality_checks()).
-
-Calibration against the real corpus (MarketPrices, Source='HARTI', the
-proxy for PriceObservations coverage until the latter is backfilled — see
-this module's live-verification notes in the task report): a per-crop gap
-scan (2015-06-22 to 2025-06-30) found 508 gap-events; 416 were 1-2 days
-(normal single-day closures, weekends), 86 were 3-7 days (extended
-closures — plausible short public-holiday clusters), and 6 were 8+ days,
-matching real, known disruptions:
-  - 2017-01-31 -> 2017-03-01 (28 missing days)
-  - 2020-03-13 -> 2020-06-15 (93 missing days) -- Sri Lanka's COVID-19
-    lockdown period; HARTI simply did not publish bulletins.
-  - Four more 8-17-day gaps clustered in 2021-04 to 2021-06 -- the 2021
-    COVID "third wave" curfew period.
-  So the ERROR tier's real-world hit rate is exactly what an ingestion
-  Worker would want surfaced for manual ack (genuine multi-week/multi-month
-  publication interruptions), not noise.
-
-Keppetipola thin coverage (per harti_multimarket_audit.md Section 8.6,
-confirmed live): the Keppetipola market column does not exist in the
-bulletin at all before 2017-03-08 (pinned exactly: absent 2017-03-07,
-present 2017-03-08), and even after that date only carries data for 2 of
-the 6 target crops (Beans, Capsicum) with any regularity — the other 4
-routinely show "-" (located column, no trade that day) rather than a
-missing column. gap_report() treats "column absent" (pre-2017-03-08) as
-what it is: no observations exist for that (crop, market) key at all in
-that window, which this function reports via the ``insufficient_history``
-counter (see cold-start note in flag_price_outliers) rather than a
-misleading wall of daily "gap" entries for a market/crop pair that simply
-didn't exist yet.
-
-Poya suppression: a missing ObservedDate that falls on a Poya day (see
-poya.py) is excluded from the gap run-length entirely (it does not count
-towards ANY tier, including INFO) — it is expected, not missing. See
-poya.py's module docstring for why Sunday is NOT also suppressed (live
-corpus evidence: HARTI does publish on a meaningful fraction of Sundays).
-
-============================================================================
-4. Outlier hold — flag_price_outliers() / clear_outlier_hold()
-============================================================================
-Rolling 90-calendar-day IQR per (CropId, MarketId), backward-looking only
-(leakage discipline: the window for a candidate observation at date T uses
-only observations with ObservedDate < T -- strictly BEFORE, so the
-candidate itself never influences its own reference statistics; pinned in
-TestNoLeakage).
-
-Threshold: midpoint ((MinPrice+MaxPrice)/2) > median + 4*IQR is flagged.
-4x is deliberately conservative (loose) rather than the textbook 1.5x
-"mild outlier" fence: HARTI price data legitimately swings hard around
-festivals/shortages (e.g. drought-driven vegetable price spikes are real
-market signal, not data errors), and this check's job is to catch parsing/
-unit errors (a stray extra digit, a Rs/kg row that's actually Rs/50kg),
-not to flag every real demand spike as suspicious. A tighter fence would
-generate so many false positives on legitimate volatility that the
-WARNING would stop being trustworthy signal.
-
-Cold-start: a series with fewer than MIN_OBSERVATIONS_FOR_OUTLIER_CHECK
-(20) observations in the trailing 90-day window is skipped, not flagged --
-matches this project's cold-start discipline (thin history is a routing
-signal for agri-ml-engineer's fallback logic, not something to guess an
-IQR fence for on 3 data points). This also protects newly-onboarded
-markets/crops (e.g. Keppetipola's 4 thin-coverage crops) from spurious
-flags the moment they get their first few observations.
-
-Mechanism: HELD, never deleted -- sets IsUnitConfirmed=0 on the flagged
-row (same quarantine column/contract as the min>max hold above; a
-quarantined row is already excluded from any WHERE IsUnitConfirmed=1
-feature read). clear_outlier_hold() is the single-row, parameterized,
-admin unquarantine path -- deliberately no bulk "unquarantine everything"
-call, so clearing a hold is always a specific, auditable, one-row decision.
-
-============================================================================
-5. assert_no_source_duplicates()
-============================================================================
-Real SQL (GROUP BY (CropId, ObservedDate, MarketId) HAVING
-COUNT(DISTINCT Source) > 1, CropId IS NOT NULL) against PriceObservations.
-Today only HARTI writes PriceObservations, so this passes trivially (there
-is only ever one Source value present) -- it exists now so the day CBSL/DEC
-land in Python (P3+) and could theoretically double-write the same
-(crop, date, market) triple, the guard is already live and already tested,
-not bolted on retroactively after a real double-count incident.
-
-R2 Step 2 (DEC -> PriceObservations mirror, ClickUp 86cajtx2k) update: DEC/
-HARTI now legitimately COEXIST at the SAME (CropId, ObservedDate, MarketId)
-triple at Dambulla -- HARTI already parses a Dambulla column from its own
-bulletins (Step 6 widened it to 10 markets including Dambulla), and the
-mirror additively writes Source='DAMBULLA_DEC' rows at the same market. This
-is BY DESIGN (the whole point of the refined-layout mirror -- PriceObservations
-becomes the single table holding every source), not a double-count bug, so
-the naive ``COUNT(DISTINCT Source) > 1`` check would now fire ~8,096 false
-positives (live-measured overlap at Dambulla alone) and stop meaning anything.
-_ALLOWED_COEXISTING_SOURCES = {"HARTI", "DAMBULLA_DEC"} is the one, narrow,
-named carve-out: a triple is flagged ONLY if its actual source SET is
-anything OTHER than exactly this pair (a genuine 3rd source appearing, or an
-unexpected two-source combination that isn't this specific, adjudicated
-overlap) -- so the check still catches every OTHER double-write scenario it
-was built to catch; it does not weaken the general N-source guard, it only
-recognises the one pairing this project has explicitly decided is correct.
-
-SF2 (reviewer should-fix): the carve-out is additionally scoped to the
-DAMBULLA MARKET ONLY (resolved by MarketCode, fail-closed via
-canonical.resolve_market_id_by_code -- see _DAMBULLA_MARKET_CODE below). DEC
-never legitimately writes to any market but Dambulla, so a HARTI+DAMBULLA_DEC
-pair appearing anywhere else is NOT the adjudicated overlap -- it is exactly
-a mis-resolved-market bug (e.g. a future mirror change that accidentally
-targets Pettah) and must still raise.
-
-============================================================================
-6. Macro point-in-time guard (P3 stub, generic + reusable now)
-============================================================================
-assert_vintage_sane() / assert_effective_not_future() are pure functions
-with no P3 table dependency -- the macro-indicator/BudgetEvents tables this
-guard will eventually wire into (PublicationDate, EffectiveFrom columns)
-are P3 scope and do not exist yet in this schema. Implementing the two
-functions now (rather than waiting for the tables) means the point-in-time
-discipline is pinned in a test today, and P3 only has to call them, not
-design them under time pressure.
+assert_vintage_sane / assert_effective_not_future - pure point-in-time guards with no
+table dependency, so the discipline is pinned by tests before the callers exist.
 """
 from __future__ import annotations
 
@@ -226,27 +56,16 @@ from .poya import is_poya
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# 1. Shared row validator (source-agnostic)
-# ============================================================================
 
 @dataclass
 class RowValidationResult:
     """Outcome of validate_price_row() for one candidate row.
 
-    accepted:       True if the row should be written normally
-                     (IsUnitConfirmed left to the caller's own unit
-                     contract -- this validator does not touch the unit
-                     flag for an accepted row).
-    reject:         True if the row must NOT be written at all (e.g.
-                     non-positive price). Mutually exclusive with `hold`.
-    hold:           True if the row should be written but QUARANTINED
-                     (IsUnitConfirmed=0 forced regardless of the source's
-                     own unit-confirmation status) -- e.g. min>max.
-                     Mutually exclusive with `reject`.
-    reason:         Short machine-readable code, e.g.
-                     "non_positive_price", "min_greater_than_max", "ok".
-    message:        Human-readable detail for the WARNING log line.
+    accepted: write the row normally; this validator does not touch the unit flag.
+    reject:   do not write the row at all (e.g. a non-positive price). Excludes hold.
+    hold:     write the row but force IsUnitConfirmed=0 (e.g. min>max). Excludes reject.
+    reason:   short machine-readable code, e.g. 'non_positive_price' or 'ok'.
+    message:  human-readable detail for the WARNING log line.
     """
     accepted: bool
     reject: bool = False
@@ -264,19 +83,11 @@ def validate_price_row(
     observed_date: date,
     market_name: "str | None" = None,
 ) -> RowValidationResult:
-    """Source-agnostic pre-write guard: negative/zero price rejection +
-    min>max quarantine. See module docstring Sections 1-2 for full
-    rationale. Pure function (no DB access) so any source writer (HARTI
-    today; CBSL/DEC later) can call it uniformly before an upsert.
+    """Source-agnostic pre-write guard: reject a non-positive price, quarantine min>max.
 
-    Callers MUST log the returned WARNING via `message` themselves at the
-    point of the actual reject/hold decision (mirrors this codebase's
-    existing pattern of logging at the call site with full row context,
-    e.g. harti/loader.py's per-row WARN calls) -- this function returns the
-    text but does not log directly, so a caller processing many rows can
-    choose to log once per PDF/batch rather than flooding on a large
-    backlog, exactly like heal_price_observation_crops() does for
-    unresolved labels.
+    A pure function with no DB access, so any source writer can call it before an upsert.
+    Callers log the returned message themselves at the point of the reject or hold, so a
+    caller processing a large backlog can log once per batch rather than flooding.
     """
     tag = f"[{observed_date.isoformat()}] {market_name or '?'}/{crop_label} ({source})"
 
@@ -309,9 +120,6 @@ def validate_price_row(
     return RowValidationResult(accepted=True, reason="ok")
 
 
-# ============================================================================
-# 2. gap_report()
-# ============================================================================
 
 GAP_TIER_INFO_MAX = 2      # 1-2 missing days -> INFO
 GAP_TIER_WARNING_MAX = 7   # 3-7 missing days -> WARNING
@@ -337,9 +145,7 @@ class GapEntry:
     gap_end: str         # next observed date after the gap (ISO)
     missing_days: int    # count of missing calendar days strictly between
     tier: str            # INFO / WARNING / ERROR
-    poya_suppressed_days: int = 0  # how many of the missing days were Poya
-                                    # (informational -- these are NOT counted
-                                    # in missing_days; see below)
+    poya_suppressed_days: int = 0  # how many of the missing days were Poya (not counted in missing_days)
 
 
 def gap_report(
@@ -347,35 +153,16 @@ def gap_report(
     *,
     source: str = "HARTI",
 ) -> dict:
-    """Scan PriceObservations for missing ObservedDate runs per
-    (ExternalCommodityName, MarketId, Source), Poya-suppressed (see
-    poya.expected_market_closed).
+    """Scan PriceObservations for runs of missing ObservedDates per series.
 
-    A "run" of a series is its own sorted, distinct ObservedDate list.
-    Gaps are computed on CALENDAR days minus Poya days that fall strictly
-    between two consecutive observed dates -- i.e. a Poya day sitting
-    inside an otherwise-1-day gap makes that gap disappear entirely (0
-    missing days = no entry at all), not just downgrade its tier.
+    A gap is the calendar days strictly between two consecutive observed dates, minus Poya
+    days: a Poya day inside an otherwise 1-day gap makes the gap vanish entirely rather than
+    just lowering its tier. Series with fewer than MIN_OBSERVATIONS_FOR_GAP_SCAN observations
+    are skipped and counted under insufficient_history.
 
-    Series with fewer than MIN_OBSERVATIONS_FOR_GAP_SCAN observations are
-    skipped (cold-start -- not enough history to call anything a "gap"
-    rather than "this series barely exists yet"); counted separately under
-    `insufficient_history`.
-
-    Returns a structured dict (never raises for gap findings themselves --
-    an 8+ day ERROR-tier gap is a report entry requiring manual ack, not an
-    exception that kills the ingestion run):
-      {
-        "entries": [GapEntry-shaped dicts, sorted by crop/market/gap_start],
-        "n_info": int, "n_warning": int, "n_error": int,
-        "insufficient_history": [{"crop_label", "market_name", "source",
-                                    "n_observations"}] ,
-        "series_scanned": int,
-      }
-
-    Each ERROR-tier entry is also logged at ERROR level (and WARNING/INFO
-    similarly) so the ingestion log (this project's "IngestionLog table" --
-    see canonical.py) carries the same signal as the returned report.
+    Never raises for gap findings themselves - an 8+ day ERROR gap is a report entry that
+    needs manual acknowledgement. Returns the entries, the per-tier counts, the
+    insufficient_history list and series_scanned. Each entry is also logged at its own tier.
     """
     eng = engine if engine is not None else get_engine()
 
@@ -478,9 +265,6 @@ def gap_report(
     }
 
 
-# ============================================================================
-# 3. Outlier hold
-# ============================================================================
 
 OUTLIER_ROLLING_WINDOW_DAYS = 90
 OUTLIER_IQR_MULTIPLIER = 4.0
@@ -488,11 +272,9 @@ MIN_OBSERVATIONS_FOR_OUTLIER_CHECK = 20  # cold-start floor within the window
 
 
 def _iqr_median(values: Sequence[float]) -> "tuple[float, float] | None":
-    """Return (median, iqr) for a sequence, or None if too few points.
-    Pure Python (no numpy dependency for this small a computation) --
-    linear-interpolation-free "exclusive" quartile method (matches the
-    common textbook definition; fine for a coarse 4x-IQR fence, not a
-    statistics-library-grade quantile implementation).
+    """Return (median, iqr) for a sequence, or None when there are too few points.
+
+    Plain Python using the exclusive quartile method - coarse enough for a 4x-IQR fence.
     """
     n = len(values)
     if n < 2:
@@ -524,35 +306,21 @@ def flag_price_outliers(
 ) -> dict:
     """Rolling 90-day IQR outlier hold per (CropId, MarketId).
 
-    LEAKAGE DISCIPLINE: for a candidate observation at ObservedDate T, the
-    reference window is every observation of the same (CropId, MarketId,
-    Source) with T-90 <= ObservedDate < T (strictly BEFORE T) -- the
-    candidate itself is never included in its own reference statistics,
-    and nothing at or after T is ever read. This is computed in Python
-    per-series (not a SQL window function) specifically so the boundary is
-    exact and easy to pin in a test (see TestNoLeakage).
+    Leakage discipline: for a candidate at ObservedDate T the reference window is every
+    observation of the same (CropId, MarketId, Source) with T-90 <= ObservedDate < T, strictly
+    before T, so the candidate never enters its own statistics and nothing at or after T is
+    read. Computed in Python per series rather than as a SQL window so the boundary is exact
+    and easy to pin in a test.
 
-    Rows with CropId IS NULL are skipped (an outlier fence needs a stable
-    per-crop identity; ExternalCommodityName is a fallback identity but
-    CropId is the canonical one once resolved -- an unresolved-crop row is
-    already flagged elsewhere via heal_price_observation_crops(), not
-    silently re-purposed as an outlier-check key here).
+    Rows with CropId NULL are skipped: an outlier fence needs a stable crop identity, and an
+    unresolved crop is already reported by heal_price_observation_crops().
 
     Args:
         engine:   SQLAlchemy engine; created from config if None.
-        source:   Source to scan (default "HARTI").
-        dry_run:  If True, compute and report flags but do not write
-                  IsUnitConfirmed=0 to the DB.
+        source:   Source to scan (default 'HARTI').
+        dry_run:  Compute and report flags without writing IsUnitConfirmed=0.
 
-    Returns:
-        {
-          "flagged": [ {id, crop_id, market_id, external_commodity_name,
-                         observed_date, midpoint, rolling_median,
-                         rolling_iqr, threshold} , ... ],
-          "series_checked": int,
-          "series_skipped_cold_start": int,
-          "n_flagged": int,
-        }
+    Returns the flagged rows plus series_checked, series_skipped_cold_start and n_flagged.
     """
     eng = engine if engine is not None else get_engine()
 
@@ -595,9 +363,8 @@ def flag_price_outliers(
         for i, candidate in enumerate(obs):
             t = candidate["observed_date"]
             window_start = t - timedelta(days=OUTLIER_ROLLING_WINDOW_DAYS)
-            # Strictly BEFORE t -- leakage guard. obs is sorted, so this is
-            # a simple prefix scan; O(n) per candidate is fine at this
-            # corpus scale (thousands, not millions, of rows per series).
+            # Strictly BEFORE t - the leakage guard. obs is sorted, so this prefix scan is
+            # fine at this corpus scale.
             reference = [
                 o["midpoint"] for o in obs[:i]
                 if window_start <= o["observed_date"] < t
@@ -663,16 +430,10 @@ def clear_outlier_hold(
     *,
     engine: "sa.engine.Engine | None" = None,
 ) -> bool:
-    """Admin helper: sets IsUnitConfirmed=1 for exactly one row, by Id.
+    """Admin helper: set IsUnitConfirmed=1 for exactly one row, by Id.
 
-    Deliberately single-row and parameterized -- no bulk "unquarantine
-    everything matching X" call is exposed here, so clearing a hold is
-    always a specific, auditable, one-at-a-time human decision (mirrors
-    this project's existing "no silent bulk re-map" contract, e.g.
-    canonical.heal_price_observation_crops()'s NULL-only guard).
-
-    Returns True if a row was actually updated (Id existed), False
-    otherwise.
+    Deliberately single-row and parameterized - there is no bulk unquarantine, so clearing a
+    hold is always a specific, auditable decision. Returns True if a row was updated.
     """
     eng = engine if engine is not None else get_engine()
     with eng.begin() as conn:
@@ -689,41 +450,20 @@ def clear_outlier_hold(
     return updated
 
 
-# ============================================================================
-# 4. assert_no_source_duplicates()
-# ============================================================================
 
-# R2 Step 2 (DEC -> PriceObservations mirror): the ONE named pair of sources
-# that may legitimately coexist at the same (CropId, ObservedDate, MarketId)
-# triple -- both cover Dambulla by design (HARTI's own bulletin Dambulla
-# column, since Step 6; the DEC mirror, additive). A triple whose source set
-# is anything OTHER than exactly this pair (a 3rd source, or two sources that
-# are not this specific pair) is still a real violation -- see module
-# docstring Section 5 for the full rationale.
-# (Kept for reference/back-compat in messages; the operative structure is the
-# per-market _ADJUDICATED_OVERLAPS map below.)
+# The one named pair of sources that may legitimately coexist at the same triple: HARTI's
+# own Dambulla bulletin column plus the additive DEC mirror. Kept for message text; the
+# operative structure is the per-market map below.
 _ALLOWED_COEXISTING_SOURCES = frozenset({"HARTI", "DAMBULLA_DEC"})
 
-# SF2 (reviewer should-fix, R2 Step 2 gate) + CBSL extension (2026-07-22): the
-# adjudicated overlaps are scoped PER MARKET row -- an allowed source pair
-# appearing at any market not adjudicated for it is not the by-design overlap,
-# it is exactly the double-write bug this check exists to catch (e.g. a
-# hypothetical mis-resolved-market mirror bug writing DEC rows at Pettah).
+# Adjudicated overlaps are scoped PER MARKET: an allowed source pair appearing at a market
+# it was not adjudicated for is not the by-design overlap, it is the double-write bug this
+# check exists to catch. CBSL deliberately observes markets other sources already cover -
+# that is its cross-validation value - so each market's entry is the FULL set of sources
+# allowed there, and a triple passes when its source set is a SUBSET of that.
 #
-# The CBSL Daily Price Report source (feat/cbsl-price-parser) deliberately
-# observes markets other sources already cover -- that is its cross-validation
-# value -- so each market row's adjudicated set below is the FULL set of
-# sources allowed to coexist there; a triple is allowed iff its actual source
-# set is a SUBSET of its market's adjudicated set ({HARTI, DAMBULLA_DEC} at
-# Dambulla stays allowed with or without CBSL present):
-#   MKT00000001 Dambulla DEC:              DAMBULLA_DEC + HARTI + CBSL
-#   MKT00000004 Pettah (HARTI wholesale):  HARTI + CBSL
-#   MKT00000005 Narahenpita (HARTI retail): HARTI + CBSL
-#
-# Resolved BY CODE at call time (never a hardcoded GUID -- GUIDs are per-DB),
-# fail-closed: a missing Markets row for any adjudicated code raises rather
-# than silently widening (or silently narrowing to nothing) the allowance --
-# see canonical.resolve_market_id_by_code.
+# Markets are resolved BY CODE at call time, never a hardcoded GUID, and fail closed: a
+# missing Markets row raises rather than silently widening or narrowing the allowance.
 _DAMBULLA_MARKET_CODE = "MKT00000001"
 
 _ADJUDICATED_OVERLAPS: dict[str, frozenset] = {
@@ -734,34 +474,19 @@ _ADJUDICATED_OVERLAPS: dict[str, frozenset] = {
 
 
 def assert_no_source_duplicates(engine: "sa.engine.Engine | None" = None) -> int:
-    """Assert no (CropId, ObservedDate, MarketId) triple in PriceObservations
-    is present from a Source combination OTHER than the one adjudicated,
-    by-design overlap ({"HARTI", "DAMBULLA_DEC"} AT THE DAMBULLA MARKET ONLY
-    -- see _ALLOWED_COEXISTING_SOURCES / _DAMBULLA_MARKET_CODE).
+    """Assert that no (CropId, ObservedDate, MarketId) triple carries an unadjudicated source
+    combination.
 
-    Two-step SQL: (1) find candidate triples with COUNT(DISTINCT Source) > 1
-    (cheap, set-based); (2) pull the actual Source values for exactly those
-    candidate triples and, in Python, flag only the ones whose (source SET,
-    MarketId) is not precisely (the allowed pair, Dambulla). This still
-    catches every double-write scenario the check was built for (a genuine
-    3rd source, an unexpected 2-source combination, OR the adjudicated pair
-    appearing at a market other than Dambulla) -- it only recognises the one
-    pairing AND location this project has explicitly decided is correct, per
-    R2 Step 2.
+    Two-step SQL: find the candidate triples with COUNT(DISTINCT Source) > 1, then pull their
+    actual source values and flag, in Python, any whose source set is not a subset of that
+    MARKET's adjudicated set. A genuine third source, an unexpected pair, or an allowed pair
+    appearing at a market it was not adjudicated for all still raise.
 
-    Scoped to CropId IS NOT NULL (an unresolved crop has no stable identity
-    to dedup on -- see heal_price_observation_crops() for that separate
-    concern).
+    Scoped to CropId IS NOT NULL: an unresolved crop has no stable identity to dedup on.
 
-    Raises:
-        RuntimeError if the Dambulla Markets row cannot be resolved (fail-
-        closed -- see canonical.resolve_market_id_by_code).
-        AssertionError listing the offending (CropId, ObservedDate,
-        MarketId) triples (capped at 20 shown) if any are found.
-
-    Returns:
-        Number of distinct (CropId, ObservedDate, MarketId) triples
-        examined (i.e. checked clean).
+    Raises RuntimeError if an adjudicated Markets row cannot be resolved (fail-closed), and
+    AssertionError listing the offending triples, at most 20 shown. Returns the number of
+    distinct triples examined.
     """
     from .canonical import resolve_market_id_by_code
 
@@ -803,10 +528,8 @@ def assert_no_source_duplicates(engine: "sa.engine.Engine | None" = None) -> int
         by_triple[key].add(source)
 
     def _is_allowed(key: tuple, sources: set) -> bool:
-        # Allowed iff this market row has an adjudicated overlap set AND the
-        # actual source set is within it (subset, so any adjudicated pair out
-        # of a larger adjudicated trio stays allowed). Any source combination
-        # at a non-adjudicated market remains a violation.
+        # Allowed only when this market has an adjudicated set and the actual source set is a
+        # subset of it. Any source combination at a non-adjudicated market is a violation.
         _crop_id, _obs_date, market_id = key
         allowed = allowed_by_market_id.get(market_id.upper())
         return allowed is not None and sources <= allowed
@@ -841,9 +564,6 @@ def assert_no_source_duplicates(engine: "sa.engine.Engine | None" = None) -> int
     return total
 
 
-# ============================================================================
-# 5. Macro point-in-time guard (P3 stub, generic + reusable now)
-# ============================================================================
 
 def assert_vintage_sane(
     publication_date: date,
@@ -851,28 +571,17 @@ def assert_vintage_sane(
     *,
     now: "date | None" = None,
 ) -> None:
-    """Reject a publication vintage that is impossible: published in the
-    future (relative to `now`), or published before the reference period
-    it is supposedly describing even started.
+    """Reject an impossible publication vintage.
 
-    Intended future caller (P3, not yet built): a macro-indicator row with
-    columns (PublicationDate, ReferencePeriodStart) -- e.g. CBSL's monthly
-    CPI print for "reference period = June 2026" cannot have
-    PublicationDate before 2026-06-01 (you cannot publish a statistic about
-    a period that hasn't started), and cannot have PublicationDate after
-    today (the row would not exist yet in a point-in-time-correct world).
+    A vintage published in the future, or published before the reference period it describes
+    even started, cannot be real.
 
     Args:
-        publication_date:        The vintage/publication date to validate.
-        reference_period_start:  The start of the period the publication
-                                  describes (e.g. first day of the month a
-                                  CPI figure covers).
-        now:                     Injected "today" for testability; real
-                                  callers omit this and get date.today().
+        publication_date:       the vintage/publication date to validate.
+        reference_period_start: the start of the period the publication describes.
+        now:                    injected 'today' for testability; real callers omit it.
 
-    Raises:
-        ValueError if publication_date is after `now`, or before
-        reference_period_start.
+    Raises ValueError if publication_date is after now, or before reference_period_start.
     """
     today = now if now is not None else date.today()
     if publication_date > today:
@@ -894,22 +603,12 @@ def assert_effective_not_future(
     *,
     now: "date | None" = None,
 ) -> None:
-    """Reject an "effective from" date (e.g. BudgetEvents.EffectiveFrom)
-    that lies in the future relative to `now` -- a point-in-time feature
-    join must never treat a not-yet-effective policy/budget change as
-    already in force.
+    """Reject an effective-from date that lies in the future.
 
-    Intended future caller (P3, not yet built): BudgetEvents.EffectiveFrom
-    guard at feature-build time, so a feature row for date T never reflects
-    a budget change that (as of T) had not taken effect yet.
+    A point-in-time feature join must never treat a not-yet-effective policy or budget change
+    as already in force. now is injected for testability; real callers omit it.
 
-    Args:
-        effective_from: The date a policy/event claims to take effect.
-        now:            Injected "today" for testability; real callers
-                         omit this and get date.today().
-
-    Raises:
-        ValueError if effective_from is after `now`.
+    Raises ValueError if effective_from is after now.
     """
     today = now if now is not None else date.today()
     if effective_from > today:

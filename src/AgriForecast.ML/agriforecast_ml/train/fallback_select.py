@@ -1,40 +1,26 @@
-"""Per-crop fallback-predictor SELECTION (chip task_9b1cd894).
+"""Per-crop fallback-predictor selection.
 
-The v13+ hybrid serves a naive fallback for every crop below the history gate
-(`served_on_crops`). The *incumbent* fallback point predictor is the
-recency-weighted crop mean (`baselines.recency_weighted_crop_mean_pred`) — the
-same predictor the promotion gate scores thin crops with. Fruit-history
-experiments (2026-07-17) showed that predictor mis-serves thin, VOLATILE fruit
-crops badly (Kolikuttu-class: recency-mean MAE ~144 vs carry-forward ~30 on
-matched origins): the fallback CHOICE, not the history length, is the defect.
+Every crop below the history gate is served a naive fallback, and the incumbent fallback
+predictor is the recency-weighted crop mean. That predictor mis-serves thin, volatile
+crops badly: on matched origins one fruit crop scored MAE ~144 with recency-mean against
+~30 with carry-forward, so the fallback CHOICE, not the history length, was the defect.
 
-This module picks, PER fallback-served crop, the fallback point predictor that
-serves it best on a leakage-safe purged walk-forward backtest, and returns a
-map of the crops that should switch AWAY from the recency-mean incumbent. The
-map is shipped (signed) in the model payload; serving reads it and fails CLOSED
-to the incumbent for any crop absent from the map / any old payload / any error.
+This module picks, per fallback-served crop, the predictor that serves it best on a
+leakage-safe purged walk-forward, and returns the crops that should switch away from the
+incumbent. The map ships (signed) in the model payload and serving fails CLOSED to the
+incumbent for any crop absent from it, any old payload and any error.
 
-LEAKAGE DISCIPLINE (identical to the hybrid gate):
-  * fold structure is the SAME expanding-window purged walk-forward as
-    ``model.purged_walk_forward`` (test = last 40% of unique obs dates, split
-    into ``n_folds`` blocks; a train row is purged if its harvest label date
-    falls on/after the test window start);
-  * every candidate predictor for a fold's test rows is computed from that
-    fold's TRAIN slice only (recency-mean) or from information known at the
-    observation date (carry-forward = AvgPrice at obs; seasonal-naive = a price
-    at/before HarvestDate-365, guarded so it is strictly < obs);
-  * the resulting per-crop choice is a static function of the training data,
-    so at serve time it is fully point-in-time (serving just reads the map).
+Leakage discipline, identical to the hybrid gate: the same expanding-window purged
+walk-forward as model.purged_walk_forward, and every candidate prediction for a fold's
+test rows is computed from that fold's TRAIN slice only, or from information known at the
+observation date. The resulting choice is a static function of the training data, so at
+serve time it is fully point-in-time.
 
-SWITCH GATES (hub-set):
-  * switch a crop away from recency-mean ONLY IF a challenger beats it by
-    >= ``switch_margin`` (default 10%) MAE on that crop's matched walk-forward
-    origins AND the crop has >= ``min_origins`` (default 30) evaluable origins;
-  * AGGREGATE: the fallback-segment pooled (origin-weighted) MAE with the
-    switches applied must not be worse than the all-recency-mean pooled MAE, and
-    no switched crop may be worse than its own recency-mean baseline (the per-
-    crop >=10% gate already guarantees this; asserted). If the aggregate gate
-    fails, NO crop switches (empty map) — a null result is a valid outcome.
+Switch gates: a crop switches only when a challenger beats the incumbent by at least
+switch_margin (default 10%) MAE over at least min_origins (default 30) evaluable origins.
+On top of that, the pooled fallback-segment MAE with switches applied must not be worse
+than the all-incumbent pooled MAE. If that aggregate gate fails nothing switches - an
+empty map is a valid outcome.
 """
 from __future__ import annotations
 
@@ -43,8 +29,8 @@ import pandas as pd
 
 from . import baselines
 
-# Incumbent = the predictor a fallback crop gets today (and the fail-closed
-# default at serve time). Named so serving and the trainer agree on one string.
+# Incumbent = the predictor a fallback crop gets today, and the fail-closed default at
+# serve time. Named once so serving and the trainer agree on one string.
 INCUMBENT = "recency_mean"
 # Challenger predictors, in priority order for tie-breaking (cheaper / more
 # robust first). seasonal-naive is included only where it is leakage-safe.
@@ -55,15 +41,11 @@ DEFAULT_SWITCH_MARGIN = 0.10
 
 
 def _seasonal_naive_pred(df_all: pd.DataFrame, test_df: pd.DataFrame) -> np.ndarray:
-    """y at (HarvestDate - 365d): the crop's AvgPrice on/before one year before
-    the harvest target, via a per-crop backward as-of over the observed AvgPrice
-    series. NaN where no such prior price exists.
+    """The crop's AvgPrice on or before one year prior to the harvest target, else NaN.
 
-    LEAKAGE GUARD: the as-of source price must be knowable at the observation
-    date. HarvestDate-365 = obs + gp - 365, which is strictly < obs only when
-    gp < 365. For gp >= 365 the target date is >= obs, so a backward as-of could
-    pick a price observed AFTER obs -> lookahead. Those rows are set to NaN
-    (seasonal-naive is simply not offered for >=1yr-horizon crops).
+    Leakage guard: HarvestDate - 365 is obs + gp - 365, which is strictly before obs only
+    when gp < 365. For longer horizons a backward as-of could pick a price observed after
+    obs, so those rows are NaN and seasonal-naive is simply not offered for them.
     """
     src = (df_all[["CropId", "ObservationDate", "AvgPrice"]]
            .dropna(subset=["AvgPrice"]).sort_values("ObservationDate"))
@@ -105,14 +87,13 @@ def _candidate_preds(df_all: pd.DataFrame, dtr: pd.DataFrame,
 
 
 def _serving_incumbent_maps(df: pd.DataFrame):
-    """The fallback distributions serving ACTUALLY deploys today, computed from the
-    FULL labelled frame exactly like ``train.model._crop_fallback`` (per-crop and
-    per-category p50 medians of LabelHarvestPrice). These are the REAL current
-    serving incumbents for a <365-row fallback crop: it is served the CATEGORY
-    median tier (crop tier needs >=min_history_obs rows == the model gate), so
-    ``category_median`` is what a switch must actually beat to be a real win.
-    Returns (crop_median: {cid_lower: p50}, cat_median: {cat: p50}, cat_of_crop:
-    {cid_lower: cat}, global_p50)."""
+    """The fallback distributions serving actually deploys today.
+
+    Per-crop and per-category p50 medians over the full labelled frame, exactly like
+    train.model._crop_fallback. A thin fallback crop is served the CATEGORY median tier, so
+    that is what a switch has to beat to be a real win. Returns (crop_median, cat_median,
+    cat_of_crop, global_p50).
+    """
     from ..serving.crop_categories import category_for
 
     y = pd.to_numeric(df["LabelHarvestPrice"], errors="coerce")
@@ -160,9 +141,8 @@ def _collect_walk_forward(df: pd.DataFrame, fallback_crops: set,
         })
         for name, arr in preds.items():
             sub[name] = np.asarray(arr, dtype=float)[fb]
-        # Real serving incumbents (STATIC full-frame p50, mapped by crop): what
-        # serving deploys today. Optimistic (uses full-frame info) so beating them
-        # on the honest walk-forward challenger is a CONSERVATIVE no-regression bar.
+        # What serving deploys today (a static full-frame p50). It is optimistic, since it uses
+        # full-frame information, so beating it on the honest walk-forward is a conservative bar.
         cids_lower = pd.Series(dte["CropId"].to_numpy()[fb]).astype(str).str.lower()
         sub["crop_median_serving"] = cids_lower.map(crop_median).to_numpy()
         sub["category_median_serving"] = cids_lower.map(
@@ -186,12 +166,10 @@ def _mae(y: np.ndarray, p: np.ndarray) -> "tuple[float | None, int]":
     return float(np.mean(np.abs(y[m] - p[m]))), n
 
 
-# Which challengers may actually be SHIPPED into the serving choice map. Default
-# = carry-forward only: it is trivially servable (the last observed AvgPrice is
-# already on the feature row serving fetches) with no new query and no serve-time
-# leakage guard. seasonal-naive is EVALUATED and REPORTED (it wins bigger on some
-# crops) but NOT shipped here — wiring a serve-time 1-year-lookback query is a
-# separate, larger serving change (documented as future upside in RESULTS.md).
+# Which challengers may actually be shipped into the serving choice map. Carry-forward
+# only: the last observed AvgPrice is already on the feature row serving fetches, so it
+# needs no new query. Seasonal-naive is evaluated and reported but not shipped - wiring a
+# serve-time one-year lookback is a separate, larger serving change.
 DEFAULT_SERVABLE_CHALLENGERS = ("carry_forward",)
 
 
@@ -202,20 +180,15 @@ def select_fallback_choices(df: pd.DataFrame, served_on_crops: set | list,
                             servable_challengers: tuple = DEFAULT_SERVABLE_CHALLENGERS):
     """Pick the best fallback point predictor per fallback-served crop.
 
-    ``served_on_crops``: the model-served crop set (lower-cased GUID strings or
-    raw CropIds) — these are EXCLUDED (scope guard: never touch model-served
-    routing here). Every other crop with labelled rows is a fallback crop.
+    Args:
+        served_on_crops:      the model-served crop set, excluded here so this never touches
+                              model-served routing.
+        servable_challengers: the challengers serving can actually compute. All CHALLENGERS
+                              are still evaluated and reported; only these can be selected.
 
-    ``servable_challengers``: the subset of challengers eligible for the SHIPPED
-    choice map (serving must be able to compute them). All of ``CHALLENGERS`` are
-    still evaluated + reported; only these can be selected for a switch.
-
-    Returns ``(choice_map, table, aggregate)``:
-      * ``choice_map``: ``{crop_id_lower: challenger_name}`` ONLY for crops that
-        pass the switch gates. Absence => recency-mean incumbent (fail-closed).
-      * ``table``: list of per-crop dicts (crop, code, n_origins, per-candidate
-        MAE, best challenger, delta%, switched) for the report.
-      * ``aggregate``: pooled gate numbers + whether switches were applied.
+    Returns (choice_map, table, aggregate). choice_map holds only the crops that pass the
+    switch gates - absence means the recency-mean incumbent. table is the per-crop report
+    and aggregate holds the pooled gate numbers.
     """
     served_lower = {str(c).lower() for c in served_on_crops}
     all_crops = set(df["CropId"].unique())
@@ -233,8 +206,8 @@ def select_fallback_choices(df: pd.DataFrame, served_on_crops: set | list,
     for cid in sorted(fallback_crops, key=lambda c: str(c)):
         g = long[long["CropId"] == cid] if len(long) else long
         rec_mae, rec_n = _mae(g["y"], g["recency_mean"]) if len(g) else (None, 0)
-        # Real current serving incumbent = the category-median tier (a <365-row
-        # fallback crop never reaches crop tier); crop-median reported too.
+        # The real serving incumbent is the category-median tier (a thin fallback crop never
+        # reaches the crop tier); the crop median is reported too.
         cat_mae, _ = _mae(g["y"], g["category_median_serving"]) if len(g) else (None, 0)
         crop_med_mae, _ = _mae(g["y"], g["crop_median_serving"]) if len(g) else (None, 0)
         row: dict = {
@@ -246,10 +219,9 @@ def select_fallback_choices(df: pd.DataFrame, served_on_crops: set | list,
             "serving_category_MAE": cat_mae,
             "serving_cropmedian_MAE": crop_med_mae,
         }
-        # Per-challenger matched MAE + coverage (matched = y, incumbent AND
-        # challenger all finite). Selection is COVERAGE-AWARE: a challenger only
-        # competes to be "best" if it has >= min_origins matched rows, so a
-        # sparse-but-lucky seasonal-naive can never shadow a robust carry-forward.
+        # Per-challenger matched MAE and coverage. Selection is coverage-aware: a challenger only
+        # competes to be best if it has at least min_origins matched rows, so a sparse-but-lucky
+        # seasonal-naive can never shadow a robust carry-forward.
         ch_stats: dict[str, tuple] = {}       # name -> (mae, n_match)
         for ch in CHALLENGERS:
             if ch not in g.columns:
@@ -268,8 +240,7 @@ def select_fallback_choices(df: pd.DataFrame, served_on_crops: set | list,
                     if name in among and mae is not None and n >= min_origins]
             return min(cand, key=lambda t: t[1]) if cand else (None, None, 0)
 
-        # Reported best across ALL candidates (informational: shows seasonal-naive
-        # upside even where it is not shipped).
+        # Best across ALL candidates, informational only (shows seasonal-naive upside).
         report_best, report_best_mae, _ = _best(CHALLENGERS)
         # Shippable best: only among servable challengers (carry-forward today).
         best_ch, best_ch_mae, best_ch_n = _best(tuple(servable_challengers))
@@ -278,9 +249,8 @@ def select_fallback_choices(df: pd.DataFrame, served_on_crops: set | list,
         delta_pct = None
         if (rec_mae is not None and best_ch_mae is not None and rec_mae > 0):
             delta_pct = (rec_mae - best_ch_mae) / rec_mae  # +ve => challenger better
-            # No-regression vs the REAL serving incumbent (category-median tier):
-            # a switch must also not be worse than what serving deploys today, so we
-            # never trade a recency-mean strawman win for a real-world regression.
+            # No-regression against the real serving incumbent (the category-median tier): a switch
+            # must not be worse than what serving deploys today.
             beats_serving = (cat_mae is None) or (best_ch_mae <= cat_mae)
             if best_ch_n >= min_origins and delta_pct >= switch_margin and beats_serving:
                 switched = True
@@ -314,8 +284,8 @@ def _aggregate_gate(long: pd.DataFrame, choice_map: dict, table: list) -> dict:
     cids = long["CropId"].astype(str).str.lower().to_numpy()
     # switched-vs-recmean: challenger where the crop switched, else recmean.
     sw = rec.copy()
-    # switched-vs-serving: challenger where switched, else the REAL served category
-    # tier — the honest "does this beat what we deploy today" pooled comparison.
+    # switched-vs-serving: the challenger where the crop switched, else the real served
+    # category tier - the honest 'does this beat what we deploy today' comparison.
     sw_serv = cat.copy()
     for cid, ch in choice_map.items():
         m = cids == cid
@@ -341,9 +311,8 @@ def _aggregate_gate(long: pd.DataFrame, choice_map: dict, table: list) -> dict:
                "aggregate pooled MAE did not improve -> withhold all switches"))
     return {"applied": applied, "reason": reason,
             "pooled_recmean_MAE": rec_mae, "pooled_switched_MAE": sw_mae,
-            # Honest real-world view: recency-mean is inflated by the cold-start
-            # global-mean fallback for recent-onset crops, so ALSO report vs the
-            # category-median tier serving actually deploys today.
+            # Recency-mean is inflated by the cold-start global-mean fallback for recent-onset crops,
+            # so also report against the category-median tier serving actually deploys.
             "pooled_serving_category_MAE": cat_mae,
             "pooled_switched_vs_serving_MAE": sw_serv_mae,
             "n_rows": n_rec, "n_switched_crops": len(choice_map),

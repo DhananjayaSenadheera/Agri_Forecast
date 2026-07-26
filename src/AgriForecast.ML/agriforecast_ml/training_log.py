@@ -1,49 +1,22 @@
-"""Model-training run log (admin Logs hub Phase 2, PR B).
+"""Model-training run log: every training run writes one ModelTrainingRuns row.
 
-Every model training run writes exactly one row to the ``ModelTrainingRuns``
-SQL table (schema OWNED by the .NET side / PR A -- this module is the
-sanctioned Python writer, mirroring ingest_verify.persist_verdict's posture for
-IngestionVerifications). The .NET admin API reads this table; the contract is
-FROZEN (see the column list below) -- do not add/rename columns here.
+The table schema is owned by the .NET side; this module is the sanctioned Python writer
+and the column contract is FROZEN - do not add or rename columns here.
 
-Two write primitives, both parameterized SQL over a SQLAlchemy engine (no ORM),
-matching db.py / ingest_verify.py:
+upsert_training_run UPSERTs one row keyed on the unique Version: UPDATE first, INSERT
+only if nothing matched, so a retrain that re-emits a version cannot trip the unique
+constraint. It deliberately does not touch Promoted.
 
-* ``upsert_training_run`` -- UPSERT one row keyed on the UNIQUE ``Version``.
-  Retrains that re-emit an existing version MUST NOT crash on the unique
-  constraint, so this is UPDATE-then-INSERT (rowcount-gated), never a blind
-  INSERT. It deliberately does NOT touch ``Promoted`` -- that flag is owned by
-  ``sync_promoted_flags`` (see below), so a retrain re-emitting a row never
-  disturbs the live pointer's truth.
+sync_promoted_flags owns Promoted: 1 for the live version, 0 for every other row. The
+live version is read from promoted.json AFTER the promotion decision, never echoed from a
+version's own metadata - a manual override can make the live pointer and the gate's
+recorded verdict legitimately disagree, and echoing metadata would mislabel the live
+model.
 
-* ``sync_promoted_flags`` -- set ``Promoted=1`` for the current live version and
-  ``Promoted=0`` for every other row, idempotently. The live version is sourced
-  from ``promoted.json`` AFTER the promotion decision has completed (by the
-  caller), NEVER echoed from a version's own metadata ``promoted`` field: v17 is
-  live via a MANUAL override yet its metadata says ``promoted=false``, so
-  ``Promoted`` (the live pointer) and ``DecisionPromoted`` (the gate's verdict
-  at train time) legitimately diverge. Echoing metadata would silently mislabel
-  the live model.
-
-Column contract (ModelTrainingRuns):
-  Id int identity; Version nvarchar(20) UNIQUE; TrainedAtUtc datetime2;
-  Promoted bit; DecisionPromoted bit; PromotionDecision nvarchar(2000) null;
-  BestMlKind nvarchar(50); BestMlMae decimal(10,2); BestBaselineKind nvarchar(50);
-  BestBaselineMae decimal(10,2); NTrainRows int; NCrops int;
-  FeatureContractHash nvarchar(100); CreatedUtc datetime2 (DB-default -- never
-  set here).
-
-Values are sourced from the same metadata dict ``registry.save_model`` builds
-(see ``values_from_metadata``); MAE values are rounded to 2dp to fit
-decimal(10,2), text fields are truncated to their column caps, and every field
-is None-safe.
-
-House rules honoured: never log a connection string / .env value; error text is
-redacted before any warning (see ``redact_sensitive``); no tracebacks/paths to
-stdout. These two primitives RAISE on a genuine DB error (they are unit-tested
-for correctness); the FAIL-OPEN posture -- a DB failure must never break
-training/saving -- lives in the caller (registry.save_model), exactly as
-ingest_verify.persist_verdict raises and its CLI catches.
+MAE values are rounded to fit decimal(10,2), text fields are truncated to their column
+caps and every field is None-safe. Never log a connection string or .env value; error
+text is redacted before any warning. Both primitives RAISE on a genuine DB error - the
+fail-open posture lives in the caller (registry.save_model).
 """
 from __future__ import annotations
 
@@ -55,9 +28,8 @@ import sqlalchemy as sa
 
 logger = logging.getLogger(__name__)
 
-# Column caps for nvarchar fields -- truncate defensively so a too-long value
-# never trips a DB length error (the log row is best-effort; losing a few
-# trailing chars of a reason string is preferable to failing the write).
+# Column caps for the nvarchar fields. Truncate defensively: losing a few trailing chars
+# of a reason string beats failing a best-effort log write on a length error.
 _VERSION_CAP = 20
 _PROMOTION_DECISION_CAP = 2000
 _KIND_CAP = 50
@@ -127,14 +99,12 @@ def _to_int(val: object) -> "int | None":
 
 
 def _to_datetime(val: object) -> object:
-    """Accept a datetime or an ISO-8601 string (as save_model records
-    trained_at via datetime.isoformat()); return a NAIVE-UTC datetime for the
-    datetime2 bind param. Tz-aware values are converted to UTC then stripped:
-    SQL Server datetime2 has no offset, pymssql's handling of tz-aware binds
-    is not something the fail-open hook would ever surface if it broke (the
-    row write would silently no-op in production), and the sibling writer
-    (ingest_verify) avoids Python-side datetimes entirely for this reason.
-    Non-parseable / None pass through unchanged (best-effort)."""
+    """Accept a datetime or an ISO-8601 string and return a NAIVE-UTC datetime.
+
+    SQL Server datetime2 has no offset, and a tz-aware bind would silently no-op in
+    production rather than raise, so tz-aware values are converted to UTC then stripped.
+    Non-parseable or None values pass through unchanged.
+    """
     if isinstance(val, str):
         try:
             val = datetime.fromisoformat(val)
@@ -146,14 +116,11 @@ def _to_datetime(val: object) -> object:
 
 
 def values_from_metadata(metadata: dict) -> dict:
-    """Extract the ModelTrainingRuns field values from the metadata dict
-    ``save_model`` builds. Reused by both the save_model hook and the backfill
-    script so train-time and backfill rows are populated identically.
+    """Extract the ModelTrainingRuns field values from the metadata dict save_model builds.
 
-    ``decision_promoted`` is sourced from ``metadata["promoted"]`` -- the gate's
-    verdict at train time (what save_model wrote). ``Promoted`` (the live
-    pointer) is NOT derived here; it is set separately by sync_promoted_flags
-    from promoted.json.
+    Shared by the save_model hook and the backfill script so train-time and backfill rows are
+    populated identically. decision_promoted comes from metadata['promoted'], the gate's
+    verdict at train time; Promoted is set separately by sync_promoted_flags.
     """
     cv = metadata.get("cv") or {}
     return {
@@ -221,14 +188,12 @@ def upsert_training_run(
     n_crops: object,
     feature_contract_hash: object,
 ) -> str:
-    """UPSERT one ModelTrainingRuns row keyed on the UNIQUE ``version``.
+    """UPSERT one ModelTrainingRuns row keyed on the unique version.
 
-    UPDATE first; if it matched no row, INSERT. This makes a retrain that
-    re-emits an existing version idempotent and crash-free (never a blind
-    INSERT that would trip the unique constraint). ``Promoted`` is intentionally
-    left untouched -- owned by sync_promoted_flags. Returns the version string.
+    UPDATE first, INSERT only if nothing matched, so a retrain re-emitting a version is
+    idempotent. Promoted is left untouched - sync_promoted_flags owns it.
 
-    Raises on a genuine DB error (caller decides fail-open vs propagate).
+    Raises on a genuine DB error; the caller decides whether to fail open.
     """
     params = {
         "version": _truncate(version, _VERSION_CAP),
@@ -260,14 +225,12 @@ _SYNC_SET_SQL = sa.text(
 
 
 def sync_promoted_flags(engine, live_version: str) -> None:
-    """Make the ``Promoted`` column truthful: exactly the row whose Version ==
-    ``live_version`` gets Promoted=1, every other row gets 0. Idempotent
-    (re-running is a no-op), two statements. ``live_version`` is the pointer
-    read from promoted.json AFTER the promotion decision completes -- never a
-    metadata ``promoted`` field. If no row matches live_version yet, all rows go
-    to 0 (truthful: nothing is flagged live until its row exists).
+    """Make Promoted truthful: 1 for live_version's row, 0 for every other row.
 
-    Raises on a genuine DB error (caller decides fail-open vs propagate).
+    Idempotent, two statements. live_version is the pointer read from promoted.json after the
+    promotion decision, never a metadata field. If no row matches it yet, every row goes to 0.
+
+    Raises on a genuine DB error; the caller decides whether to fail open.
     """
     lv = _truncate(live_version, _VERSION_CAP)
     with engine.begin() as conn:

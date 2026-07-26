@@ -1,89 +1,38 @@
-"""Post-ingestion data verification (R2 ingestion-log plan PR 2, ClickUp
-per agriforecast-ingestion-log-plan.md).
+"""Post-ingestion data verification.
 
-Runs a fixed 14-check battery AFTER the daily ingestion pass (.NET Worker +
-dec_mirror.py) and BEFORE build_features.py, and persists exactly one verdict
-row to ``IngestionVerifications`` (schema owned by PR 1's migration
-``CreateIngestionRunsAndVerifications`` -- this module is the sanctioned
-Python writer of that .NET-schema'd table, see IngestionVerification.cs's own
-docstring: "WRITTEN BY THE PYTHON SIDE later").
+Runs a fixed 14-check battery AFTER the daily ingestion pass and BEFORE build_features.py,
+and writes exactly one verdict row to IngestionVerifications (a table whose schema the
+.NET side owns; this module is its sanctioned Python writer). Read-only everywhere else -
+that verdict INSERT is the only write this module performs.
 
-Read-only against every price/reference table -- the ONLY write this module
-performs is the single verdict-row INSERT in ``persist_verdict``.
+Overall severity is the worst of the 14 (PASS < WARN < FAIL). A single FAIL fails the
+whole run and the CLI exits 1, which blocks build_features and training; a WARN exits 0
+and is informational.
 
-============================================================================
-DESIGN NOTES / non-obvious threshold choices
-============================================================================
+Non-obvious choices:
 
-Severity aggregation: overall = worst-of the 14 individual severities
-(PASS < WARN < FAIL). A single FAIL anywhere fails the whole verification
-run (run-daily.sh's ``set -euo pipefail`` + this CLI's exit code 1 blocks
-build_features/training on a FAIL; a WARN exits 0 and is informational).
-
-Check 1 (dec_row_count) thresholds are LIVE-MEASURED, not re-derived here
-(see the plan doc): WARN outside [78, 96], FAIL if <20 or >115, and a
-dedicated FAIL message when the count is exactly 0 (the feed simply hasn't
-run yet for this date -- a distinct, more actionable message than "78-96
-undershot").
-
-Checks 3-5 (non_positive_prices, min_gt_max, extreme_outlier) and check 8
-(harti_convention) are scoped to rows with ``RetrievedAtUtc`` within the
-last 24 hours, computed ONCE at the top of ``run_all_verifications`` and
-threaded through -- this is what makes check 3 "new rows only": the 196
-known-good historical DAMBULLA_DEC zero-price rows (see data_quality.py /
-dec_mirror.py "NON-POSITIVE PRICE HANDLING") were last (re-)ingested by a
-backfill batch that ran many months before any live run of this verifier,
-so they fall outside any 24h window and can never re-trigger this check --
-no separate historical-date exclusion list is needed.
-
-Check 6 (alias_regression) hardcodes the two adjudicated mapping facts this
-project has already fixed regressions for (Garlic ext-47 -> VEG000071, the
-Passion dual-ext-id-43/76 -> FRT000019 by-design pair) rather than deriving
-them generically -- these are fixed named assertions per the task brief, not
-a general alias-drift scanner (CommodityAliasResolver/heal_price_observation_crops
-already own that broader concern).
-
-Check 10 (mirror_currency)'s FAIL-vs-WARN split needs the PREVIOUS verdict
-row (queried by ``ORDER BY RunUtc DESC`` BEFORE this run's own row is
-inserted) so a single-run mirror lag (WARN, expected occasionally -- the
-mirror runs after market ingest, so a same-day date can legitimately not be
-mirrored yet within the same pass) is distinguished from a PERSISTENT lag
-(the same mismatch also present last run -> FAIL, something is stuck).
-
-Check 12 (mirror_fidelity) samples up to 50 rows (``MIRROR_FIDELITY_SAMPLE_SIZE``).
-NOTE: at n=50, ANY single mismatch already exceeds the 1% escalation
-threshold (1/50 = 2% > 1%), so in practice this check behaves as a strict
-0-mismatches-tolerated gate: 0 -> PASS, >=1 -> FAIL. The WARN branch is
-still implemented (mismatches present but the *fraction* <=1%) so the
-check's stated contract ("WARN on any mismatch; FAIL if >1% of sample")
-holds literally and remains correct if the sample size is ever widened
-past ~100 -- it is simply unreachable at the pinned n=50, which is the
-correct, conservative reading of the two clauses taken together rather
-than a silently invented third threshold.
-
-Check 13 (cross_source_dups) is the ONE check that reuses another module's
-own exception as its failure signal (``data_quality.assert_no_source_duplicates``
-raises ``AssertionError``) -- deliberately NOT wrapped in a generic
-try/except at the ``run_all_verifications`` level; every other check is a
-plain SELECT with no natural exception path, so a genuine unexpected
-exception elsewhere (e.g. a DB connectivity failure) is left to propagate
-all the way up to the CLI's own infra-error boundary (exit code 2) rather
-than being silently laundered into a misleading "FAIL check" that would
-make a totally-down DB look like "verification ran and found problems".
-
-Check 14 (gap_tiers)'s "recent window" is 14 days (``GAP_TIER_RECENT_WINDOW_DAYS``),
-NOT a reuse of ``data_quality.OUTLIER_ROLLING_WINDOW_DAYS`` (90 days) --
-that was the first design tried here and live-testing this exact module
-against the dev DB (2026-07-21) disproved it immediately: a 90-day window
-over the full multi-market HARTI corpus (10 markets, dozens of crops,
-Step 6's widening) turned up 49 ERROR-tier entries essentially every day,
-making the check a permanent, uninformative WARN rather than signal. 14
-days (two report cycles) is short enough that a gap closing this check
-flags is still genuinely "recent news" and the check returns to PASS on
-its own once nothing NEW has closed for two weeks, without requiring a
-separate acknowledgement/clearing mechanism (gap_tiers has none by design
--- see the task brief, "report-only"). Never FAILs -- even a live
-ERROR-tier gap in the recent window is WARN, not FAIL.
+* Check 1 (dec_row_count) thresholds are live-measured. A count of exactly 0 gets its own
+  FAIL message, because 'the feed has not run yet' is more actionable than 'undershot'.
+* Checks 3-5 and 8 only look at rows retrieved in the last 24 hours, which is what makes
+  them 'new rows only'. The known-good historical zero-price DEC rows were ingested long
+  before any live run of this verifier, so they can never re-trigger check 3 and no
+  historical exclusion list is needed.
+* Check 6 (alias_regression) asserts two adjudicated mapping facts by name rather than
+  scanning for alias drift generally - the resolver and the healer own that concern.
+* Check 10 (mirror_currency) reads the PREVIOUS verdict row before this run's own row is
+  inserted, so a one-off mirror lag (WARN - the mirror runs after market ingest) is
+  distinguished from a persistent lag (FAIL - something is stuck).
+* Check 12 (mirror_fidelity) samples 50 rows, where a single mismatch is already 2% and
+  so exceeds the 1% escalation threshold: in practice 0 mismatches PASS and any mismatch
+  FAILs. The WARN branch stays implemented so the stated contract still holds if the
+  sample size is ever widened.
+* Check 13 (cross_source_dups) is the only check that uses another module's exception as
+  its failure signal. It is deliberately not wrapped in a generic try/except, so a real
+  infrastructure failure propagates to the CLI's exit code 2 rather than being laundered
+  into a misleading 'verification ran and found problems'.
+* Check 14 (gap_tiers) uses a 14-day window, not the 90-day outlier window: 90 days over
+  the full multi-market corpus turned up ERROR-tier entries essentially every day, making
+  the check permanent noise. It never FAILs - even a live ERROR-tier gap is a WARN.
 """
 from __future__ import annotations
 
@@ -105,32 +54,32 @@ logger = logging.getLogger(__name__)
 DEC_SOURCE = "DAMBULLA_DEC"
 HARTI_SOURCE = "HARTI"
 
-# --- Check 1: dec_row_count -------------------------------------------------
+# Check 1: dec_row_count.
 DEC_ROW_COUNT_WARN_LOW = 78
 DEC_ROW_COUNT_WARN_HIGH = 96
 DEC_ROW_COUNT_FAIL_LOW = 20
 DEC_ROW_COUNT_FAIL_HIGH = 115
 
-# --- Check 5: extreme_outlier ------------------------------------------------
+# Check 5: extreme_outlier.
 EXTREME_OUTLIER_THRESHOLD = 5000
 
-# --- Check 6: alias_regression -----------------------------------------------
+# Check 6: alias_regression.
 GARLIC_EXTERNAL_PRODUCT_ID = 47
 GARLIC_CROP_CODE = "VEG000071"
 PASSION_EXTERNAL_PRODUCT_IDS = (43, 76)
 PASSION_CROP_CODE = "FRT000019"
 
-# --- Check 9: harti_freshness -------------------------------------------------
+# Check 9: harti_freshness.
 HARTI_FRESHNESS_WARN_MAX_DAYS = 2   # PASS if <= this
 HARTI_FRESHNESS_FAIL_MAX_DAYS = 5   # WARN if <= this (and > WARN bound); FAIL beyond
 
-# --- Check 12: mirror_fidelity -----------------------------------------------
+# Check 12: mirror_fidelity.
 MIRROR_FIDELITY_SAMPLE_SIZE = 50
 MIRROR_FIDELITY_FAIL_FRACTION = 0.01  # see module docstring: unreachable at n=50
 
-# --- Check 14: gap_tiers -------------------------------------------------------
-# 14 days, NOT data_quality.OUTLIER_ROLLING_WINDOW_DAYS (90) -- see module
-# docstring "Check 14" for the live-DB evidence that ruled out 90 days.
+# Check 14: gap_tiers. 14 days, not the 90-day outlier window: 90 days over the full
+# multi-market corpus produced ERROR-tier entries every day, making the check permanent
+# noise rather than signal.
 GAP_TIER_RECENT_WINDOW_DAYS = 14
 
 _SEVERITY_RANK = {"PASS": 0, "WARN": 1, "FAIL": 2}
@@ -166,9 +115,6 @@ def _coerce_date(value) -> "date | None":
     return value
 
 
-# ============================================================================
-# 1. dec_row_count
-# ============================================================================
 
 def _check_dec_row_count(engine, pipeline_date: date) -> CheckResult:
     with engine.connect() as conn:
@@ -207,9 +153,6 @@ def _check_dec_row_count(engine, pipeline_date: date) -> CheckResult:
     )
 
 
-# ============================================================================
-# 2. dec_unmapped
-# ============================================================================
 
 def _check_dec_unmapped(engine, pipeline_date: date) -> CheckResult:
     with engine.connect() as conn:
@@ -233,10 +176,7 @@ def _check_dec_unmapped(engine, pipeline_date: date) -> CheckResult:
     )
 
 
-# ============================================================================
-# 3. non_positive_prices  /  4. min_gt_max  /  5. extreme_outlier
-# (scoped to RetrievedAtUtc >= since_utc -- "new rows only", see module docstring)
-# ============================================================================
+# Checks 3-5 are scoped to RetrievedAtUtc >= since_utc, i.e. new rows only.
 
 def _check_non_positive_prices(engine, since_utc: datetime) -> CheckResult:
     with engine.connect() as conn:
@@ -324,9 +264,6 @@ def _check_extreme_outlier(engine, since_utc: datetime) -> CheckResult:
     )
 
 
-# ============================================================================
-# 6. alias_regression
-# ============================================================================
 
 def _check_alias_regression(engine) -> CheckResult:
     with engine.connect() as conn:
@@ -392,9 +329,6 @@ def _check_alias_regression(engine) -> CheckResult:
     )
 
 
-# ============================================================================
-# 7. natural_key_dups
-# ============================================================================
 
 def _check_natural_key_dups(engine) -> CheckResult:
     with engine.connect() as conn:
@@ -447,9 +381,6 @@ def _check_natural_key_dups(engine) -> CheckResult:
     )
 
 
-# ============================================================================
-# 8. harti_convention
-# ============================================================================
 
 def _check_harti_convention(engine, since_utc: datetime) -> CheckResult:
     with engine.connect() as conn:
@@ -480,9 +411,6 @@ def _check_harti_convention(engine, since_utc: datetime) -> CheckResult:
     )
 
 
-# ============================================================================
-# 9. harti_freshness
-# ============================================================================
 
 def _check_harti_freshness(engine, pipeline_date: date) -> CheckResult:
     with engine.connect() as conn:
@@ -524,9 +452,6 @@ def _check_harti_freshness(engine, pipeline_date: date) -> CheckResult:
     )
 
 
-# ============================================================================
-# 10. mirror_currency
-# ============================================================================
 
 def _check_mirror_currency(engine) -> CheckResult:
     with engine.connect() as conn:
@@ -574,11 +499,10 @@ def _check_mirror_currency(engine) -> CheckResult:
 
 
 def _prior_mirror_currency_mismatched(prev_row) -> bool:
-    """Inspect the previous IngestionVerifications row's ChecksJson for a
-    mirror_currency entry that was already WARN/FAIL last time -- see module
-    docstring "Check 10" note. Defensive: any parse failure (malformed JSON,
-    missing row, missing entry) is treated as "not previously mismatched"
-    (fail-open towards WARN, never a spurious FAIL from a parsing accident).
+    """Was the previous verdict row's mirror_currency entry already WARN or FAIL?
+
+    Defensive: any parse failure (malformed JSON, missing row, missing entry) counts as 'not
+    previously mismatched', so a parsing accident can only soften to WARN, never invent a FAIL.
     """
     if prev_row is None:
         return False
@@ -592,9 +516,6 @@ def _prior_mirror_currency_mismatched(prev_row) -> bool:
     return False
 
 
-# ============================================================================
-# 11. mirror_idempotency
-# ============================================================================
 
 def _check_mirror_idempotency(engine) -> CheckResult:
     report = dec_mirror.dry_run_report(engine)
@@ -615,9 +536,6 @@ def _check_mirror_idempotency(engine) -> CheckResult:
     )
 
 
-# ============================================================================
-# 12. mirror_fidelity
-# ============================================================================
 
 def _check_mirror_fidelity(engine) -> CheckResult:
     with engine.connect() as conn:
@@ -671,9 +589,6 @@ def _check_mirror_fidelity(engine) -> CheckResult:
     )
 
 
-# ============================================================================
-# 13. cross_source_dups
-# ============================================================================
 
 def _check_cross_source_dups(engine) -> CheckResult:
     try:
@@ -688,9 +603,6 @@ def _check_cross_source_dups(engine) -> CheckResult:
     )
 
 
-# ============================================================================
-# 14. gap_tiers
-# ============================================================================
 
 def _check_gap_tiers(engine, pipeline_date: date) -> CheckResult:
     report = dq.gap_report(engine, source=HARTI_SOURCE)
@@ -718,9 +630,6 @@ def _check_gap_tiers(engine, pipeline_date: date) -> CheckResult:
     )
 
 
-# ============================================================================
-# Orchestration
-# ============================================================================
 
 def run_all_verifications(
     engine: "sa.engine.Engine | None" = None,
@@ -730,34 +639,19 @@ def run_all_verifications(
 ) -> dict:
     """Run the full 14-check battery and return a structured report.
 
-    Read-only: never writes. ``pipeline_date`` defaults to
-    ``datetime.now(timezone.utc).date()`` -- deliberately UTC, NOT the
-    runner's local date (``date.today()``). PriceDate/ObservedDate in the DB
-    and the DEC mirror's own vintage are UTC-anchored, and dec_row_count /
-    dec_unmapped filter ``PriceDate = pipeline_date`` directly -- a runner
-    whose local calendar date lags UTC (e.g. a US-timezone box a few hours
-    before UTC midnight) would otherwise verify the WRONG market date and
-    spuriously FAIL "no rows for date" against a date that simply hasn't
-    happened yet in UTC. (The date being verified is still, in practice,
-    "today" for the daily cron; the CLI can also point at any past date for
-    a manual re-check.) ``batch_id`` is accepted for API symmetry with
-    ``persist_verdict`` but is NOT included in the returned dict (kept to
-    exactly the shape the caller/tests expect).
+    Read-only: never writes. pipeline_date defaults to the current UTC date, deliberately not
+    the runner's local date - the DB dates are UTC-anchored, so a runner a few hours behind
+    UTC would otherwise verify a date that has not happened yet and spuriously FAIL. batch_id
+    is accepted for symmetry with persist_verdict but is not part of the returned dict.
 
-    Returns:
-        {
-          "overall": "PASS" | "WARN" | "FAIL",   # worst-of the 14 checks
-          "checks": [ {name, severity, message, counts}, ... ],  # in fixed order
-          "n_pass": int, "n_warn": int, "n_fail": int,
-          "pipeline_date": "YYYY-MM-DD",
-          "duration_ms": int,
-        }
+    Returns {overall, checks, n_pass, n_warn, n_fail, pipeline_date, duration_ms}, where
+    overall is the worst of the 14 severities and checks is in a fixed order.
     """
     eng = _engine_or_default(engine)
 
     start = time.monotonic()
     now_utc = datetime.now(timezone.utc)
-    # UTC, not date.today() -- see docstring above (S1 review fix).
+    # UTC, not date.today() - see the docstring above.
     pd = pipeline_date if pipeline_date is not None else now_utc.date()
     since_24h = now_utc - timedelta(hours=24)
 
@@ -807,11 +701,11 @@ _OVERALL_STATUS_CODE = {"PASS": 0, "WARN": 1, "FAIL": 2}
 
 
 def _build_summary(result: dict) -> str:
-    """Short, human-facing, PATH-FREE summary line for the Summary column
-    (<=1000 chars, DB-enforced by nvarchar(1000) but also truncated here
-    defensively). Only check NAMES (not full messages) are included for
-    non-PASS checks -- full detail lives in ChecksJson, so this line can
-    never accidentally carry a path/traceback fragment from a check message.
+    """Short, human-facing, PATH-FREE summary line for the Summary column.
+
+    Capped at 1000 chars to match the column. Only check NAMES are included for non-PASS
+    checks - full detail lives in ChecksJson, so this line can never carry a path or
+    traceback fragment from a check message.
     """
     overall = result["overall"]
     pd = result["pipeline_date"]
@@ -833,16 +727,12 @@ def persist_verdict(
 ) -> uuid.UUID:
     """Insert exactly one verdict row into IngestionVerifications.
 
-    ``result`` must be the dict returned by ``run_all_verifications``.
-    RunUtc/CreatedAtUtc are stamped by SQL Server's SYSUTCDATETIME() (never
-    a Python-side clock value) -- same convention as dec_mirror.py's
-    RetrievedAtUtc, avoiding any Python/DB clock-skew concern. Id is
-    generated here (uuid4) since the Python side, not EF, owns this insert
-    (see IngestionVerification.cs's own docstring).
+    result must be the dict returned by run_all_verifications. RunUtc and CreatedAtUtc are
+    stamped by SQL Server's SYSUTCDATETIME(), never a Python-side clock, so there is no
+    clock-skew concern. Id is generated here because the Python side owns this insert.
 
-    Raises on any DB failure (caller -- the CLI -- is responsible for
-    catching this and mapping it to exit code 2, distinct from a
-    verification FAIL which is exit code 1).
+    Raises on any DB failure; the CLI maps that to exit code 2, distinct from a verification
+    FAIL, which is exit code 1.
     """
     if result is None:
         raise ValueError("persist_verdict: result is required")
