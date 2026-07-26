@@ -80,7 +80,7 @@ public class UserActivityAudit : IUserActivityAudit
     // WELL under the 500-char Details column even before the entity's own cap (an admin can type a
     // very long title; the audit trail only needs enough to recognise the row). A blank identifier
     // renders the bare verb rather than an empty-quoted "created ''".
-    internal static string RenderDetails(ContentChangeAction action, string? identifier)
+    public static string RenderDetails(ContentChangeAction action, string? identifier)
     {
         var verb = action switch
         {

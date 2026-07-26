@@ -249,6 +249,199 @@ public class AdminLogsHandlerTests
         ((int)type).Should().Be(expected);
     }
 
+    // ── CONTENT events: the five appended types ─────────────────────────────────────
+    [Theory]
+    [InlineData(UserActivityEventType.PolicyFlagChanged, "policyFlagChanged")]
+    [InlineData(UserActivityEventType.FestivalChanged, "festivalChanged")]
+    [InlineData(UserActivityEventType.NewsEventChanged, "newsEventChanged")]
+    [InlineData(UserActivityEventType.CropChanged, "cropChanged")]
+    [InlineData(UserActivityEventType.MarketChanged, "marketChanged")]
+    public void ContentEventStrings_ToWire_AreFrozenLowercase(UserActivityEventType type, string expected)
+    {
+        UserActivityEventStrings.ToWire(type).Should().Be(expected);
+    }
+
+    // Appended AFTER the original five, never renumbered — the column stores the int.
+    [Theory]
+    [InlineData(UserActivityEventType.PolicyFlagChanged, 5)]
+    [InlineData(UserActivityEventType.FestivalChanged, 6)]
+    [InlineData(UserActivityEventType.NewsEventChanged, 7)]
+    [InlineData(UserActivityEventType.CropChanged, 8)]
+    [InlineData(UserActivityEventType.MarketChanged, 9)]
+    public void ContentEventType_NumericValues_ArePinned(UserActivityEventType type, int expected)
+    {
+        ((int)type).Should().Be(expected);
+    }
+
+    // The trap this guards: a type mapped by ToWire but MISSING from KnownTypes is readable and
+    // completely unfilterable — its own wire string 400s. Enumerate the enum so a future member
+    // cannot be half-added.
+    [Fact]
+    public void EventStrings_MappingCoversEveryEnumMember()
+    {
+        var all = Enum.GetValues<UserActivityEventType>();
+
+        UserActivityEventStrings.KnownTypes.Should().HaveCount(all.Length);
+
+        foreach (var type in all)
+        {
+            var wire = UserActivityEventStrings.ToWire(type);
+            UserActivityEventStrings.KnownTypes.Should().Contain(wire,
+                $"{type} must be filterable, not just renderable");
+            UserActivityEventStrings.IsKnown(wire).Should().BeTrue();
+            UserActivityEventStrings.TryParse(wire).Should().Be(type, "the mapping must round-trip");
+        }
+    }
+
+    [Fact]
+    public async Task Activity_ContentEvent_MapsActorAndDetails_WithNoTargetUser()
+    {
+        var admin = Guid.NewGuid();
+        var store = new FakeStore();
+        store.Activity.Add((ARow(UserActivityEventType.CropChanged, DateTime.UtcNow,
+            actor: admin, details: "deleted 'VEG000071'"), 1));
+
+        var dto = (await ActivityHandler(store).Handle(new GetUserActivityQuery(), default)).Data;
+
+        var item = dto.Items.Single();
+        item.EventType.Should().Be("cropChanged");
+        item.ActorUserId.Should().Be(admin);
+        item.TargetUserId.Should().BeNull("content events act on content, not on a user");
+        item.Details.Should().Be("deleted 'VEG000071'");
+    }
+
+    // ── ?types= : OR-combined multi filter ──────────────────────────────────────────
+    private static FakeStore MixedActivityStore()
+    {
+        var store = new FakeStore();
+        store.Activity.Add((ARow(UserActivityEventType.LoginSucceeded, DateTime.UtcNow.AddMinutes(-1),
+            actor: Guid.NewGuid()), 1));
+        store.Activity.Add((ARow(UserActivityEventType.PolicyFlagChanged, DateTime.UtcNow.AddMinutes(-2),
+            actor: Guid.NewGuid(), details: "created 'SUGAR-TAX'"), 2));
+        store.Activity.Add((ARow(UserActivityEventType.FestivalChanged, DateTime.UtcNow.AddMinutes(-3),
+            actor: Guid.NewGuid(), details: "updated 'VESAK 2027-05-10'"), 3));
+        store.Activity.Add((ARow(UserActivityEventType.CropChanged, DateTime.UtcNow.AddMinutes(-4),
+            actor: Guid.NewGuid(), details: "deleted 'VEG000071'"), 4));
+        return store;
+    }
+
+    [Fact]
+    public async Task Activity_TypesFilter_IsOrCombined_AndExcludesEverythingElse()
+    {
+        var store = MixedActivityStore();
+
+        var dto = (await ActivityHandler(store).Handle(
+            new GetUserActivityQuery { Types = "policyFlagChanged,festivalChanged" }, default)).Data;
+
+        store.CapturedTypes.Should().BeEquivalentTo(new[]
+        {
+            UserActivityEventType.PolicyFlagChanged, UserActivityEventType.FestivalChanged
+        });
+        dto.Total.Should().Be(2);
+        dto.Items.Select(i => i.EventType).Should().BeEquivalentTo(new[]
+        {
+            UserActivityEventStrings.PolicyFlagChanged, UserActivityEventStrings.FestivalChanged
+        });
+    }
+
+    [Theory]
+    [InlineData("cropChanged")]                     // single token via ?types=
+    [InlineData(" cropChanged ")]                   // padded tokens are trimmed
+    [InlineData("CROPCHANGED")]                     // case-insensitive
+    [InlineData("cropChanged,cropChanged")]         // duplicates collapse
+    [InlineData("cropChanged,,")]                   // empty tokens are ignored, not rejected
+    public async Task Activity_TypesFilter_NormalizesTokens(string types)
+    {
+        var store = MixedActivityStore();
+
+        var dto = (await ActivityHandler(store).Handle(
+            new GetUserActivityQuery { Types = types }, default)).Data;
+
+        store.CapturedTypes.Should().BeEquivalentTo(new[] { UserActivityEventType.CropChanged });
+        dto.Items.Should().ContainSingle().Which.EventType.Should().Be("cropChanged");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Activity_BlankTypes_IsNoFilter_NotAnEmptyResult(string? types)
+    {
+        var store = MixedActivityStore();
+
+        var dto = (await ActivityHandler(store).Handle(
+            new GetUserActivityQuery { Types = types }, default)).Data;
+
+        store.CapturedTypes.Should().BeNull("an absent filter must never become an empty IN clause");
+        dto.Total.Should().Be(4);
+    }
+
+    [Fact]
+    public async Task Activity_TypesWins_WhenBothTypeAndTypesAreGiven()
+    {
+        var store = MixedActivityStore();
+
+        var dto = (await ActivityHandler(store).Handle(
+            new GetUserActivityQuery { Type = "loginSucceeded", Types = "cropChanged" }, default)).Data;
+
+        store.CapturedTypes.Should().BeEquivalentTo(new[] { UserActivityEventType.CropChanged });
+        dto.Items.Should().ContainSingle().Which.EventType.Should().Be("cropChanged");
+    }
+
+    [Fact]
+    public async Task Activity_SingleTypeStillWorks_Unchanged()
+    {
+        var store = MixedActivityStore();
+
+        var dto = (await ActivityHandler(store).Handle(
+            new GetUserActivityQuery { Type = "policyFlagChanged" }, default)).Data;
+
+        store.CapturedTypes.Should().BeEquivalentTo(new[] { UserActivityEventType.PolicyFlagChanged });
+        dto.Items.Should().ContainSingle().Which.EventType.Should().Be("policyFlagChanged");
+    }
+
+    // ── ?types= validation ──────────────────────────────────────────────────────────
+    [Theory]
+    [InlineData("notAType")]
+    [InlineData("cropChanged,notAType")]            // ONE bad token rejects the WHOLE list
+    [InlineData("policyFlagChanged,crop_changed")]
+    public async Task ActivityValidator_RejectsAnyUnknownTypesToken(string types)
+    {
+        var result = await _activityValidator.ValidateAsync(
+            new GetUserActivityQuery { Page = 1, PageSize = 20, Types = types });
+
+        result.IsValid.Should().BeFalse(
+            "a partly-valid list must 400, never be silently narrowed into a page that reads as complete");
+    }
+
+    [Fact]
+    public async Task ActivityValidator_UnknownTypesMessage_NamesTheOffendingToken()
+    {
+        var result = await _activityValidator.ValidateAsync(
+            new GetUserActivityQuery { Page = 1, PageSize = 20, Types = "cropChanged,notAType" });
+
+        var message = string.Join(" ", result.Errors.Select(e => e.ErrorMessage));
+        // The message names ONLY the offending token as unknown ("one of these ten is wrong" is not
+        // actionable). It also lists the known types for reference, so assert on the unknown clause
+        // specifically rather than on the whole string.
+        message.Should().Contain("unknown event type(s): notAType.");
+        message.Should().Contain("Known event types:");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("cropChanged")]
+    [InlineData("loginSucceeded,userDeleted,marketChanged")]
+    [InlineData("cropChanged, festivalChanged")]     // padded token
+    public async Task ActivityValidator_AllowsBlankOrAllKnownTypes(string? types)
+    {
+        var result = await _activityValidator.ValidateAsync(
+            new GetUserActivityQuery { Page = 1, PageSize = 20, Types = types });
+
+        result.IsValid.Should().BeTrue();
+    }
+
     // ── SYSTEM-ERRORS: paging + newest-first tiebreak + mapping ─────────────────────
     [Fact]
     public async Task Errors_PagingMath_ReturnsRequestedPageAndTotal()
