@@ -1,6 +1,23 @@
 """QA harness for the feature pipeline. Independently recomputes features and
-runs a leakage-by-truncation test (the decisive no-leakage check)."""
+runs a leakage-by-truncation test (the decisive no-leakage check).
+
+Wired into the nightly K8s pipeline (k8s/pipeline-daily.yaml) as
+`build_features.py && qa_features.py` in the main container. This is
+DETECTION, not PREVENTION: build_features.py has already persisted
+CropFeatureDaily (if_exists='replace') by the time this runs, so a QA
+failure means bad features are already live in the store -- it does not
+block the write. A non-zero exit here fails the Job so the failure is
+visible (admin Logs page / health endpoint), same as any other pipeline
+step, but the bad data has already landed.
+
+KNOWN GAP (not fixed here, see memory agriforecast-qa-features-contract.md):
+TC5/TC5b call build_all() WITHOUT festivals/macro/price_obs/market_slugs, so
+real leakage coverage is 42 of 76 feature columns. Widening that coverage is
+a separate task.
+"""
 from __future__ import annotations
+
+import sys
 
 import numpy as np
 import pandas as pd
@@ -249,7 +266,11 @@ def main():
     print(f"\n=== RESULT: {len(passed)} passed, {len(failed)} failed ===")
     if failed:
         print("FAILED:", failed)
+    # Non-zero exit on any failure -- the whole reason this is wired into the
+    # nightly pipeline is so a QA failure fails the container (and the K8s
+    # Job) rather than printing a message nobody is watching.
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -9,6 +9,18 @@
 # ASSEMBLED IN-POD from the agri-db secret via Kubernetes $(VAR) dependent
 # env expansion; Jwt__Key and MlService__AdminApiKey come straight from the
 # agri-jwt / agri-ml-key secrets.
+#
+# RESOURCES: no metrics-server on this cluster (kubectl top errors "Metrics
+# API not available"), so these are conservative documented defaults, not
+# autoscaler-derived -- cross-checked against `docker stats` on the live pod
+# (idle: ~41MiB / 7.6GiB-host-ceiling, i.e. no meaningful container limit was
+# in effect before this change). 256Mi-1Gi gives ~6x headroom over observed
+# idle for EF Core + JSON serialization under real request load.
+#
+# SECURITY CONTEXT: the image already runs as the aspnet base image's
+# built-in non-root 'app' user (`USER $APP_UID` in the Dockerfile, uid 1654 —
+# verified via `docker run --rm --entrypoint id agriforecast-api:latest`), so
+# runAsNonRoot is a true statement here, not an assertion.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -106,6 +118,14 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 20
             failureThreshold: 3
+          resources:
+            requests: { memory: "256Mi", cpu: "100m" }
+            limits: { memory: "1Gi", cpu: "500m" }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1654 # the image's built-in 'app' user ($APP_UID)
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
 ---
 apiVersion: v1
 kind: Service

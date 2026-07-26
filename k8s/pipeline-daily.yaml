@@ -1,7 +1,17 @@
 # Daily data pipeline — the Kubernetes port of run-daily.sh (launchd, 16:30 UK
-# = 21:00 Colombo). Six sequential steps with the SAME ordering and the SAME
+# = 21:00 Colombo). Seven sequential steps with the SAME ordering and the SAME
 # verify gate:
 #
+#   [0] wait-for-sql          <- SQL COLD-START GATE (PR #62 declared follow-up):
+#                                 bounded TCP poll of host.docker.internal:1434
+#                                 so a dead/not-yet-up DB fails visibly here
+#                                 (exit 1, ~5 min ceiling) instead of the old
+#                                 failure mode -- ingestion dying immediately
+#                                 against a cold DB with no retry (backoffLimit:
+#                                 0). Does not replace `docker update --restart
+#                                 unless-stopped sql_server_container` (still
+#                                 the fix for the DB not being up at all); this
+#                                 is the bounded wait for "up but not ready yet".
 #   [1] ingestion (market+weather, .NET worker, Ingestion__RunOnce=true baked)
 #   [2] mirror_dec_prices.py   (DAMBULLA_DEC -> PriceObservations)
 #   [3] verify_ingestion.py    <- THE GATE: non-zero exit fails the pod here,
@@ -10,7 +20,16 @@
 #                                 set -e abort)
 #   [4] ingest_news.py
 #   [5] score_news.py
-#   [6] build_features.py      (main container — the pipeline's "payload")
+#   [6] build_features.py && qa_features.py  (main container — the payload,
+#       then a QA gate). qa_features.py is DETECTION not PREVENTION: by the
+#       time it runs, build_features.py has already persisted CropFeatureDaily
+#       (if_exists='replace'), so a QA failure means bad features are already
+#       live in the store. Its only job here is to fail the container loudly
+#       (non-zero exit -> Job Failed -> surfaces in the admin Logs page) so a
+#       broken build doesn't pass silently, the way it did before this wire-up
+#       (the harness previously only ran by hand). Known gap: TC5/TC5b's
+#       leakage check covers 42 of 76 feature columns (missing
+#       festivals/macro/price_obs/market_slugs) -- see qa_features.py header.
 #
 # Sequencing is expressed as initContainers (k8s runs them strictly in order,
 # each must exit 0 before the next starts) with build_features as the main
@@ -25,6 +44,25 @@
 # uuid to an emptyDir volume (/shared/batch_id) and those two steps read it
 # via a small sh -c wrapper. The other steps don't take a batch id — same as
 # the script.
+#
+# RESOURCES: conservative, hand-picked defaults (no metrics-server on this
+# cluster, so not autoscaler-derived) -- see k8s/README.md "Resource sizing"
+# for the measurements and reasoning behind each tier. Trivial shell steps get
+# a small fixed footprint; python steps that only do light DB I/O get a
+# shared tier; build-features+qa_features (loads the full CropFeatureDaily
+# table twice via pandas, plus qa_features' TC5 double feature rebuild) gets
+# the heaviest pipeline tier.
+#
+# SECURITY CONTEXT: forecast-ingestion already runs as the image's built-in
+# non-root 'app' user (uid 1654, same as forecast-api -- see
+# AgriForecast.Ingestion/Dockerfile). agriforecast-ml (python:3.12-slim) has
+# NO non-root user baked in -- verified empirically (`docker run --rm
+# --entrypoint id agriforecast-ml:latest` -> uid=0(root)) -- so runAsNonRoot
+# is honestly NOT set for those containers; forcing it would crash-loop every
+# python step. They still get allowPrivilegeEscalation:false + capabilities
+# drop ALL, which doesn't require non-root. Making the ML image non-root is a
+# separate follow-up (Dockerfile surgery: add a user, chown /app, verify pip
+# packages + shap/xgboost still load).
 #
 # LIVE SCHEDULE (suspend: false). The cutover happened 2026-07-26: launchd is
 # retired and this CronJob is the production schedule. The manifest must say
@@ -62,7 +100,41 @@ spec:
         spec:
           restartPolicy: Never
           initContainers:
-            # [0] Generate the single batch id shared by steps 1 and 3.
+            # [0] SQL cold-start gate. Bounded TCP poll (5s interval, 300s
+            # ceiling) of host.docker.internal:1434 -- BEFORE anything that
+            # touches the DB. Uses the already-cached agriforecast-ml image
+            # (python's stdlib socket module) rather than pulling busybox, so
+            # this needs no network access to Docker Hub to work offline.
+            # Exits 1 (visible Job failure) rather than hanging forever if SQL
+            # never comes up -- the "dead DB" case run-daily.sh's exit trap
+            # used to catch, that a bare CronJob step would otherwise just
+            # fail once against a cold DB with backoffLimit: 0 and no retry.
+            - name: wait-for-sql
+              image: agriforecast-ml:latest
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-c"]
+              args:
+                - |
+                  import socket, sys, time
+                  host, port, timeout_s, interval_s = "host.docker.internal", 1434, 300, 5
+                  deadline = time.time() + timeout_s
+                  while time.time() < deadline:
+                      try:
+                          with socket.create_connection((host, port), timeout=5):
+                              print(f"SQL reachable at {host}:{port}")
+                              sys.exit(0)
+                      except OSError as e:
+                          print(f"SQL not yet reachable at {host}:{port} ({e}); retrying in {interval_s}s...")
+                          time.sleep(interval_s)
+                  print(f"SQL still unreachable at {host}:{port} after {timeout_s}s -- failing visibly (cold-start gate)")
+                  sys.exit(1)
+              resources:
+                requests: { memory: "32Mi", cpu: "10m" }
+                limits: { memory: "64Mi", cpu: "100m" }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+            # [1] Generate the single batch id shared by steps 2 and 4.
             - name: batch-id
               image: agriforecast-ml:latest
               imagePullPolicy: IfNotPresent
@@ -80,7 +152,13 @@ spec:
                   echo "batch id: $(cat /shared/batch_id)"
               volumeMounts:
                 - { name: shared, mountPath: /shared }
-            # [1] Market + weather ingestion (.NET worker; exits after one
+              resources:
+                requests: { memory: "16Mi", cpu: "10m" }
+                limits: { memory: "32Mi", cpu: "50m" }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+            # [2] Market + weather ingestion (.NET worker; exits after one
             # pass thanks to the baked Ingestion__RunOnce=true, which the
             # exec below preserves).
             - name: ingestion
@@ -122,7 +200,15 @@ spec:
                     secretKeyRef: { name: agri-ml-key, key: ML_ADMIN_API_KEY }
               volumeMounts:
                 - { name: shared, mountPath: /shared, readOnly: true }
-            # [2] Mirror DAMBULLA_DEC MarketPrices -> PriceObservations.
+              resources:
+                requests: { memory: "128Mi", cpu: "100m" }
+                limits: { memory: "512Mi", cpu: "500m" }
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1654 # the image's built-in 'app' user ($APP_UID)
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+            # [3] Mirror DAMBULLA_DEC MarketPrices -> PriceObservations.
             - name: mirror-dec
               image: agriforecast-ml:latest
               imagePullPolicy: IfNotPresent
@@ -132,7 +218,13 @@ spec:
               env:
                 - name: AGRI_DB_HOST
                   value: host.docker.internal # overrides the secret's local value
-            # [3] THE VERIFY GATE — 14-check battery. FAIL (exit 1) stops the
+              resources:
+                requests: { memory: "128Mi", cpu: "100m" }
+                limits: { memory: "512Mi", cpu: "500m" }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+            # [4] THE VERIFY GATE — 14-check battery. FAIL (exit 1) stops the
             # pod right here: news, sentiment and build_features never run,
             # exactly like run-daily.sh's set -e abort.
             - name: verify
@@ -148,7 +240,13 @@ spec:
                   value: host.docker.internal
               volumeMounts:
                 - { name: shared, mountPath: /shared, readOnly: true }
-            # [4] News RSS ingestion (NewsArticles).
+              resources:
+                requests: { memory: "128Mi", cpu: "100m" }
+                limits: { memory: "512Mi", cpu: "500m" }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+            # [5] News RSS ingestion (NewsArticles).
             - name: ingest-news
               image: agriforecast-ml:latest
               imagePullPolicy: IfNotPresent
@@ -158,7 +256,13 @@ spec:
               env:
                 - name: AGRI_DB_HOST
                   value: host.docker.internal
-            # [5] Score news sentiment (NewsSentimentDaily).
+              resources:
+                requests: { memory: "128Mi", cpu: "100m" }
+                limits: { memory: "512Mi", cpu: "500m" }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+            # [6] Score news sentiment (NewsSentimentDaily).
             - name: score-news
               image: agriforecast-ml:latest
               imagePullPolicy: IfNotPresent
@@ -168,17 +272,39 @@ spec:
               env:
                 - name: AGRI_DB_HOST
                   value: host.docker.internal
+              resources:
+                requests: { memory: "128Mi", cpu: "100m" }
+                limits: { memory: "512Mi", cpu: "500m" }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
           containers:
-            # [6] Rebuild the feature store (CropFeatureDaily).
+            # [7] Rebuild the feature store (CropFeatureDaily), then run the
+            # QA harness against what was just persisted. QA is detection,
+            # not prevention -- see header comment above. Either half failing
+            # (build or QA) fails this container non-zero -> Job Failed.
+            # Heaviest pipeline tier: build_features loads the full price/
+            # weather/fx/policy/sentiment history via pandas and rebuilds
+            # features for ~96 crops; qa_features re-reads the full
+            # CropFeatureDaily table AND rebuilds Beans' 11-year history twice
+            # more for the TC5 leakage-by-truncation check.
             - name: build-features
               image: agriforecast-ml:latest
               imagePullPolicy: IfNotPresent
-              command: ["python", "build_features.py"]
+              command: ["sh", "-c"]
+              args:
+                - python build_features.py && python qa_features.py
               envFrom:
                 - secretRef: { name: agri-db }
               env:
                 - name: AGRI_DB_HOST
                   value: host.docker.internal
+              resources:
+                requests: { memory: "512Mi", cpu: "250m" }
+                limits: { memory: "1536Mi", cpu: "1000m" }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
           volumes:
             - name: shared
               emptyDir: {}

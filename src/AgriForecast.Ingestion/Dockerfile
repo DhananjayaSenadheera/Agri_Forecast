@@ -33,6 +33,14 @@ COPY --from=build /app/publish .
 # The container's job is exactly one ingestion pass, then exit.
 ENV Ingestion__RunOnce=true
 
+# dotnet/runtime:9.0 ships the same built-in non-root 'app' user as
+# aspnet:9.0 (uid $APP_UID, verified: `docker run --rm --entrypoint sh
+# agriforecast-ingestion:latest -c 'echo $APP_UID; id app'` -> 1654 both
+# before and after this line existed) -- this image just never opted in.
+# Matches AgriForecast.API/Dockerfile's USER $APP_UID (see k8s hardening,
+# forecast-api.yaml / pipeline-daily.yaml securityContext).
+USER $APP_UID
+
 # NOTE: no DB connection string baked in. appsettings.json keeps localhost as a
 # placeholder; supply the real connection string at run time via
 #   -e "ConnectionStrings__DefaultConnection=..."

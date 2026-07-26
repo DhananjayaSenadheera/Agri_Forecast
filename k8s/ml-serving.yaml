@@ -12,6 +12,21 @@
 # real cluster this becomes a PersistentVolumeClaim or object storage
 # (S3/Azure Blob) populated by the training job — swap the volume, nothing
 # else changes.
+#
+# RESOURCES: no metrics-server on this cluster; sized from `docker stats` on
+# the live pod (idle with model loaded: ~307MiB — heaviest of the three
+# Deployments, since this is the one holding the unpickled xgboost model +
+# shap in memory). request/limit give ~1.7x/~5x headroom over that idle
+# baseline for concurrent prediction requests.
+#
+# SECURITY CONTEXT: agriforecast-ml is python:3.12-slim with NO non-root user
+# baked in -- verified empirically (`docker run --rm --entrypoint id
+# agriforecast-ml:latest` -> uid=0(root)). runAsNonRoot is honestly left
+# unset rather than forced (it would crash-loop the pod on the readOnly model
+# mount + normal app writes). Still hardened where it doesn't require
+# non-root: allowPrivilegeEscalation:false + capabilities drop ALL. Making
+# this image non-root is a separate follow-up (Dockerfile surgery: add a
+# user, chown /app, re-verify pip/xgboost/shap still import).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -74,6 +89,12 @@ spec:
               port: 8077
             periodSeconds: 20
             failureThreshold: 3
+          resources:
+            requests: { memory: "512Mi", cpu: "250m" }
+            limits: { memory: "1536Mi", cpu: "1000m" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
       volumes:
         - name: models
           hostPath:

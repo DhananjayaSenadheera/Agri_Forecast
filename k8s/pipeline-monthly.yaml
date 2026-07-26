@@ -10,6 +10,17 @@
 # LIVE SCHEDULE since the 2026-07-26 cutover. The manifest must say
 # suspend: false — `kubectl apply` overwrites any live patch, so a manifest
 # still saying true silently re-suspends the schedule on the next apply.
+#
+# RESOURCES + SECURITY CONTEXT: same reasoning/tiers as pipeline-daily.yaml's
+# python steps (see its header) -- a bit more headroom here because
+# ingest_cbsl_macro.py parses PDFs (pdfplumber), which is more memory-hungry
+# per page than the plain DB-I/O steps. No non-root user in agriforecast-ml
+# (python:3.12-slim, verified root by default) so runAsNonRoot is honestly
+# left unset; allowPrivilegeEscalation/capabilities are still hardened.
+# No SQL cold-start init container here -- CCPI/MEI is not perishable the
+# way daily DEC prices are (see header above), so a bounded wait matters far
+# less than on the nightly job; adding one is a cheap future follow-up if it
+# turns out to matter in practice.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -49,3 +60,9 @@ spec:
               env:
                 - name: AGRI_DB_HOST
                   value: host.docker.internal # host-level sql_server_container
+              resources:
+                requests: { memory: "256Mi", cpu: "100m" }
+                limits: { memory: "768Mi", cpu: "500m" }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
