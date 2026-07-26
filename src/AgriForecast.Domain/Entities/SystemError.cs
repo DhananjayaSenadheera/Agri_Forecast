@@ -1,29 +1,16 @@
 namespace AgriForecast.Domain.Entities;
 
-// One row per unhandled server-side error -> table SystemErrors (Logs hub PR A / Phase 3). WRITTEN by
-// the .NET side via ISystemErrorLog from GlobalExceptionMiddleware's general-exception path (500s only —
-// a 400/ValidationException is a client error and is NEVER recorded here); READ by the admin Logs hub
-// (AdminLogsController). A logging failure must NEVER change the response, so the write side
-// (SystemErrorLog) isolates every insert in its own service scope and swallows-and-logs — this entity
-// just guarantees a row can never be built into an inconsistent or leaky state.
+// One row per unhandled server-side error (table SystemErrors). Written by GlobalExceptionMiddleware for
+// 500s only — a validation/400 is a client error and is never recorded here — and read by the admin Logs
+// hub. A logging failure must never change the response, so the write side swallows and logs.
 //
-// PRIVACY: only the exception TYPE, its MESSAGE, its STACK TRACE, and the request METHOD + PATH (path
-// ONLY — the caller must never pass a query string) + the trace id are captured. No request field is
-// ever captured directly: no query string, header, or body column exists. HOWEVER, Message and
-// StackTrace are persisted VERBATIM (length-capped only) — if upstream code embeds a secret, token,
-// username, or connection detail in an exception message, it WILL land here. Accepted risk, mitigated
-// only by Admin-only read access and the length caps; upstream code must never interpolate secrets
-// into exception messages. Every text column is hard-capped to its length by the factory (StackTrace
-// to 8000 chars though the column is nvarchar(max)) so an over-long value can never reach SQL and
-// turn the error-log write into its own failure.
-//
-// Setters are private and rows are built via the single FromException factory (house style, as
-// UserActivityEvent's intent factories) so a row can never be poked into a leaky or overflowing state.
-// occurredUtc is passed in (never an internal UtcNow) so the caller controls the clock and tests are
-// deterministic.
+// Privacy: only the exception type, message and stack trace plus the request method, path (path only,
+// never a query string) and trace id are captured. Message and StackTrace are stored verbatim, so
+// upstream code must never interpolate secrets into exception messages. Every text column is capped by
+// the factory so an over-long value cannot turn the error-log write into its own failure.
 public class SystemError
 {
-    // bigint identity (DB-generated) — this table is append-only and can grow large (retention prunes it).
+    // bigint identity; the table is append-only and pruned by retention.
     public long Id { get; private set; }
 
     public DateTime OccurredUtc { get; private set; }
@@ -49,8 +36,7 @@ public class SystemError
     // The framework trace identifier correlating this row to the 500 response body. Capped; blank -> null.
     public string? TraceId { get; private set; }
 
-    // nvarchar column caps shared by the factory. StackTrace is nvarchar(max) in SQL but the factory
-    // still hard-caps it so a pathological trace can never bloat the table or the write.
+    // Column caps shared by the factory. StackTrace is nvarchar(max) in SQL but is still capped here.
     private const int SourceMaxLength = 20;
     private const int ExceptionTypeMaxLength = 200;
     private const int MessageMaxLength = 1000;
@@ -61,10 +47,8 @@ public class SystemError
 
     private SystemError() { }
 
-    // The single intent factory. Extracts ONLY the type/message/stack from the exception and the
-    // method/path/traceId from the caller, enforcing every column cap (trim, truncate, blank -> null)
-    // so an over-long value can NEVER reach SQL and throw. path MUST be a bare request path — the caller
-    // is responsible for never passing a query string.
+    // Enforces every column cap (trim, truncate, blank -> null) so an over-long value can never reach SQL.
+    // path must be a bare request path — the caller is responsible for stripping any query string.
     public static SystemError FromException(
         Exception exception,
         string source,
@@ -84,8 +68,7 @@ public class SystemError
             TraceId = Cap(traceId, TraceIdMaxLength)
         };
 
-    // Trim then hard-cap to the column length; a blank/empty value stores null (never a fabricated
-    // empty string). Guards against a column-overflow write turning an error-log save into a failure.
+    // Trim then cap to the column length; a blank value stores null rather than an empty string.
     private static string? Cap(string? raw, int maxLength)
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
@@ -93,8 +76,7 @@ public class SystemError
         return trimmed.Length > maxLength ? trimmed[..maxLength] : trimmed;
     }
 
-    // As Cap but for a non-nullable column: a blank value falls back to a fixed sentinel so the
-    // required column is never null.
+    // As Cap, but for a required column: a blank value falls back to a fixed sentinel instead of null.
     private static string CapRequired(string? raw, int maxLength, string fallback) =>
         Cap(raw, maxLength) ?? fallback;
 }

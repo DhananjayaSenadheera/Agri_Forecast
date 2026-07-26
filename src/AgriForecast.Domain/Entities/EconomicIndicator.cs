@@ -1,7 +1,6 @@
 namespace AgriForecast.Domain.Entities;
 
-// A single economic data point captured forward-daily (e.g. USD/LKR FX rate).
-// Flexible by design: IndicatorCode identifies the series, Value holds the reading.
+// A single economic reading captured daily (e.g. USD/LKR). IndicatorCode identifies the series.
 public class EconomicIndicator
 {
     public Guid Id { get; private set; }

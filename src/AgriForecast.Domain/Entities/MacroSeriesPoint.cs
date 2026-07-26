@@ -1,49 +1,31 @@
 namespace AgriForecast.Domain.Entities;
 
-// A single VINTAGE-aware macroeconomic observation (e.g. CCPI headline index, official food
-// inflation YoY, food-imports YoY) captured point-in-time for the ML feature store.
+// A vintage-aware macroeconomic observation (CCPI, food inflation YoY, ...). A standalone table, not EF
+// inheritance from EconomicIndicator, which models a single-date daily reading like USD/LKR.
 //
-// STANDALONE table — deliberately NOT EF inheritance from EconomicIndicator: this entity carries
-// a second date (PublishedAt / KnowledgeDate = the real publication vintage), which EconomicIndicator
-// (a single-date forward-daily reading like USD/LKR) does not model. USD_LKR stays in
-// EconomicIndicator (no dual write); macro series with a publish-lag live here.
-//
-// The two dates are the crux of the leakage discipline:
-//   * ReferenceDate — the period the reading DESCRIBES (e.g. "April 2026" → 2026-04-01, date-only).
-//   * PublishedAt   — when the figure actually became KNOWABLE (the release/vintage date). The ML
-//                     layer as-of-joins on PublishedAt (backward merge_asof) so a value is never
-//                     used before it was published. NEVER default PublishedAt := ReferenceDate —
-//                     that is anti-conservative (lookahead). See DECISIONS.md 2026-07-04 vintage policy.
+// ReferenceDate is the period the reading describes; PublishedAt is when it became knowable and is what
+// the ML layer as-of-joins on. Never default PublishedAt to ReferenceDate — that is lookahead.
 public class MacroSeriesPoint
 {
     public Guid Id { get; private set; }
 
     /// <summary>
-    /// Stable string key identifying the macro series, with the BASE YEAR embedded in the key
-    /// (token form, e.g. "CCPI_BASE2021"). This is a DELIBERATE deviation from the project's local
-    /// enum-int convention (cf. PolicyType/PolicyDirection), mirroring FestivalCalendarEntry.FestivalKey:
-    /// macro series are an open, provenance-varying set (CBSL rebases the index → a new base year is a
-    /// NEW series key, never a silent value shift), so adding one must be a new ingested row — not an
-    /// enum member + migration + Python-mirror change. Extensibility beats the enum's compile-time closure.
+    /// Series key with the base year embedded, e.g. "CCPI_BASE2021". A string rather than an enum on
+    /// purpose: a CBSL rebase must become a new series key, never a silent value shift in an old one.
     /// </summary>
     public string SeriesCode { get; private set; } = null!;
 
-    // The period the reading describes, stored date-only (e.g. a monthly figure → the 1st of its month).
-    // Audit/join-key only on the reference axis; the ML as-of-join keys on PublishedAt, not this.
+    // The period the reading describes, date-only. The ML as-of-join keys on PublishedAt, not this.
     public DateTime ReferenceDate { get; private set; }
 
-    // The vintage / KnowledgeDate: when the figure became publicly knowable (real publication date).
-    // Stored date-only. This is the point-in-time key the ML layer as-of-joins on. When the true
-    // publication date could not be recovered it is conservatively imputed LATE (ReferenceDate + a
-    // per-series lag prior) and IsPublishedAtImputed is set true — never defaulted to ReferenceDate.
+    // Publication vintage, date-only — the key the ML layer as-of-joins on. When the true date cannot be
+    // recovered it is imputed LATE (ReferenceDate plus a per-series lag), never set to ReferenceDate.
     public DateTime PublishedAt { get; private set; }
 
     public decimal Value { get; private set; }
     public string Source { get; private set; } = null!;
 
-    // True when PublishedAt was imputed (a lag prior) rather than recovered from the release itself
-    // (PDF /CreationDate or listing date). The flag must be passed through, never silently upgraded —
-    // the feature layer may treat imputed vintages more cautiously.
+    // True when PublishedAt was imputed rather than recovered from the release. Pass the flag through.
     public bool IsPublishedAtImputed { get; private set; }
 
     public DateTime RetrievedAtUtc { get; private set; }
@@ -65,20 +47,17 @@ public class MacroSeriesPoint
         if (string.IsNullOrWhiteSpace(source))
             throw new ArgumentException("Source is required", nameof(source));
 
-        // Normalize both to date-only BEFORE the invariant check so a hidden time component can
-        // never flip the comparison at the day boundary.
+        // Normalize to date-only before the check so a hidden time component cannot flip it.
         var referenceDay = referenceDate.Date;
         var publishedDay = publishedAt.Date;
 
-        // A vintage cannot precede the period it describes: a figure for April cannot be published
-        // before April. (Equality is allowed — same-day publication is legitimate.)
+        // A figure cannot be published before the period it describes; same-day publication is allowed.
         if (referenceDay > publishedDay)
             throw new ArgumentException(
                 "PublishedAt (vintage) cannot precede ReferenceDate — a reading cannot be published before the period it describes",
                 nameof(publishedAt));
 
-        // NO positive-Value guard: YoY inflation and change series can legitimately be <= 0
-        // (deflation / a falling index), unlike a price or FX rate.
+        // No positive-value guard: YoY and change series can legitimately be zero or negative.
 
         SeriesCode = seriesCode;
         ReferenceDate = referenceDay;

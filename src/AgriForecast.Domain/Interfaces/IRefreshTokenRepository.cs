@@ -3,11 +3,9 @@ using AgriForecast.Domain.Entities;
 namespace AgriForecast.Domain.Interfaces;
 
 /// <summary>
-/// Persistence surface for <see cref="RefreshTokenRecord"/> — the refresh-token revocation store.
-/// Family/user-wide revocation and expiry purge are expressed as set-based operations so they run
-/// as single UPDATE/DELETE statements (no per-row change tracking); <see cref="GetByJtiAsync"/>
-/// returns a TRACKED entity so the rotation flow can flip <c>UsedAtUtc</c> and
-/// <see cref="SaveChangesAsync"/> the change alongside the newly-added child row.
+/// Persistence for refresh-token records. Family- and user-wide revoke and the expiry purge are set-based
+/// (a single UPDATE/DELETE, no change tracking); GetByJtiAsync returns a TRACKED entity so the rotation
+/// flow can flip UsedAtUtc and save it alongside the newly-added child row.
 /// </summary>
 public interface IRefreshTokenRepository
 {
@@ -18,9 +16,8 @@ public interface IRefreshTokenRepository
     Task<RefreshTokenRecord?> GetByJtiAsync(Guid jti, CancellationToken ct = default);
 
     /// <summary>
-    /// Atomic compare-and-set: marks the row Used ONLY if it is currently unused and unrevoked,
-    /// as a single UPDATE. Returns the affected-row count — exactly one of any concurrent callers
-    /// can observe 1; the rest observe 0 (treat as reuse). Executes immediately.
+    /// Atomic compare-and-set: marks the row Used only if it is currently unused and unrevoked. Exactly
+    /// one of any concurrent callers sees a count of 1; the rest see 0 and must treat it as reuse.
     /// </summary>
     Task<int> TryMarkUsedAsync(Guid jti, DateTime usedAtUtc, CancellationToken ct = default);
 

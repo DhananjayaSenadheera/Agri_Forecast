@@ -2,48 +2,35 @@ using AgriForecast.Domain.Enums;
 
 namespace AgriForecast.Domain.Entities;
 
-// One row per security-relevant account event OR admin content mutation -> table UserActivityLog
-// (Logs hub PR A; content events added later). WRITTEN by the .NET side via IUserActivityAudit at the
-// auth/user-management call sites and at every admin content-mutation handler (policy flags,
-// festivals, news events, crops, markets); READ by the admin Logs hub (AdminLogsController). Content
-// rows carry the acting admin as ActorUserId and NO TargetUserId — the content's short identifier
-// lives in Details. An audit failure must NEVER break the operation being
-// audited, so the write side (UserActivityAudit) isolates every insert in its own service scope and
-// swallows-and-logs — this entity just guarantees a row can never be built into an inconsistent or
-// leaky state.
+// One row per security-relevant account event or admin content mutation (table UserActivityLog). Written
+// via IUserActivityAudit from the auth/user-management call sites and every admin content-mutation
+// handler; read by the admin Logs hub. Content rows carry the acting admin as ActorUserId and no
+// TargetUserId — the content's short identifier goes in Details.
+// An audit failure must never break the operation being audited, so the write side swallows and logs.
 //
-// PRIVACY: the only free-text captured is UsernameAttempted (failed logins only — the attempted
-// username IS the security signal) and Details (a short, code-authored note like "role -> Admin").
-// A PASSWORD/TOKEN/HEADER/BODY is NEVER stored; both text columns are hard-capped to their column
-// length. Identities are the users' immutable GUID ids, never emails or names.
-//
-// Setters are private and rows are built via the intent-named factories below (house style, as
-// IngestionRun.StartRunning) so a row can never be poked into a state its event type does not allow
-// (e.g. a LoginFailed row never carries an ActorUserId; a LoginSucceeded row never carries an
-// attempted-username string). occurredUtc is passed in (never an internal UtcNow) so the caller
-// controls the clock and tests are deterministic.
+// Privacy: the only free text is UsernameAttempted (failed logins only) and Details (a short,
+// code-authored note). Passwords, tokens, headers and bodies are never stored, and identities are the
+// users' GUID ids. Rows are built through the intent-named factories below so an event type can never
+// carry fields it does not allow. occurredUtc is passed in so tests are deterministic.
 public class UserActivityEvent
 {
-    // bigint identity (DB-generated) — this table is append-only and can grow large.
+    // bigint identity; the table is append-only.
     public long Id { get; private set; }
 
     public DateTime OccurredUtc { get; private set; }
 
     public UserActivityEventType EventType { get; private set; }
 
-    // The authenticated actor (the user who logged in / registered, or the acting admin). Null for a
-    // LoginFailed event, where the caller is unproven.
+    // The authenticated actor. Null for LoginFailed, where the caller is unproven.
     public Guid? ActorUserId { get; private set; }
 
     // The user acted UPON (role change / deletion target). Null for events with no distinct target.
     public Guid? TargetUserId { get; private set; }
 
-    // Failed-login only: the ATTEMPTED username (the security signal). Capped to the column length.
-    // NEVER a password. Null for every other event type.
+    // Failed-login only: the attempted username. Never a password; null for every other event type.
     public string? UsernameAttempted { get; private set; }
 
-    // Short, code-authored context (e.g. "role -> Admin"). Capped to the column length. NEVER a
-    // request body, header, email, or secret.
+    // Short, code-authored context (e.g. "role -> Admin"). Never a request body, header, email or secret.
     public string? Details { get; private set; }
 
     // nvarchar column caps shared by the factories.
@@ -52,8 +39,6 @@ public class UserActivityEvent
 
     private UserActivityEvent() { }
 
-    // ── Intent-named factories: one per event type, each admitting only that event's valid fields ──
-
     public static UserActivityEvent LoginSucceeded(Guid actorUserId, DateTime occurredUtc) => new()
     {
         EventType = UserActivityEventType.LoginSucceeded,
@@ -61,8 +46,7 @@ public class UserActivityEvent
         ActorUserId = actorUserId
     };
 
-    // No ActorUserId (the caller is unproven). The attempted username is captured (trimmed + capped);
-    // an empty/blank attempt stores null.
+    // No ActorUserId (the caller is unproven); a blank attempted username stores null.
     public static UserActivityEvent LoginFailed(string? usernameAttempted, DateTime occurredUtc) => new()
     {
         EventType = UserActivityEventType.LoginFailed,
@@ -77,10 +61,8 @@ public class UserActivityEvent
         ActorUserId = actorUserId
     };
 
-    // An admin provisioned the account instead of the user signing themselves up. Same event type as
-    // a self-registration (the read side's filter set stays closed at five), told apart by carrying a
-    // TargetUserId — the new account — while the actor is the admin who created it. A
-    // self-registration never has a target, so the two can never be confused.
+    // Same event type as a self-registration, told apart by carrying a TargetUserId (the new account)
+    // while the actor is the admin who created it.
     public static UserActivityEvent UserCreatedByAdmin(
         Guid actingAdminId, Guid newUserId, DateTime occurredUtc) => new()
     {
@@ -110,11 +92,8 @@ public class UserActivityEvent
         TargetUserId = targetUserId
     };
 
-    // ── Admin CONTENT mutations (one factory per entity kind) ─────────────────────────────────────
-    // Shape shared by all five: ActorUserId = the acting admin (stamped from the JWT sub claim by the
-    // controller, never the request body), TargetUserId = NULL (these act on CONTENT, not on a user),
-    // UsernameAttempted = NULL. The content's short identifier travels in Details ("created 'X'"),
-    // rendered by UserActivityAudit — NEVER the request body, and capped like every other note.
+    // Content mutations: ActorUserId is the acting admin stamped from the JWT (never the request body),
+    // TargetUserId is null, and the content's short identifier travels in Details.
 
     public static UserActivityEvent PolicyFlagChanged(
         Guid actorUserId, string? details, DateTime occurredUtc) =>
@@ -136,14 +115,9 @@ public class UserActivityEvent
         Guid actorUserId, string? details, DateTime occurredUtc) =>
         ContentChanged(UserActivityEventType.MarketChanged, actorUserId, details, occurredUtc);
 
-    // Private so a content row can only be built through one of the five intent-named factories above
-    // (a caller can never pass an account event type here and forge a user-shaped row).
-    //
-    // An EMPTY actor id becomes NULL, never a stored all-zeros GUID: Guid.Empty means "this mutation
-    // reached the handler without a JWT-stamped acting admin" (no HTTP caller can do that — the
-    // controllers 401 first — but a future non-HTTP caller could). Recording the change with an
-    // honestly-unattributed actor beats both dropping the audit row and fabricating a fake user id
-    // that the Logs page would render as a real account.
+    // Private so a content row can only be built through the intent-named factories above.
+    // An empty actor id is stored as NULL rather than an all-zeros GUID, so a mutation that reached the
+    // handler without a JWT-stamped admin is recorded honestly instead of looking like a real account.
     private static UserActivityEvent ContentChanged(
         UserActivityEventType type, Guid actorUserId, string? details, DateTime occurredUtc) => new()
     {
@@ -153,8 +127,7 @@ public class UserActivityEvent
         Details = Cap(details, DetailsMaxLength)
     };
 
-    // Trim then hard-cap to the column length; a blank/empty value stores null (never a fabricated
-    // empty string). Guards against a column-overflow write turning an audit save into a failure.
+    // Trim then cap to the column length; a blank value stores null rather than an empty string.
     private static string? Cap(string? raw, int maxLength)
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;

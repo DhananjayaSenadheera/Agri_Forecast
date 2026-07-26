@@ -1,22 +1,10 @@
 namespace AgriForecast.Domain.Entities;
 
-// Owns the agronomic metadata for a Crop (1:1, unique CropId FK). These fields drive
-// harvest-time price forecasting and are being MOVED here off the Crops table (the three
-// legacy Crops columns — GrowthPeriodDays / PlantingSeason / HarvestWindowDays — are
-// dropped in a later subtask; do NOT add agronomy fields back onto Crop).
+// Agronomy metadata for a Crop (1:1, unique CropId). Never seeded with HasData — Crop GUIDs differ per
+// database. Rows come from the value-copy migration or are created pending at crop registration.
 //
-// NEVER seeded via HasData: Crop GUIDs are per-database (auto-provisioned), so a profile's
-// CropId is per-database too. Rows are created either by the value-copy migration (for the
-// legacy crops) or, going forward, as a PENDING profile (IsVerified=0) at crop registration.
-//
-// PLANTING-SEASON ENCODING CONVENTION (the four *Month columns replace the old
-// PlantingSeason string; 2.3's Python encoder derives the season from them):
-//   * All four planting-month columns NULL + IsPerennial=false  => YEAR-ROUND (or unknown).
-//   * Yala months populated                                     => Yala-season crop.
-//   * Maha months populated                                     => Maha-season crop.
-// The legacy Crops.PlantingSeason only ever held 'Year-round' or NULL (no Yala/Maha rows),
-// so the value-copy migration leaves ALL month columns NULL for every crop and no season
-// signal is lost. Real Yala/Maha planting months are filled by Step 5 (DOA research).
+// Planting-season encoding: all four month columns NULL with IsPerennial=false means year-round or
+// unknown; Yala months set means a Yala crop; Maha months set means a Maha crop.
 public class CropAgronomyProfile
 {
     public Guid Id { get; set; }
@@ -24,9 +12,8 @@ public class CropAgronomyProfile
     // 1:1 owner FK to Crop. Unique — one agronomy profile per crop.
     public Guid CropId { get; set; }
 
-    // Days from planting to first harvest. The keystone forecasting field: it maps a farmer's
-    // planting date to the harvest date whose price we forecast, and defines the ML training
-    // label / serving horizon (price.shift(-GrowthPeriodDays)). Null until curated.
+    // Days from planting to first harvest. Drives the forecast horizon and the ML training label
+    // (price.shift(-GrowthPeriodDays)), so changing a value here changes the model.
     public int? GrowthPeriodDays { get; set; }
 
     // How many days the crop keeps yielding once it matures (harvest spread). Null until curated.
@@ -40,33 +27,26 @@ public class CropAgronomyProfile
     public byte? MahaPlantingStartMonth { get; set; }
     public byte? MahaPlantingEndMonth { get; set; }
 
-    // True for perennial crops (fruit trees etc.). Perennial verification is Step 5's job;
-    // the value-copy migration and registration both default this to false.
+    // True for perennial crops (fruit trees etc.).
     public bool IsPerennial { get; set; }
 
     // Provenance citation for the agronomy values (e.g. 'legacy-crops-table', a DOA source URL).
     public string? DataSource { get; set; }
 
-    // Date the profile was verified against an authoritative agronomy source (date-only).
-    // Null until verified.
+    // Date the profile was verified against an authoritative source (date-only). Null until verified.
     public DateTime? VerifiedOn { get; set; }
 
-    // False until an authoritative source confirms the values. Both the value-copy migration
-    // and crop registration create UNVERIFIED (pending) profiles; only Step-5 curation flips this.
+    // False until an authoritative source confirms the values; new profiles are always unverified.
     public bool IsVerified { get; set; }
 
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 
-    // Provenance marker for profiles auto-created at crop registration (manual CRUD create OR
-    // ingestion auto-provision). Distinct from the value-copy migration's 'legacy-crops-table'
-    // so the two origins stay auditable. Kebab-case matches the legacy marker's style.
+    // DataSource marker for profiles auto-created at crop registration, kept distinct from the
+    // value-copy migration's 'legacy-crops-table' marker.
     public const string PendingRegistrationSource = "pending-registration";
 
-    // Factory for the PENDING profile created alongside a newly-registered Crop (both the manual
-    // create handler and the ingestion auto-provision path). Deliberately unverified: all agronomy
-    // fields NULL, IsPerennial=false, IsVerified=false — Step-5 curation fills and verifies them.
-    // A crop must never exist without a profile going forward; this keeps that construction in one place.
+    // Creates the unverified profile that must accompany every newly-registered Crop.
     public static CropAgronomyProfile CreatePending(Guid cropId)
     {
         return new CropAgronomyProfile

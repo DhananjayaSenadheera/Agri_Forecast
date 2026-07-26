@@ -1,22 +1,12 @@
 namespace AgriForecast.Domain.Entities;
 
-// Point-in-time price observation, supersedes MarketPrice (which is kept intact for
-// back-compat). One row = one commodity's price at one market for one ObservedDate,
-// as published by one Source. All price fields are nullable so partial bulletins
-// (e.g. wholesale-only, or arrivals-only) insert cleanly.
+// Point-in-time price observation; supersedes MarketPrice, which is kept for back-compat. One row is one
+// commodity's price at one market for one ObservedDate as published by one Source. All price fields are
+// nullable so partial bulletins insert cleanly.
 //
-// Two vintage timestamps are kept deliberately distinct:
-//   ObservedDate  — the date the price is FOR (the economic event date).
-//   AsOfUtc       — when the bulletin that carried this price was published
-//                   (point-in-time vintage; the ML layer as-of-joins on this to
-//                   avoid look-ahead leakage — never treat ObservedDate as "known" earlier).
-//   RetrievedAtUtc— record-keeping only (when our ingestion fetched it); never a feature.
-//
-// Setters are private and the entity is constructed via the Create factory (house style,
-// as Crop/EconomicCenter/Market). EF materialises through its private-setter support.
-// This is a leakage safeguard: AsOfUtc is REQUIRED and rejected if default(DateTime), so a
-// forgetful ingestion path can never write 0001-01-01 — a row that would otherwise be
-// "already published" in every as-of window and silently leak look-ahead information.
+// ObservedDate is the date the price is FOR; AsOfUtc is when the bulletin carrying it was published and
+// is what the ML layer as-of-joins on; RetrievedAtUtc is audit only. AsOfUtc is required and rejected if
+// default(DateTime), because a 0001-01-01 vintage would look already-published in every as-of window.
 public class PriceObservation
 {
     public Guid Id { get; private set; }
@@ -24,12 +14,10 @@ public class PriceObservation
     // FK -> Markets. Required: every observation belongs to a market dimension.
     public Guid MarketId { get; private set; }
 
-    // FK -> Crops. Nullable: self-healed later by the canonical commodity mapping,
-    // exactly as MarketPrice.CropId is resolved via CommodityAliases during ingestion.
+    // Nullable: back-filled later by the canonical commodity mapping, as MarketPrice.CropId is.
     public Guid? CropId { get; private set; }
 
-    // Source-native commodity identity. ExternalCommodityId is nullable because some
-    // sources (HARTI/CBSL bulletins) key on name only; ExternalCommodityName is always set.
+    // Source-native identity. ExternalCommodityId is null for sources that key on name only.
     public int? ExternalCommodityId { get; private set; }
     public string ExternalCommodityName { get; private set; } = string.Empty;
 
@@ -45,15 +33,10 @@ public class PriceObservation
     // Arrivals volume in kilograms. decimal(12,2).
     public decimal? ArrivalsKg { get; private set; }
 
-    // --- Unit quarantine (R1.1 P1, PRD risk R5 High/High: unit/label mismatch across sources) ---
-    // Fail-closed unit provenance. Sources state prices in differing units ("Rs/kg", "Rs/100kg",
-    // "Rs/bushel", ...); a silently-assumed unit corrupts every downstream price. So:
-    //   UnitRaw               — the unit exactly as the source stated it (nullable; audit trail).
-    //   UnitConversionFactor  — factor applied to reach the canonical LKR/kg (decimal(10,4));
-    //                           1.0 = already LKR/kg. Nullable until a unit is resolved.
-    //   IsUnitConfirmed       — NOT NULL, defaults FALSE. A row is QUARANTINED (unit unproven)
-    //                           until ingestion explicitly confirms the unit. Aggregation/feature
-    //                           layers must exclude unconfirmed rows — never assume LKR/kg.
+    // Unit provenance, fail-closed. Sources state prices in different units, so UnitRaw keeps the source's
+    // own wording, UnitConversionFactor is the factor to canonical LKR/kg (1.0 = already LKR/kg), and
+    // IsUnitConfirmed stays false until ingestion proves the unit. Aggregation and feature layers must
+    // exclude unconfirmed rows rather than assume LKR/kg.
     public string? UnitRaw { get; private set; }
     public decimal? UnitConversionFactor { get; private set; }
     public bool IsUnitConfirmed { get; private set; }
@@ -64,16 +47,13 @@ public class PriceObservation
     // Provenance, e.g. "HARTI", "CBSL", "DEC-DAMBULLA".
     public string Source { get; private set; } = string.Empty;
 
-    // Audit: when our ingestion fetched the row (record-keeping only; never a feature).
+    // Audit only; never a feature.
     public DateTime RetrievedAtUtc { get; private set; }
 
     private PriceObservation() { }
 
-    // Factory for ingestion. Requires the identity + point-in-time keys so a partial
-    // bulletin still lands with a valid vintage; price/arrivals/commodity-id/crop-id are
-    // optional. RetrievedAtUtc is stamped here (never caller-supplied) — it is audit-only.
-    // Throws if asOfUtc is default(DateTime): a missing vintage is a leakage hazard, not a
-    // recoverable default.
+    // Throws if asOfUtc is default(DateTime): a missing vintage is a leakage hazard, not a default.
+    // RetrievedAtUtc is stamped here rather than caller-supplied.
     public static PriceObservation Create(
         Guid marketId,
         string externalCommodityName,
@@ -125,13 +105,8 @@ public class PriceObservation
         };
     }
 
-    // Self-healing crop resolution: the canonical-mapping layer sets CropId once the
-    // source commodity is mapped. Mirrors how MarketPrice.CropId is back-filled.
-    //
-    // Guards (R1.1 P1): Guid.Empty is never a valid mapping target — reject it rather than
-    // silently blanking the crop. And the self-heal path must NOT silently re-map an
-    // observation that is already assigned: pass overwrite:true to deliberately re-map
-    // (e.g. a corrected canonical mapping), otherwise a second assignment throws.
+    // Self-healing crop resolution: the canonical-mapping layer sets CropId once the source commodity is
+    // mapped. Guid.Empty is rejected, and re-mapping an already-assigned observation needs overwrite:true.
     public void AssignCrop(Guid cropId, bool overwrite = false)
     {
         if (cropId == Guid.Empty)
