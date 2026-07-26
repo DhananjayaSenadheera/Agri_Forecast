@@ -196,10 +196,11 @@ class TestNaiveUtc:
         naive = datetime(2026, 7, 26, 9, 0, 0)
         assert frl._to_naive_utc(naive) is naive
 
-    def test_start_run_and_mark_calls_bind_naive_datetimes(self, engine, monkeypatch):
-        """Guard against a future regression that binds a tz-aware datetime
-        straight through: patch datetime.now to return a tz-aware instant and
-        assert every persisted timestamp column round-trips naive."""
+    def test_start_run_and_mark_calls_bind_naive_datetimes(self, engine):
+        """End-to-end guard (start_run + mark_succeeded, real code path, no
+        internal patching) against a future regression that binds a tz-aware
+        datetime straight through: assert every persisted timestamp column
+        round-trips naive."""
         run_id, _batch_id, started = frl.start_run(engine)
         assert started.tzinfo is None
         frl.mark_succeeded(engine, run_id, rows_inserted=1)

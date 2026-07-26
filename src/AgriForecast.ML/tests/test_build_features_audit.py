@@ -212,6 +212,49 @@ class TestMainAuditIntegration:
         assert kwargs["covered_from"] == date(2026, 7, 1)
         assert kwargs["covered_to"] == date(2026, 7, 3)
 
+    def test_metrics_derivation_failure_still_records_succeeded_and_does_not_raise(
+        self, monkeypatch,
+    ):
+        """store.write_features already succeeded (the build itself is fine) --
+        a bug in the LATER coverage/crop-count derivation (min/max ObservationDate,
+        CropId.nunique()) must not turn that success into a false Failed row or a
+        non-zero exit. Succeeded is still recorded, with the un-derivable metrics
+        falling back to None; RowsInserted (known independently of the metrics
+        block) stays correct."""
+        feats = _fake_feats()
+        _patch_pipeline(monkeypatch, feats, written=3)
+        monkeypatch.setattr(build_features, "load_env_file", lambda: None)
+
+        def _boom_to_datetime(*a, **k):
+            raise RuntimeError("ObservationDate parse blew up")
+        monkeypatch.setattr(build_features.pd, "to_datetime", _boom_to_datetime)
+
+        monkeypatch.setattr(build_features, "get_engine", lambda: "the-engine")
+        monkeypatch.setattr(
+            build_features.feature_run_log, "start_run",
+            lambda engine: ("run-1", "batch-1", "started"),
+        )
+        succeeded_calls = []
+        monkeypatch.setattr(
+            build_features.feature_run_log, "mark_succeeded",
+            lambda engine, run_id, **k: succeeded_calls.append((engine, run_id, k)),
+        )
+        monkeypatch.setattr(
+            build_features.feature_run_log, "mark_failed",
+            lambda *a, **k: pytest.fail(
+                "mark_failed must not be called: the build itself succeeded"),
+        )
+
+        build_features.main()  # must not raise -- exit 0
+
+        assert len(succeeded_calls) == 1
+        engine, run_id, kwargs = succeeded_calls[0]
+        assert engine == "the-engine" and run_id == "run-1"
+        assert kwargs["rows_inserted"] == 3  # known independently, unaffected
+        assert kwargs["distinct_crops"] is None
+        assert kwargs["covered_from"] is None
+        assert kwargs["covered_to"] is None
+
     def test_pipeline_exception_records_failed_row_and_reraises(self, monkeypatch):
         _patch_pipeline(monkeypatch, _fake_feats(), written=3)
         monkeypatch.setattr(build_features, "load_env_file", lambda: None)

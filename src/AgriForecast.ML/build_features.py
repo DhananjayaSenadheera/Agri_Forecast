@@ -9,12 +9,17 @@ one ``IngestionRuns`` row, Source="FEATURE_BUILD" (see
 row in that log. Running is inserted before the build starts; the same row
 is finalized Succeeded (with RowsInserted/DistinctCrops/coverage) or Failed
 (with a capped ErrorSummary) at the end. The audit write is FAIL-OPEN at
-every step (``_start_audit_run`` / ``_finish_audit_run_*``): a DB hiccup
-while writing the breadcrumb is logged to stderr and swallowed, it can never
-block or fail the feature build itself. A genuine build exception still
-re-raises after the failure row is (best-effort) recorded, so
-`docker run ... python build_features.py` (run-daily.sh step 6) keeps
-failing loudly on a real problem with zero orchestration changes needed.
+EVERY step, including the coverage/crop-count metrics derivation that runs
+AFTER ``store.write_features`` has already succeeded (``_start_audit_run`` /
+``_finish_audit_run_*`` / the metrics try/except in ``main``): a DB hiccup
+while writing the breadcrumb, or a bug computing CoveredFromDate/CoveredToDate/
+DistinctCrops from the built frame, is logged to stderr and swallowed — a
+build that actually succeeded can never be mis-recorded as Failed (or exit
+non-zero) because of a bookkeeping problem. A genuine build exception (raised
+before ``store.write_features`` returns) still re-raises after the failure
+row is (best-effort) recorded, so `docker run ... python build_features.py`
+(run-daily.sh step 6) keeps failing loudly on a real problem with zero
+orchestration changes needed.
 """
 from __future__ import annotations
 
@@ -122,14 +127,25 @@ def main() -> None:
         written = store.write_features(feats)
         print(f"Persisted {written} rows to CropFeatureDaily.")
 
-        if n:
-            obs_dates = pd.to_datetime(feats["ObservationDate"])
-            covered_from = obs_dates.min().date()
-            covered_to = obs_dates.max().date()
-            distinct_crops = int(feats["CropId"].nunique())
-        else:
+        try:
+            if n:
+                obs_dates = pd.to_datetime(feats["ObservationDate"])
+                covered_from = obs_dates.min().date()
+                covered_to = obs_dates.max().date()
+                distinct_crops = int(feats["CropId"].nunique())
+            else:
+                covered_from = covered_to = None
+                distinct_crops = 0
+        except Exception as exc:  # noqa: BLE001 -- audit bookkeeping must never block the build
+            # The build itself already succeeded (write_features returned above) --
+            # a bug in THIS metrics derivation must not turn an honest success into
+            # a false Failed row / non-zero exit. Record Succeeded without the
+            # metrics we couldn't derive rather than skipping the row entirely.
+            print(f"feature_run_log: coverage/crop-count metrics not derived "
+                  f"({type(exc).__name__}: {exc}); recording Succeeded without them.",
+                  file=sys.stderr)
             covered_from = covered_to = None
-            distinct_crops = 0
+            distinct_crops = None
         _finish_audit_run_succeeded(
             audit_engine, audit_run_id,
             rows_inserted=written,
