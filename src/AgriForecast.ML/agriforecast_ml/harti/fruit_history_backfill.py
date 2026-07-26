@@ -1,59 +1,34 @@
-"""One-time deterministic backfill of extended HARTI-Pettah FRUIT history into
-MarketPrices, for the TWO owner-adopted crops only:
+"""One-time backfill of extended HARTI-Pettah FRUIT history into MarketPrices, for the two
+owner-adopted crops only: FRT000003 'Banana - Abul' (Ambul) and FRT000006 'Banana - Sini'
+(Seeni).
 
-    FRT000003  "Banana - Abul"  (Ambul)   gp=90
-    FRT000006  "Banana - Sini"  (Seeni)   gp=135
+The fruit-history A/B experiment showed that prepending each crop's pre-splice
+HARTI-Pettah history to its national series cuts matched DEC-era MAE from 144.60 to 26.19
+for Ambul and from 152.16 to 18.93 for Seeni, beating both the incumbent and the best
+naive baseline. Kolikuttu was rejected (it got worse) and Papaya has no growth period, so
+no harvest label. This module makes the extended series permanent for the two adopted
+crops.
 
-WHY THIS EXISTS (design choice (a), see PR docs)
-------------------------------------------------
-The fruit-history A/B experiment (experiments/fruit_history/) proved that
-prepending each crop's pre-splice HARTI-Pettah price history to its national
-series lifts Ambul 144.60->26.19 and Seeni 152.16->18.93 matched DEC-era MAE
-(adoption-gate numbers, experiments/fruit_history_adoption/RESULTS.md; the
-exploratory experiment measured 26.08/19.18 with Kolikuttu still pooled),
-beating both the re-scored incumbent and the best naive baseline. Kolikuttu was
-REJECTED (35.67->47.34) and Papaya is excluded (NULL growth period -> no
-harvest label). This module makes that extended series PERMANENT for the two
-adopted crops.
+Mechanism: write Source='HARTI' rows into MarketPrices for PriceDate < 2025-05-05.
+load.load_prices() already reads all MarketPrices rows and applies the HARTI/DEC splice,
+so the extended series is served with no change to the hot read path - the same mechanism
+the vegetable HARTI rows use. DEC data for these fruits starts 2025-05-05, so there is no
+(CropId, PriceDate) overlap and the splice invariant holds.
 
-Mechanism = a static, one-time backfill that writes ``Source='HARTI'`` rows into
-MarketPrices for these crops for ``PriceDate < 2025-05-05``.  ``load.load_prices()``
-already reads ALL MarketPrices rows and applies the HARTI/DEC splice + same-source
-dedup, so once these rows exist the extended series is served automatically with
-NO change to the hot read path -- exactly the mechanism the 6 vegetable HARTI rows
-already use.  DEC data for these fruits starts 2025-05-05, so there is no
-(CropId, PriceDate) overlap between the new HARTI rows and the existing DEC rows;
-the splice invariant (harti/qa.assert_no_source_duplicates) is preserved.
+The rejected alternative was unioning the pre-splice history inside load_prices() at read
+time, which would put a per-crop special case and a second-table join on the hot path
+forever and split the national series across two tables.
 
-REJECTED ALTERNATIVE (design (b)): union the pre-splice history from
-PriceObservations inside ``load_prices()`` at read time.  Rejected because it puts
-a per-crop special-case and a second-table join on the hot training/serving path
-forever, and splits the national series across two source tables (MarketPrices
-stops being the single source of truth).  A static backfill is simpler,
-deterministic, idempotent, and never runs again.
+Idempotent: upsert keyed on (CropId, PriceDate, Source), so a re-run inserts 0. The
+synthetic ExternalProductIds (-26, -27) continue the negative HARTI numbering and do not
+collide with the existing -1..-25.
 
-IDEMPOTENCY
------------
-Upsert keyed on (CropId, PriceDate, Source), same as
-``loader.upsert_harti_prices``.  Re-running inserts 0 rows once applied.  The
-synthetic per-crop ``ExternalProductId`` values (-26, -27) continue the negative
-HARTI numbering and do NOT collide with the existing -1..-25 (the unique index is
-(Source, ExternalProductId, PriceDate)).
+Values are built by reading each crop's Pettah PriceObservations with IsUnitConfirmed=1,
+MaxPrice > 0 and ObservedDate < 2025-05-05, aggregated to one (Min, Max) per date by mean
+- the same construction the experiment used. There is exactly one Pettah observation per
+(crop, date), so the mean is an identity and the values round-trip exactly.
 
-VALUE CONSTRUCTION (proven row-identical to experiment arm B)
-------------------------------------------------------------
-For each adopted crop we read its Pettah (HARTI wholesale) PriceObservations with
-IsUnitConfirmed=1, MaxPrice>0, ObservedDate < 2025-05-05, and aggregate to one
-(Min,Max) per date via mean -- the SAME construction as
-``experiments/fruit_history/run_experiment.py::load_harti_pettah_presplice``,
-restricted to the two adopted crops.  There is exactly one Pettah obs per
-(crop, date) in the corpus, so the mean is an identity; both PriceObservations
-and MarketPrices store decimal(_,2), so the value round-trips exactly and the
-resulting ``load_prices()`` series is byte-for-byte the experiment's arm-B series
-for these crops.  See tests/test_fruit_history_backfill.py.
-
-NO PRODUCTION WRITES happen by importing this module.  ``backfill_fruit_history``
-must be called explicitly (and only after the promotion gates pass + owner merge).
+Importing this module writes nothing: backfill_fruit_history() must be called explicitly.
 """
 from __future__ import annotations
 
@@ -76,10 +51,9 @@ SPLICE_DATE = date(2025, 5, 5)
 # The two owner-adopted crops.  Ordered, code-keyed (portable across DBs).
 ADOPTED_CROP_CODES: tuple[str, ...] = ("FRT000003", "FRT000006")
 
-# Per-crop synthetic ExternalProductId for the HARTI source.  Continues the
-# negative HARTI numbering (loader._HARTI_PRODUCT_IDS uses -1..-25), so these are
-# distinct within Source='HARTI' -> satisfy the unique index
-# (Source, ExternalProductId, PriceDate).  NEVER positive (that is the DEC range).
+# Per-crop synthetic ExternalProductId for the HARTI source. Continues the negative HARTI
+# numbering so these stay distinct within Source='HARTI' and satisfy the unique index
+# (Source, ExternalProductId, PriceDate). Never positive - that is the DEC range.
 FRUIT_EXT_PRODUCT_IDS: dict[str, int] = {
     "FRT000003": -26,  # Banana - Abul  (Ambul)
     "FRT000006": -27,  # Banana - Sini  (Seeni)
@@ -243,13 +217,10 @@ def backfill_fruit_history(
             return counters
 
         for p in to_insert:
-            # EconomicCenterId = NULL is a deliberate NEW state for HARTI rows:
-            # every prior HARTI MarketPrices row carries the Dambulla centre id,
-            # but these rows derive from the Pettah HARTI wholesale table, so
-            # tagging them Dambulla would be false. No consumer reads the column
-            # on this path (load_prices ignores it; no repository query joins on
-            # it), and the FK is nullable. Any FUTURE per-centre analytics must
-            # LEFT-join or these rows silently drop.
+            # EconomicCenterId = NULL is deliberate: every prior HARTI row carries the Dambulla
+            # centre id, but these rows come from the Pettah wholesale table, so tagging them
+            # Dambulla would be false. Nothing reads the column on this path and the FK is
+            # nullable, but any future per-centre analytics must LEFT-join or these rows drop.
             conn.execute(
                 sa.text(
                     """INSERT INTO MarketPrices

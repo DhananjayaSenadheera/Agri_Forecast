@@ -1,26 +1,17 @@
-"""HARTI backfill QA checks.
+"""HARTI backfill QA checks, run after the loader completes.
 
-Checks run after the loader completes:
-1. Row counts per crop / per year (HARTI rows only).
-2. Gap report: list of (crop, gap_start, gap_end, gap_days) where gaps > 7 days.
-3. Zero-duplicate assertion: no (CropId, PriceDate) has rows from BOTH HARTI
-   and DAMBULLA_DEC that would BOTH reach the feature build.  Raises AssertionError if
-   violated.  Exception: DEC Ridge Gourd/Beans rows in [2025-05-05, 2025-06-30] are
-   intentionally left in the DB (they are excluded at ML-load time in load.py, not
-   deleted).  The check mirrors load.py's filter so the two cannot drift.
+1. Row counts per crop and year (HARTI rows only).
+2. Gap report: (crop, gap_start, gap_end, gap_days) for gaps longer than 7 days.
+3. Splice invariant: no (CropId, PriceDate) reaches the feature build from both HARTI and
+   DAMBULLA_DEC. Raises AssertionError if violated. DEC Ridge Gourd/Beans rows in
+   [2025-05-05, 2025-06-30] are the carve-out: they stay in the DB but are filtered at
+   ML-load time, and this check mirrors load.py's filter so the two cannot drift.
 
-All output is printed + returned as structured dicts for programmatic use.
+Everything is printed and also returned as structured dicts.
 
-SCOPE NOTE (R1.1 P1 Step 5, ClickUp 86cahef64): this module's checks are
-legacy-MarketPrices-scoped (Dambulla-only, no market dimension, no tiered
-gap severity, no Poya calendar). The newer, PriceObservations-scoped,
-multi-market data-quality checks (gap tiering INFO/WARNING/ERROR with Poya
-suppression, rolling-IQR outlier hold, the shared source-agnostic row
-validator, cross-source duplicate detection with a MarketId dimension, and
-generic macro point-in-time guards) live in ``agriforecast_ml.data_quality``
-and ``agriforecast_ml.poya`` instead of being folded into this file — this
-avoids extending a MarketPrices-shaped module with PriceObservations-shaped
-concerns. See data_quality.py's module docstring for the full picture.
+Scope: these checks are legacy-MarketPrices-shaped (Dambulla only, no market dimension,
+no tiered gap severity, no Poya calendar). The PriceObservations-scoped, multi-market
+checks live in agriforecast_ml.data_quality and agriforecast_ml.poya instead.
 """
 from __future__ import annotations
 
@@ -125,10 +116,9 @@ def assert_no_source_duplicates(engine=None) -> int:
     """
     eng = _engine_or_default(engine)
     with eng.connect() as conn:
-        # Mirror the load.py filter: exclude DEC Ridge Gourd/Beans rows in the
-        # exception window [2025-05-05, 2025-06-30].  Those DEC rows stay in the
-        # DB by design but are filtered at ML-load time, so they are NOT true
-        # splice violations — only HARTI data reaches the feature build there.
+        # Mirror the load.py filter: exclude DEC Ridge Gourd/Beans rows in the exception window.
+        # Those rows stay in the DB by design but are filtered at ML-load time, so they are not
+        # true splice violations - only the HARTI data reaches the feature build there.
         dups = conn.execute(sa.text("""
             SELECT c.Name AS crop,
                    CONVERT(varchar(10), h.PriceDate) AS price_date,
