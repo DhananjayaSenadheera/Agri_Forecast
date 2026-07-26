@@ -26,13 +26,15 @@
 # via a small sh -c wrapper. The other steps don't take a batch id — same as
 # the script.
 #
-# SUSPENDED BY DEFAULT (suspend: true) — deliberate. The launchd job is still
-# live; running both would double-ingest. Unsuspend ONLY after one supervised
-# manual run succeeds AND launchd is bootout'd (see k8s/README.md). The
-# generous startingDeadlineSeconds means a machine asleep at 21:00 that wakes
-# within 6h still runs: a late run backfills fine (the DEC fetch returns full
-# history per pass), but a day DEC published while we never ran at all is a
-# day of freshness lost until the next run.
+# LIVE SCHEDULE (suspend: false). The cutover happened 2026-07-26: launchd is
+# retired and this CronJob is the production schedule. The manifest must say
+# suspend: false because `kubectl apply` overwrites any live patch — an apply
+# from a manifest still saying true silently re-suspends the schedule (this
+# bit us the very first night: a config-only apply turned the pipeline off).
+# The generous startingDeadlineSeconds means a machine asleep at 21:00 that
+# wakes within 6h still runs: a late run backfills fine (the DEC fetch returns
+# full history per pass), but a day DEC published while we never ran at all is
+# a day of freshness lost until the next run.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -44,7 +46,7 @@ metadata:
 spec:
   schedule: "0 21 * * *"
   timeZone: "Asia/Colombo"
-  suspend: true # unsuspend only after a supervised run — see header + README
+  suspend: false # live since the 2026-07-26 cutover — see header
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 21600 # 6h catch-up window for a sleeping machine
   successfulJobsHistoryLimit: 3
