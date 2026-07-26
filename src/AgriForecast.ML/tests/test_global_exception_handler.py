@@ -20,41 +20,21 @@ Contract proven here
 
 Design notes
 ------------
-- Same TestClient / sys.modules-predict-stub pattern as test_admin_auth.py and
-  test_admin_error_leak.py.
-- A throwaway route is registered on the live ``app`` at import time to force
-  an unhandled exception through the middleware stack (the existing routes are
-  too well-guarded to raise one).
+- serving.predict is stubbed via the module-scoped
+  serving_app_with_stubbed_predict fixture (tests/conftest.py); the fixture
+  restores sys.modules on teardown so the stub cannot leak into other test
+  files during a full-suite run.
+- A throwaway route is registered on the fixture's app instance to force an
+  unhandled exception through the middleware stack (the existing routes are
+  too well-guarded to raise one).  The app is imported fresh per module, so
+  the extra route never leaks into other suites either.
 - raise_server_exceptions=False is REQUIRED so the TestClient lets the handler
   render the 500 response instead of re-raising the exception in-process.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-from types import ModuleType
-from unittest.mock import MagicMock
-
-# ---------------------------------------------------------------------------
-# Path setup -- allow `import agriforecast_ml` from the ML project root.
-# ---------------------------------------------------------------------------
-ML_ROOT = Path(__file__).resolve().parents[1]
-if str(ML_ROOT) not in sys.path:
-    sys.path.insert(0, str(ML_ROOT))
-
-# ---------------------------------------------------------------------------
-# Stub agriforecast_ml.serving.predict BEFORE app.py is imported so the
-# registry / DB call at module import time in predict.py never executes here.
-# (Same pattern as test_admin_auth.py / test_admin_error_leak.py.)
-# ---------------------------------------------------------------------------
-_predict_stub = ModuleType("agriforecast_ml.serving.predict")
-_predict_stub.model_info = MagicMock(return_value={"version": "v-test", "status": "stub"})
-_predict_stub.predict_harvest = MagicMock(return_value={})
-_predict_stub.timeline = MagicMock(return_value={"stub": True})
-sys.modules.setdefault("agriforecast_ml.serving.predict", _predict_stub)
-
-from agriforecast_ml.serving.app import app  # noqa: E402
-from starlette.testclient import TestClient    # noqa: E402
+import pytest
+from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
 # Constants.
@@ -70,17 +50,25 @@ BOOM_SENTINEL = "BOOM_LEAK_/srv/secret/model.pkl:token=abc123"
 
 # ---------------------------------------------------------------------------
 # Register a throwaway route that raises a BARE (non-HTTP) exception, so the
-# global backstop is actually exercised. Registered once at import time.
+# global backstop is actually exercised. Registered once per module on the
+# fixture's fresh app instance.
 # ---------------------------------------------------------------------------
 _BOOM_PATH = "/__test_boom__"
 
 
-@app.get(_BOOM_PATH)
-def _boom_route():  # pragma: no cover - body runs, but coverage tools miss raises
-    raise RuntimeError(BOOM_SENTINEL)
+@pytest.fixture(scope="module")
+def app(serving_app_with_stubbed_predict):
+    """The serving app (predict stubbed, hermetic) plus the boom route."""
+    fastapi_app = serving_app_with_stubbed_predict
+
+    @fastapi_app.get(_BOOM_PATH)
+    def _boom_route():  # pragma: no cover - body runs, but coverage tools miss raises
+        raise RuntimeError(BOOM_SENTINEL)
+
+    return fastapi_app
 
 
-def _client() -> TestClient:
+def _client(app) -> TestClient:
     # raise_server_exceptions=False lets the handler render the 500 body
     # instead of the TestClient re-raising the exception in-process.
     return TestClient(app, raise_server_exceptions=False)
@@ -93,21 +81,21 @@ def _client() -> TestClient:
 class TestGlobalBackstopNoLeak:
     """An unhandled exception must yield a fixed generic 500 with no leak."""
 
-    def test_unhandled_returns_500(self):
-        resp = _client().get(_BOOM_PATH)
+    def test_unhandled_returns_500(self, app):
+        resp = _client(app).get(_BOOM_PATH)
         assert resp.status_code == 500, (
             f"Unhandled exception must return 500; got {resp.status_code}. "
             f"Body: {resp.text}"
         )
 
-    def test_unhandled_body_is_exact_generic_detail(self):
-        resp = _client().get(_BOOM_PATH)
+    def test_unhandled_body_is_exact_generic_detail(self, app):
+        resp = _client(app).get(_BOOM_PATH)
         assert resp.json() == {"detail": "Internal server error."}, (
             f"Backstop must return exactly the generic body; got {resp.text}"
         )
 
-    def test_unhandled_body_leaks_nothing(self):
-        body = _client().get(_BOOM_PATH).text
+    def test_unhandled_body_leaks_nothing(self, app):
+        body = _client(app).get(_BOOM_PATH).text
         # None of the exception message or its recognisable fragments.
         for fragment in (
             BOOM_SENTINEL,
@@ -136,11 +124,11 @@ class TestHttpExceptionUnchanged:
     """Raising HTTPException in a route/dependency must still route through
     FastAPI's own handler with its intended status + detail."""
 
-    def test_admin_without_key_still_401(self, monkeypatch):
+    def test_admin_without_key_still_401(self, monkeypatch, app):
         """/admin/* with no key -> 401 with its existing detail, NOT swallowed
         into the generic 500 by the new backstop."""
         monkeypatch.setenv(ENV_VAR, CORRECT_KEY)
-        resp = _client().post(ADMIN_NEWS_PATH, json={})
+        resp = _client(app).post(ADMIN_NEWS_PATH, json={})
         assert resp.status_code == 401, (
             f"HTTPException(401) must survive the backstop; got {resp.status_code}. "
             f"Body: {resp.text}"
@@ -149,12 +137,12 @@ class TestHttpExceptionUnchanged:
             f"401 detail must be unchanged; got {resp.text}"
         )
 
-    def test_admin_misconfig_still_500_with_specific_detail(self, monkeypatch):
+    def test_admin_misconfig_still_500_with_specific_detail(self, monkeypatch, app):
         """Fail-closed HTTPException(500) from require_api_key keeps its OWN
         specific detail -- it must NOT be replaced by the generic backstop
         body (proving HTTPException is handled before the Exception backstop)."""
         monkeypatch.delenv(ENV_VAR, raising=False)
-        resp = _client().post(
+        resp = _client(app).post(
             ADMIN_NEWS_PATH, json={}, headers={"X-API-Key": "anything"}
         )
         assert resp.status_code == 500
