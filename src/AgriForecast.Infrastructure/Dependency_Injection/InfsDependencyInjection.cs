@@ -1,6 +1,7 @@
 using AgriForecast.Domain.Interfaces;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using AgriForecast.Infrastructure.Database;
 using AgriForecast.Infrastructure.ExternalSources.Interfaces;
 using AgriForecast.Infrastructure.Repositories;
@@ -64,6 +65,13 @@ public static class InfsDependencyInjection
         // Resolves the status handler's config at the Infrastructure boundary, keeping configuration out of
         // the Application layer.
         services.AddScoped<IIngestionStatusSettings, AgriForecast.Infrastructure.Services.IngestionRead.IngestionStatusSettings>();
+        // Window-scoped read store + schedule config behind GET /api/admin/pipeline/health ("did last
+        // night's pipeline run?"). The schedule mirrors k8s/pipeline-daily.yaml.
+        services.AddScoped<IPipelineHealthReadStore, AgriForecast.Infrastructure.Services.PipelineHealth.PipelineHealthReadStore>();
+        services.AddScoped<IPipelineScheduleSettings, AgriForecast.Infrastructure.Services.PipelineHealth.PipelineScheduleSettings>();
+        // The clock, injectable so the pipeline-health window math is testable at a fixed instant. The
+        // system provider is stateless, hence singleton.
+        services.TryAddSingleton(TimeProvider.System);
 
         // Ingestion service control (admin start/stop) — shared by the API and the Ingestion Worker.
         // All three are SINGLETON on purpose:

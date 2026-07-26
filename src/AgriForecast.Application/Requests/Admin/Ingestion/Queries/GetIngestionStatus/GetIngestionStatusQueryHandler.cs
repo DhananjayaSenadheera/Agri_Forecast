@@ -3,7 +3,6 @@ using AgriForecast.Application.common;
 using AgriForecast.Application.Requests.Admin.Ingestion.Common;
 using AgriForecast.Application.Services;
 using AgriForecast.Domain.Constants;
-using AgriForecast.Domain.Enums;
 using MediatR;
 
 namespace AgriForecast.Application.Requests.Admin.Ingestion.Queries.GetIngestionStatus;
@@ -70,7 +69,7 @@ public class GetIngestionStatusQueryHandler
                 lastRunAtUtc = latestRun.StartedUtc;
                 var statuses = await _store.GetRunStatusesForBatchAsync(
                     latestRun.BatchId, excluded, cancellationToken);
-                lastRunStatus = AggregateBatchStatus(statuses);
+                lastRunStatus = IngestionBatchRollup.Aggregate(statuses);
             }
         }
 
@@ -113,20 +112,9 @@ public class GetIngestionStatusQueryHandler
         return Result<IngestionStatus_GetDto>.Success(dto);
     }
 
-    // Batch roll-up: all Succeeded/Skipped -> "succeeded"; some Failed -> "partial"; all Failed ->
-    // "failed"; a Running row with no failures -> "partial", never a premature "succeeded".
-    private static string? AggregateBatchStatus(IReadOnlyList<IngestionRunStatus> statuses)
-    {
-        if (statuses.Count == 0) return null;
-
-        var anyFailed = statuses.Any(s => s == IngestionRunStatus.Failed);
-        if (anyFailed)
-            return statuses.All(s => s == IngestionRunStatus.Failed) ? "failed" : "partial";
-
-        var allGood = statuses.All(s =>
-            s == IngestionRunStatus.Succeeded || s == IngestionRunStatus.Skipped);
-        return allGood ? "succeeded" : "partial";
-    }
+    // Batch roll-up lives in IngestionBatchRollup, shared with the pipeline health endpoint: all
+    // Succeeded/Skipped -> "succeeded"; some Failed -> "partial"; all Failed -> "failed"; a Running row
+    // with no failures -> "partial", never a premature "succeeded".
 
     private static string Fmt(DateOnly d) => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 
