@@ -44,33 +44,56 @@ public class PortfolioReadStore : IPortfolioReadStore
             .ToListAsync(ct);
     }
 
-    public async Task<DateOnly?> GetLatestObservedDateAsync(
+    public async Task<IReadOnlyList<CropLatestObservation>> GetLatestObservedDatesAsync(
         IReadOnlyCollection<Guid> cropIds, Guid marketId, CancellationToken ct = default)
     {
-        if (cropIds.Count == 0) return null;
+        if (cropIds.Count == 0) return Array.Empty<CropLatestObservation>();
 
-        var usable = UsableRows(cropIds, marketId);
-        if (!await usable.AnyAsync(ct)) return null;
+        // One grouped MAX per crop, never a single MAX over the whole set — a crop's own freshest date is
+        // the only honest anchor for its own window.
+        var grouped = await UsableRows(cropIds, marketId)
+            .GroupBy(po => po.CropId)
+            .Select(g => new { CropId = g.Key, Latest = g.Max(po => po.ObservedDate) })
+            .ToListAsync(ct);
 
-        return await usable.MaxAsync(po => po.ObservedDate, ct);
+        // The null-CropId rows are already excluded by UsableRows; the HasValue filter is only what the
+        // nullable projection needs to unwrap the key.
+        return grouped
+            .Where(g => g.CropId.HasValue)
+            .Select(g => new CropLatestObservation(g.CropId!.Value, g.Latest))
+            .ToList();
     }
 
     public async Task<IReadOnlyList<PortfolioObservationRow>> GetObservationsAsync(
-        IReadOnlyCollection<Guid> cropIds, Guid marketId, DateOnly fromInclusive,
+        IReadOnlyCollection<CropObservationWindow> windows, Guid marketId,
         CancellationToken ct = default)
     {
-        if (cropIds.Count == 0) return Array.Empty<PortfolioObservationRow>();
+        if (windows.Count == 0) return Array.Empty<PortfolioObservationRow>();
 
-        return await UsableRows(cropIds, marketId)
-            .Where(po => po.ObservedDate >= fromInclusive)
-            .Select(po => new PortfolioObservationRow(
-                po.CropId!.Value,
-                po.ObservedDate,
-                po.MinPrice ?? 0m,
-                po.MaxPrice ?? 0m,
-                po.WholesalePrice ?? 0m,
-                po.RetailPrice ?? 0m))
-            .ToListAsync(ct);
+        // One query per DISTINCT window start, not one per crop: every crop quoted on the same day shares a
+        // window, so a watchlist at a live market is a single round trip. Grouping this way also keeps each
+        // read bounded by its own window instead of widening every crop's scan back to the stalest crop's
+        // start date, which is what a single min(from) would do.
+        var rows = new List<PortfolioObservationRow>();
+
+        foreach (var window in windows.GroupBy(w => w.FromInclusive))
+        {
+            var ids = window.Select(w => w.CropId).Distinct().ToArray();
+            var fromInclusive = window.Key;
+
+            rows.AddRange(await UsableRows(ids, marketId)
+                .Where(po => po.ObservedDate >= fromInclusive)
+                .Select(po => new PortfolioObservationRow(
+                    po.CropId!.Value,
+                    po.ObservedDate,
+                    po.MinPrice ?? 0m,
+                    po.MaxPrice ?? 0m,
+                    po.WholesalePrice ?? 0m,
+                    po.RetailPrice ?? 0m))
+                .ToListAsync(ct));
+        }
+
+        return rows;
     }
 
     public async Task<IReadOnlyList<PortfolioSnapshotRow>> GetLatestSnapshotsAsync(

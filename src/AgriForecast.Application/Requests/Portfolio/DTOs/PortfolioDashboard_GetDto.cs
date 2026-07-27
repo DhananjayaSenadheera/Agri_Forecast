@@ -52,8 +52,11 @@ public class PortfolioPrice_GetDto
 {
     public decimal Price { get; set; }
 
-    // yyyy-MM-dd. Always rendered next to the price: the dashboard shows the freshest price that EXISTS,
-    // with no staleness cutoff of its own, so the date is how the farmer judges how current it is.
+    // yyyy-MM-dd. Always rendered next to the price: the dashboard shows the freshest price that EXISTS for
+    // THIS crop at that market — no staleness cutoff, and no dependence on how fresh the farmer's other
+    // watched crops happen to be — so the date is how the farmer judges how current it is. It can be
+    // months old; that is a fact about the market's publishing, and the UI must show it as such rather
+    // than hide the price.
     public string ObservedDate { get; set; } = string.Empty;
 
     // Which market actually served this price — NOT necessarily the home market.
@@ -65,8 +68,9 @@ public class PortfolioPrice_GetDto
     // farmer's own would be dishonest.
     public bool IsFallbackMarket { get; set; }
 
-    // "up" / "down" / "steady" versus the immediately previous observation at the SAME market, or null
-    // when there is no earlier observation inside the window to compare against. Null is not "steady".
+    // "up" / "down" / "steady" versus the immediately previous observation at the SAME market, or null when
+    // there is no earlier observation within 30 days of THIS crop's own latest one to compare against. Null
+    // is not "steady", and a null direction never means the price beside it is missing or unreliable.
     public string? Direction { get; set; }
 
     // Signed percent change against PreviousPrice, 1 decimal place. Null whenever Direction is null.

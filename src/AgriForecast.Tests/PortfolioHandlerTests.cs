@@ -131,18 +131,24 @@ public class PortfolioHandlerTests
             => Observations.Where(o => o.MarketId == marketId && cropIds.Contains(o.Row.CropId))
                 .Select(o => o.Row);
 
-        public Task<DateOnly?> GetLatestObservedDateAsync(
+        // Per-crop MAX, exactly like the real store's GROUP BY — a crop with data is listed with its OWN
+        // freshest date, never with the set's.
+        public Task<IReadOnlyList<CropLatestObservation>> GetLatestObservedDatesAsync(
             IReadOnlyCollection<Guid> cropIds, Guid marketId, CancellationToken ct = default)
-        {
-            var dates = Usable(cropIds, marketId).Select(r => r.Date).ToList();
-            return Task.FromResult(dates.Count == 0 ? (DateOnly?)null : dates.Max());
-        }
+            => Task.FromResult<IReadOnlyList<CropLatestObservation>>(
+                Usable(cropIds, marketId)
+                    .GroupBy(r => r.CropId)
+                    .Select(g => new CropLatestObservation(g.Key, g.Max(r => r.Date)))
+                    .ToList());
 
+        // Each crop is filtered by its OWN window, mirroring the real store's per-window queries.
         public Task<IReadOnlyList<PortfolioObservationRow>> GetObservationsAsync(
-            IReadOnlyCollection<Guid> cropIds, Guid marketId, DateOnly fromInclusive,
+            IReadOnlyCollection<CropObservationWindow> windows, Guid marketId,
             CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<PortfolioObservationRow>>(
-                Usable(cropIds, marketId).Where(r => r.Date >= fromInclusive).ToList());
+                windows.SelectMany(w =>
+                        Usable(new[] { w.CropId }, marketId).Where(r => r.Date >= w.FromInclusive))
+                    .ToList());
 
         public Task<IReadOnlyList<PortfolioSnapshotRow>> GetLatestSnapshotsAsync(
             IReadOnlyCollection<Guid> cropIds, CancellationToken ct = default)
@@ -696,6 +702,64 @@ public class PortfolioHandlerTests
         price.Price.Should().Be(190m, "the latest price is still served");
         price.Direction.Should().BeNull(
             "a month-old quote is not what the farmer means by 'versus last time'");
+    }
+
+    [Fact]
+    public async Task Dashboard_AStaleCropKeepsItsOwnPrice_WhenAFresherCropIsAlsoWatched()
+    {
+        // The bug this pins: anchoring the price window on the MAX date across ALL watched crops made a
+        // crop's staleness cutoff depend on its siblings. Carrot (last quoted 1 June at the home market)
+        // showed its price when watched alone and vanished — or worse, came back flagged as an
+        // economic-centre fallback price — as soon as daily-quoted Tomato was added.
+        var store = NewStore();
+        Seed(store, UserA, Carrot, Keppetipola, dayOffset: 0);
+        Seed(store, UserA, Tomato, Keppetipola, dayOffset: 1);
+
+        store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 6, 1), min: 180m, max: 200m);
+        store.AddObservation(Keppetipola, Tomato, new DateOnly(2026, 7, 26), min: 100m, max: 120m);
+        store.AddObservation(Keppetipola, Tomato, new DateOnly(2026, 7, 27), min: 120m, max: 140m);
+        // The economic centre has a fresh Carrot price. It must NOT be reached for: the home market has a
+        // real Carrot price, and labelling Dambulla's number as the farmer's own would be dishonest.
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 27), min: 300m, max: 320m);
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        var carrot = result.Data.Items.Single(i => i.CropId == Carrot);
+        var price = carrot.Price!;
+        price.Price.Should().Be(190m, "the crop's own latest price is served however old it is");
+        price.ObservedDate.Should().Be("2026-06-01");
+        price.MarketId.Should().Be(Keppetipola);
+        price.IsFallbackMarket.Should().BeFalse(
+            "the home market does have this price — falling back would misreport whose price it is");
+        price.Direction.Should().BeNull("there is no second Carrot observation to compare against");
+        carrot.PriceUnavailableReason.Should().BeNull();
+
+        var tomato = result.Data.Items.Single(i => i.CropId == Tomato).Price!;
+        tomato.ObservedDate.Should().Be("2026-07-27");
+        tomato.Direction.Should().Be("up", "the fresher crop is unaffected by the staler one");
+    }
+
+    [Fact]
+    public async Task Dashboard_TrendWindowIsMeasuredFromEachCropsOwnLatestObservation()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, Dambulla, dayOffset: 0);
+        Seed(store, UserA, Tomato, Dambulla, dayOffset: 1);
+
+        // Carrot's two observations are two days apart but nearly two months behind Tomato's.
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 5, 30), min: 160m, max: 180m);
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 6, 1), min: 180m, max: 200m);
+        store.AddObservation(Dambulla, Tomato, new DateOnly(2026, 7, 27), min: 100m, max: 120m);
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        var price = result.Data.Items.Single(i => i.CropId == Carrot).Price!;
+        price.Direction.Should().Be("up",
+            "the 30-day trend window is cut from Carrot's own latest date, not from Tomato's");
+        price.PreviousObservedDate.Should().Be("2026-05-30");
+        price.ChangePct.Should().Be(11.8m);
     }
 
     [Fact]

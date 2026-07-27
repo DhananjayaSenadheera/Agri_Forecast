@@ -1,3 +1,5 @@
+using AgriForecast.Application.Requests.Portfolio.Commands.AddWatchlistCrop;
+using AgriForecast.Application.Services;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Interfaces;
 using AgriForecast.Infrastructure.Database;
@@ -6,6 +8,8 @@ using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AgriForecast.Tests;
 
@@ -213,6 +217,9 @@ public class UserCropWatchlistTests
         CREATE UNIQUE INDEX "UX_UserCropWatchlist_UserCrop" ON "UserCropWatchlist" ("UserId", "CropId");
         """;
 
+    private static AgriForecastDbContext NewContext(SqliteConnection connection)
+        => new(new DbContextOptionsBuilder<AgriForecastDbContext>().UseSqlite(connection).Options);
+
     // Only the one table is created. EnsureCreated is avoided for the same reason the audit tests avoid
     // it: the full model's ISJSON check constraint and SYSUTCDATETIME() defaults are not SQLite.
     private static async Task<(SqliteConnection conn, AgriForecastDbContext ctx)> BuildSqliteAsync()
@@ -220,8 +227,7 @@ public class UserCropWatchlistTests
         var connection = new SqliteConnection("DataSource=:memory:");
         await connection.OpenAsync();
 
-        var ctx = new AgriForecastDbContext(
-            new DbContextOptionsBuilder<AgriForecastDbContext>().UseSqlite(connection).Options);
+        var ctx = NewContext(connection);
 
         await ctx.Database.ExecuteSqlRawAsync(CreateWatchlistTableSql);
         return (connection, ctx);
@@ -285,5 +291,146 @@ public class UserCropWatchlistTests
         mine.Should().ContainSingle().Which.CropId.Should().Be(CropId);
         mine.Should().OnlyContain(r => r.UserId == UserId,
             "the user filter is baked into the query — there is no by-id load that could reach another farmer's row");
+    }
+
+    // The concurrent double-tap. The add handler's "is it already there?" check is a read-then-write, so
+    // two in-flight POSTs for the same crop can both decide to insert; the loser hits the unique index.
+    // Reproduced against a REAL database (two contexts on one SQLite connection, as two requests have two
+    // scoped contexts) because the whole point is the provider's exception, which a fake cannot raise.
+
+    // Models the read-then-write window precisely: the first read is answered from the snapshot the losing
+    // request would have taken before the winner committed (an empty watchlist), every read after that
+    // tells the truth. Everything else goes straight to the real repository.
+    private sealed class StaleFirstReadRepository : IUserCropWatchlistRepository
+    {
+        private readonly IUserCropWatchlistRepository _inner;
+        private bool _snapshotServed;
+
+        public StaleFirstReadRepository(IUserCropWatchlistRepository inner) => _inner = inner;
+
+        public Task<List<UserCropWatchlist>> GetAllForUserAsync(Guid userId, CancellationToken ct = default)
+        {
+            if (_snapshotServed) return _inner.GetAllForUserAsync(userId, ct);
+
+            _snapshotServed = true;
+            return Task.FromResult(new List<UserCropWatchlist>());
+        }
+
+        public Task AddAsync(UserCropWatchlist entity, CancellationToken ct = default)
+            => _inner.AddAsync(entity, ct);
+
+        public void Remove(UserCropWatchlist entity) => _inner.Remove(entity);
+    }
+
+    // The handler's post-commit read-back, served from the same SQLite database. Only the watchlist read is
+    // on the add path; anything else being called from here would be a bug worth failing loudly for.
+    private sealed class WatchlistOnlyReadStore : IPortfolioReadStore
+    {
+        private readonly AgriForecastDbContext _db;
+
+        public WatchlistOnlyReadStore(AgriForecastDbContext db) => _db = db;
+
+        public async Task<IReadOnlyList<WatchlistRow>> GetWatchlistAsync(
+            Guid userId, CancellationToken ct = default)
+            => await _db.UserCropWatchlists.AsNoTracking()
+                .Where(w => w.UserId == userId)
+                .Select(w => new WatchlistRow(
+                    w.CropId, "Carrot", "VEG000001", w.PreferredMarketId, null,
+                    w.CreatedAtUtc, w.UpdatedAtUtc))
+                .ToListAsync(ct);
+
+        public Task<IReadOnlyList<CropLatestObservation>> GetLatestObservedDatesAsync(
+            IReadOnlyCollection<Guid> cropIds, Guid marketId, CancellationToken ct = default)
+            => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<PortfolioObservationRow>> GetObservationsAsync(
+            IReadOnlyCollection<CropObservationWindow> windows, Guid marketId,
+            CancellationToken ct = default)
+            => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<PortfolioSnapshotRow>> GetLatestSnapshotsAsync(
+            IReadOnlyCollection<Guid> cropIds, CancellationToken ct = default)
+            => throw new NotSupportedException();
+
+        public Task<PortfolioMarketRow?> GetMarketAsync(Guid marketId, CancellationToken ct = default)
+            => throw new NotSupportedException();
+
+        public Task<PortfolioMarketRow?> GetEconomicCentreMarketAsync(CancellationToken ct = default)
+            => throw new NotSupportedException();
+
+        public Task<bool> CropExistsAsync(Guid cropId, CancellationToken ct = default)
+            => throw new NotSupportedException();
+    }
+
+    // Records only the levels, which is all the race test needs: a Warning proves the recovery path ran and
+    // that the test is still reproducing a real collision rather than quietly degrading into the ordinary
+    // sequential double-tap.
+    private sealed class LevelRecordingLogger<T> : ILogger<T>
+    {
+        public readonly List<LogLevel> Levels = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => Levels.Add(logLevel);
+    }
+
+    private static AddWatchlistCropCommandHandler AddHandler(
+        AgriForecastDbContext ctx, IUserCropWatchlistRepository repo,
+        ILogger<AddWatchlistCropCommandHandler>? logger = null)
+        => new(repo, new WatchlistOnlyReadStore(ctx), new UnitOfWorkRepository(ctx),
+            logger ?? NullLogger<AddWatchlistCropCommandHandler>.Instance);
+
+    [Fact]
+    public async Task Add_LosingAConcurrentInsertRace_IsAnswered200Idempotently_NotA500()
+    {
+        var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        await using var _c = connection;
+
+        await using var winnerCtx = NewContext(connection);
+        await using var loserCtx = NewContext(connection);
+        await winnerCtx.Database.ExecuteSqlRawAsync(CreateWatchlistTableSql);
+
+        var loserLog = new LevelRecordingLogger<AddWatchlistCropCommandHandler>();
+        var winner = AddHandler(winnerCtx, new UserCropWatchlistRepository(winnerCtx));
+        var loser = AddHandler(
+            loserCtx, new StaleFirstReadRepository(new UserCropWatchlistRepository(loserCtx)), loserLog);
+
+        var first = await winner.Handle(
+            new AddWatchlistCropCommand { UserId = UserId, CropId = CropId }, default);
+
+        // The loser saw an empty watchlist, so it inserts too — straight into UX_UserCropWatchlist_UserCrop.
+        var second = await loser.Handle(
+            new AddWatchlistCropCommand
+            {
+                UserId = UserId,
+                CropId = CropId,
+                PreferredMarketId = MarketId
+            },
+            default);
+
+        first.IsSuccess.Should().BeTrue();
+        first.Data.AlreadyPresent.Should().BeFalse();
+
+        second.IsSuccess.Should().BeTrue(
+            "the caller reached the state they asked for; a 500 for a double-tapped button would be a "
+            + "self-inflicted error report");
+        second.Data.AlreadyPresent.Should().BeTrue();
+        second.Data.Item.CropId.Should().Be(CropId);
+        loserLog.Levels.Should().Contain(LogLevel.Warning,
+            "the collision really happened and was recovered from — without this the test could pass on "
+            + "the ordinary sequential path and prove nothing");
+
+        await using var verifyCtx = NewContext(connection);
+        var stored = await verifyCtx.UserCropWatchlists.AsNoTracking()
+            .Where(w => w.UserId == UserId).ToListAsync();
+
+        stored.Should().ContainSingle("the unique index still holds — the race must not duplicate the row");
+        stored.Single().PreferredMarketId.Should().Be(MarketId,
+            "the losing request's explicit market choice is re-applied after the rollback, not dropped");
     }
 }

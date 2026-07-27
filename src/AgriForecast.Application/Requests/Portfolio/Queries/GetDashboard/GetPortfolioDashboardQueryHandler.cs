@@ -19,10 +19,13 @@ namespace AgriForecast.Application.Requests.Portfolio.Queries.GetDashboard;
 /// list silently disagree with what they added.
 /// </para>
 /// <para>
-/// 2. THE PRICE IS ANCHORED ON DATA, NOT ON THE CLOCK. The window ends at the market's own freshest usable
-/// observation (the IMarketOverviewStore pattern), so the response is identical whenever it is called and
-/// there is no invented staleness cutoff. The observed date ships with every price so the farmer can see
-/// for themselves how current it is.
+/// 2. THE LATEST PRICE IS UNCONSTRAINED, AND ANCHORED PER CROP. Whatever the freshest usable observation
+/// for a crop at that market is, that is what ships — there is no staleness cutoff and no wall-clock
+/// arithmetic, so the response is identical whenever it is called and a crop is never made to look
+/// priceless (or pushed to the fallback market) because it exists. The trend window below applies ONLY to
+/// whether a PREVIOUS observation is close enough to compare against, and it is measured from each crop's
+/// own latest date, never from a sibling crop's. The observed date ships with every price so the farmer
+/// can see for themselves how current it is.
 /// </para>
 /// <para>
 /// 3. THE PREDICTION IS READ, NEVER RECOMPUTED. The snapshot's frozen columns pass through verbatim —
@@ -33,13 +36,14 @@ public class GetPortfolioDashboardQueryHandler
     : IRequestHandler<GetPortfolioDashboardQuery, Result<PortfolioDashboard_GetDto>>
 {
     /// <summary>
-    /// How far back from the market's freshest observation the trend comparison may look.
+    /// How far back from A CROP'S OWN freshest observation the trend comparison may look.
     /// <para>
-    /// The trend is "versus the immediately previous observation", so this is only the horizon for FINDING
-    /// that previous point — 30 days is comfortably wider than any normal publishing gap (weekends,
-    /// holidays, a quiet week at a smaller market) while keeping the read to a few hundred rows. A crop
-    /// whose previous observation is older than this reports a price with a null direction rather than a
-    /// trend measured against a stale month-old quote.
+    /// This NEVER gates the latest price — a crop last quoted a year ago still reports that price. The
+    /// trend is "versus the immediately previous observation", so this is only the horizon for FINDING that
+    /// previous point: 30 days is comfortably wider than any normal publishing gap (weekends, holidays, a
+    /// quiet week at a smaller market) while keeping the read to a few hundred rows per crop. A crop whose
+    /// previous observation is older than this reports its price with a null direction rather than a trend
+    /// measured against a stale month-old quote.
     /// </para>
     /// </summary>
     public const int TrendWindowDays = 30;
@@ -137,8 +141,14 @@ public class GetPortfolioDashboardQueryHandler
         return Result<PortfolioDashboard_GetDto>.Success(dto);
     }
 
-    // Latest price + trend per crop at ONE market. Two store calls, matching the market-overview shape:
-    // a scalar anchor (the market's freshest usable date) then a bounded window fetch.
+    // Latest price + trend per crop at ONE market. Two store calls: a PER-CROP anchor (each crop's own
+    // freshest usable date at this market), then a window fetch cut from each crop's own anchor.
+    //
+    // The two concerns are deliberately separate. The anchor set decides WHICH crops this market can serve
+    // at all — a crop with any usable observation here is served here, however old it is, so a stale crop
+    // is never handed to the economic-centre fallback and never labelled isFallbackMarket for a price its
+    // own market really does have. The window decides only whether a PREVIOUS point is eligible for the
+    // trend.
     private async Task<Dictionary<Guid, PriceLeg>> BuildPriceLegsAsync(
         IReadOnlyCollection<Guid> cropIds,
         PortfolioMarketRow market,
@@ -147,12 +157,15 @@ public class GetPortfolioDashboardQueryHandler
     {
         var legs = new Dictionary<Guid, PriceLeg>();
 
-        var anchor = await _store.GetLatestObservedDateAsync(cropIds, market.Id, ct);
-        if (anchor is null)
+        var anchors = await _store.GetLatestObservedDatesAsync(cropIds, market.Id, ct);
+        if (anchors.Count == 0)
             return legs; // this market has no usable observation for any of these crops
 
-        var from = anchor.Value.AddDays(-(TrendWindowDays - 1));
-        var rows = await _store.GetObservationsAsync(cropIds, market.Id, from, ct);
+        var windows = anchors
+            .Select(a => new CropObservationWindow(a.CropId, EarliestComparable(a.LatestDate)))
+            .ToArray();
+
+        var rows = await _store.GetObservationsAsync(windows, market.Id, ct);
 
         // A single (crop, market, date) can carry several rows — multiple sources, or a re-published
         // bulletin — so the day's unit prices are averaged, exactly as the market overview does.
@@ -178,9 +191,14 @@ public class GetPortfolioDashboardQueryHandler
             var series = cropGroup.OrderBy(d => d.Date).ToList();
             var latest = series[^1];
 
-            // The immediately previous observation, if the window holds one. Not a fixed lag: the trend is
-            // "versus last time this crop was quoted here", which is what the farmer actually compares to.
-            var previous = series.Count >= 2 ? series[^2] : null;
+            // The immediately previous observation, if it is close enough to THIS crop's own latest. Not a
+            // fixed lag: the trend is "versus last time this crop was quoted here", which is what the
+            // farmer actually compares to. The eligibility test is re-stated here rather than left to the
+            // store's window so the rule lives where it is read — and so it stays measured against the
+            // latest USABLE row, which can be older than the anchor if the anchor day carried no price.
+            var previous = series.Count >= 2 && series[^2].Date >= EarliestComparable(latest.Date)
+                ? series[^2]
+                : null;
 
             string? direction = null;
             decimal? changePct = null;
@@ -210,6 +228,11 @@ public class GetPortfolioDashboardQueryHandler
 
         return legs;
     }
+
+    // The oldest date a previous observation may carry and still be comparable with an observation on
+    // latest — an inclusive TrendWindowDays-day window ending at latest.
+    private static DateOnly EarliestComparable(DateOnly latest)
+        => latest.AddDays(-(TrendWindowDays - 1));
 
     private static PortfolioPrice_GetDto ToPriceDto(PriceLeg leg) => new()
     {
