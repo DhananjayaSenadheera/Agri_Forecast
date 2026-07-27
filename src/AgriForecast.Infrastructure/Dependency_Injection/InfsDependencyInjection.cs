@@ -68,7 +68,16 @@ public static class InfsDependencyInjection
         // Window-scoped read store + schedule config behind GET /api/admin/pipeline/health ("did last
         // night's pipeline run?"). The schedule mirrors k8s/pipeline-daily.yaml.
         services.AddScoped<IPipelineHealthReadStore, AgriForecast.Infrastructure.Services.PipelineHealth.PipelineHealthReadStore>();
-        services.AddScoped<IPipelineScheduleSettings, AgriForecast.Infrastructure.Services.PipelineHealth.PipelineScheduleSettings>();
+        // SINGLETON, unlike the read store next to it: this is immutable configuration with no DbContext
+        // behind it, and the API's nightly sentinel is a singleton hosted service that needs the same
+        // schedule the request-scoped handler uses. A scoped registration would be a captive dependency.
+        services.AddSingleton<IPipelineScheduleSettings, AgriForecast.Infrastructure.Services.PipelineHealth.PipelineScheduleSettings>();
+        // Nightly pipeline email sentinel: behaviour knobs ("Sentinel" section) and the SMTP send seam
+        // ("Smtp" section). Both singletons — immutable config and a stateless sender. Registered here so
+        // the Application/API layers never see IConfiguration; the sentinel loop itself is wired in the
+        // API (the Ingestion Worker resolves neither).
+        services.AddSingleton<ISentinelSettings, AgriForecast.Infrastructure.Services.PipelineSentinel.SentinelSettings>();
+        services.AddSingleton<ISentinelMailer, AgriForecast.Infrastructure.Services.PipelineSentinel.SmtpSentinelMailer>();
         // The clock, injectable so the pipeline-health window math is testable at a fixed instant. The
         // system provider is stateless, hence singleton.
         services.TryAddSingleton(TimeProvider.System);

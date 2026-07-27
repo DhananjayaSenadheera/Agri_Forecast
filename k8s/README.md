@@ -11,8 +11,8 @@ No RabbitMQ yet (later phase). No application code was changed for this.
 | File | Purpose |
 |---|---|
 | `namespace.yaml` | Namespace `agriforecast` — everything lives here |
-| `secrets.template.yaml` | **Documentation only** — the shape of the 3 secrets. Never fill it in |
-| `create-secrets.sh` | Creates the real secrets from `src/AgriForecast.ML/.env` + a prompted JWT key |
+| `secrets.template.yaml` | **Documentation only** — the shape of the secrets. Never fill it in |
+| `create-secrets.sh` | Creates the real secrets from `src/AgriForecast.ML/.env` + a prompted JWT key (+ optional SMTP) |
 | `ml-serving.yaml` | ML FastAPI Deployment + **ClusterIP** Service `ml-serving:8077` (internal-only on purpose) |
 | `forecast-api.yaml` | .NET API Deployment + **NodePort** Service → `http://localhost:30082` |
 | `pipeline-daily.yaml` | CronJob `daily-pipeline`, 21:00 Asia/Colombo, **suspended by default** |
@@ -54,9 +54,10 @@ no registry) — Docker Desktop's Kubernetes shares the host image store.
 It reads DB creds + the ML admin key from the gitignored
 `src/AgriForecast.ML/.env` and prompts (hidden input) for the JWT signing key
 — copy that from `dotnet user-secrets list --project src/AgriForecast.API`.
-Nothing is echoed; nothing secret is ever committed. Re-run it after any
-credential rotation, then restart the deployments (the script prints the
-command).
+It then offers the **optional** SMTP account for email alerts (see below);
+press Enter to skip. Nothing is echoed; nothing secret is ever committed.
+Re-run it after any credential rotation, then restart the deployments (the
+script prints the command).
 
 ### 4. Apply the manifests
 
@@ -84,6 +85,59 @@ The ML service is intentionally **not** reachable from the host (its predict
 routes are unauthenticated; being cluster-internal IS the security boundary).
 To spot-check it: `kubectl port-forward svc/ml-serving 8077:8077 -n
 agriforecast` and curl `http://localhost:8077/health`, then Ctrl-C.
+
+## Email alerts
+
+The API contains a **pipeline sentinel**: once a night at **22:30 Asia/Colombo**
+(90 minutes after the 21:00 fire) it reads its own
+`GET /api/admin/pipeline/health` in-process and emails the owner when the night
+was not green — `missing` (did not run), `failed`, `gate_blocked` or `partial`.
+A night still `running` is re-read every 30 minutes until it settles, and so is
+a `missing` one **until the 6-hour catch-up window closes at 03:00** — a node
+asleep at 21:00 may legitimately start at 02:00 and still count, so an empty
+window at 22:30 is "not yet", not "never". On a good
+night it sends a one-line **all-clear heartbeat**, on purpose: an alert-only
+sentinel is indistinguishable from a broken one, so missing mail is itself the
+signal. Every message links back to `/admin/logs/ingestion`.
+
+It is **opt-in and self-disabling**. With no `agri-smtp` secret the pod is
+completely healthy; the API logs `sentinel disabled: Smtp not configured` once
+at startup and never tries again.
+
+**Turn it on (you run this — the repo holds no credential):**
+
+1. Create a Gmail **app password** — Google requires one for SMTP and rejects
+   the normal account password:
+   [myaccount.google.com](https://myaccount.google.com) → **Security** →
+   **2-Step Verification** (turn it on if it is not already) → **App
+   passwords** → create one (any name, e.g. "AgriForecast") → copy the
+   16-character value.
+2. Run the secrets script and answer the three SMTP prompts (address, app
+   password — hidden, recipient — defaults to the same address):
+   ```bash
+   ./k8s/create-secrets.sh
+   ```
+3. Restart the API so it picks the secret up (pods do **not** reload secrets):
+   ```bash
+   kubectl rollout restart deployment/forecast-api -n agriforecast
+   kubectl logs deployment/forecast-api -n agriforecast | grep -i sentinel
+   # expect: "Pipeline sentinel armed: nightly check at 22:30 Asia/Colombo; green heartbeat ON"
+   ```
+
+**Knobs** (`appsettings.json` / env, all optional):
+
+| Key | Env | Default | Meaning |
+|---|---|---|---|
+| `Sentinel:LocalCheckTime` | `Sentinel__LocalCheckTime` | `22:30` | Check time, wall clock in `PipelineSchedule:TimeZone` |
+| `Sentinel:SendGreenHeartbeat` | `Sentinel__SendGreenHeartbeat` | `true` | All-clear mail on a good night |
+| `Sentinel:RunningRecheckMinutes` | `Sentinel__RunningRecheckMinutes` | `30` | Re-read interval for a still-running night |
+| `Sentinel:AdminLogsUrl` | `Sentinel__AdminLogsUrl` | cluster UI ingestion log | Link at the foot of every message |
+| `Smtp:Host` / `Smtp:Port` | `Smtp__Host` / `Smtp__Port` | `smtp.gmail.com` / `587` | STARTTLS |
+| `Smtp:SendTimeoutSeconds` | `Smtp__SendTimeoutSeconds` | `30` | Hard deadline on one send (`SmtpClient.Timeout` does **not** bound `SendMailAsync`) |
+| `Smtp:User` / `From` / `To` / `Password` | `Smtp__*` | *(empty)* | From `agri-smtp`; `From` defaults to `User`, `To` accepts a comma-separated list |
+
+To turn alerts back **off**: `kubectl delete secret agri-smtp -n agriforecast`
+and restart the deployment.
 
 ## The pipelines — supervised test, then cut over
 

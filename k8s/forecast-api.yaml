@@ -94,6 +94,30 @@ spec:
             # what says whether the pass in flight belongs to this process.
             - name: Ingestion__ServiceAddress
               value: "k8s cronjob/daily-pipeline (agriforecast); admin-triggered passes run on this API"
+            # --- Nightly pipeline email sentinel (OPTIONAL) ---
+            # Every key is `optional: true`, so the pod starts and stays healthy
+            # when the agri-smtp secret does not exist — the API just logs
+            # "sentinel disabled: Smtp not configured" once and idles. Create
+            # the secret with ./k8s/create-secrets.sh (it prompts, and the
+            # prompt is skippable) and restart this deployment to switch alerts
+            # on. SMTP_PASSWORD is a Gmail APP PASSWORD and lives only in the
+            # secret; no value is ever committed here.
+            - name: Smtp__User
+              valueFrom:
+                secretKeyRef: { name: agri-smtp, key: SMTP_USER, optional: true }
+            - name: Smtp__From
+              valueFrom:
+                secretKeyRef: { name: agri-smtp, key: SMTP_FROM, optional: true }
+            - name: Smtp__To
+              valueFrom:
+                secretKeyRef: { name: agri-smtp, key: SMTP_TO, optional: true }
+            - name: Smtp__Password
+              valueFrom:
+                secretKeyRef: { name: agri-smtp, key: SMTP_PASSWORD, optional: true }
+            # The link the alert email points at: the cluster UI's ingestion
+            # log, which is where the evidence for a bad night lives.
+            - name: Sentinel__AdminLogsUrl
+              value: "http://localhost:30080/admin/logs/ingestion"
           # KNOWN LIMITATION (F-08 corollary): through Docker Desktop's
           # NodePort forwarding every host client presents the same source
           # IP, so the per-IP rate limiter effectively shares ONE bucket
