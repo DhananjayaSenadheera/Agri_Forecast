@@ -138,6 +138,26 @@ public class AdminAuthorizationWiringTests
         IsAnonymous(typeof(AdminForecastAccuracyController), method).Should().BeFalse();
     }
 
+    // PortfolioController: every action is authenticated but NOT Admin-locked — this is each farmer's own
+    // surface, the exact opposite of the accuracy controller above. Admin-locking it would lock every
+    // farmer out of their own watchlist; leaving an action anonymous would expose personal data to anyone,
+    // because the owner is resolved from the JWT subject and an anonymous request has no subject to scope
+    // to. Both mistakes are one attribute away, so each action is asserted individually.
+    [Theory]
+    [InlineData(nameof(PortfolioController.GetWatchlist))]
+    [InlineData(nameof(PortfolioController.AddToWatchlist))]
+    [InlineData(nameof(PortfolioController.UpdateWatchlistMarket))]
+    [InlineData(nameof(PortfolioController.RemoveFromWatchlist))]
+    [InlineData(nameof(PortfolioController.GetDashboard))]
+    public void PortfolioEndpoints_RequireAuth_ButNotAdmin(string method)
+    {
+        RequiresAuthOnly(typeof(PortfolioController), method).Should().BeTrue(
+            $"PortfolioController.{method} is a farmer's own data: authenticated, not Admin-gated");
+        IsAnonymous(typeof(PortfolioController), method).Should().BeFalse(
+            $"PortfolioController.{method} resolves its owner from the JWT, so anonymous access has no owner");
+        IsAdminLocked(typeof(PortfolioController), method).Should().BeFalse();
+    }
+
     // Auth endpoints stay anonymous by design.
     [Theory]
     [InlineData(nameof(AuthController.Register))]
