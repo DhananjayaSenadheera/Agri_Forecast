@@ -1,6 +1,7 @@
 using System.Globalization;
 using AgriForecast.Application.common;
 using AgriForecast.Application.Requests.Forecast.DTOs;
+using AgriForecast.Application.Requests.Prices;
 using AgriForecast.Application.Services;
 using MediatR;
 using Microsoft.Extensions.Logging;
@@ -97,15 +98,10 @@ public class GetMarketOverviewQueryHandler
 
     // Price precedence: both Min and Max > 0 -> midpoint; else Wholesale; else Retail; else whichever of
     // Max or Min is > 0; otherwise no valid price and the row is skipped. 0 means absent here.
+    // The rule itself now lives in ObservedUnitPrice so the portfolio dashboard shows the same number for
+    // the same row; this stays as the local name the code below reads by.
     private static decimal? UnitPrice(decimal min, decimal max, decimal wholesale, decimal retail)
-    {
-        if (min > 0m && max > 0m) return (min + max) / 2m;
-        if (wholesale > 0m) return wholesale;
-        if (retail > 0m) return retail;
-        if (max > 0m) return max;
-        if (min > 0m) return min;
-        return null;
-    }
+        => ObservedUnitPrice.From(min, max, wholesale, retail);
 
     private static List<MarketMover_GetDto> BuildMovers(List<DailyPoint> windowDaily)
     {

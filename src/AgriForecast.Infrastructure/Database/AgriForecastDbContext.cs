@@ -31,6 +31,9 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<IngestionVerification> IngestionVerifications { get; set; }
     public DbSet<ModelTrainingRun> ModelTrainingRuns { get; set; }
     public DbSet<ForecastSnapshot> ForecastSnapshots { get; set; }
+    // Mapped to the singular table name UserCropWatchlist; the DbSet is plural only because the property
+    // cannot share its name with the entity type. Same shape as UserActivityLog above.
+    public DbSet<UserCropWatchlist> UserCropWatchlists { get; set; }
     public DbSet<UserActivityEvent> UserActivityLog { get; set; }
     public DbSet<SystemError> SystemErrors { get; set; }
 
@@ -577,6 +580,43 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             // Dashboard read path: "latest snapshot per crop", newest first.
             e.HasIndex(x => new { x.CropId, x.SnapshotDate }, "IX_ForecastSnapshots_CropSnapshotDateDesc")
                 .IsDescending(false, true);
+        });
+
+        // FARMER WATCHLIST rows — one per (user, crop) the farmer has added to "my crops". Personal data:
+        // owner-scoped in every query, never aggregated across users, never read by the ML layer.
+        modelBuilder.Entity<UserCropWatchlist>(e =>
+        {
+            e.ToTable("UserCropWatchlist");
+
+            // CASCADE from Users: deleting an account takes its watchlist with it. Nothing here outlives
+            // its owner, and an orphan row would be personal data with nobody to scope it to.
+            e.HasOne<User>()
+                .WithMany()
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // RESTRICT on Crops and Markets: reference data a farmer is actively watching cannot be
+            // deleted out from under them, and the delete fails loudly instead of silently emptying a
+            // watchlist. Both FKs are explicitly NoAction/Restrict rather than defaulted, because with
+            // three FKs on one table SQL Server would otherwise reject multiple cascade paths.
+            e.HasOne<Crop>()
+                .WithMany()
+                .HasForeignKey(x => x.CropId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasOne<Market>()
+                .WithMany()
+                .HasForeignKey(x => x.PreferredMarketId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.Property(x => x.CreatedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+            e.Property(x => x.UpdatedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+
+            // One row per crop per farmer. Also the read path for "everything this user watches": UserId is
+            // the leading column, so the user-scoped list and the user-wide home-market update both seek on
+            // this index rather than scanning.
+            e.HasIndex(x => new { x.UserId, x.CropId }, "UX_UserCropWatchlist_UserCrop")
+                .IsUnique();
         });
 
         // User ACTIVITY rows — one per account or content event, written by IUserActivityAudit. EventType is

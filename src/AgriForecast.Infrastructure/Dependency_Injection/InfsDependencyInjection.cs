@@ -63,6 +63,9 @@ public static class InfsDependencyInjection
         // Read-only ForecastSnapshots store behind the admin "Forecast accuracy" surface. Reads only —
         // the nightly Python job owns every write to that table.
         services.AddScoped<IForecastAccuracyReadStore, AgriForecast.Infrastructure.Services.ForecastAccuracyRead.ForecastAccuracyReadStore>();
+        // Read-only store behind the farmer portfolio (GET /api/portfolio/watchlist and /dashboard). Every
+        // read it exposes is owner-scoped by signature; the watchlist WRITES go through the repository below.
+        services.AddScoped<IPortfolioReadStore, AgriForecast.Infrastructure.Services.PortfolioRead.PortfolioReadStore>();
         // Resolves the status handler's config at the Infrastructure boundary, keeping configuration out of
         // the Application layer.
         services.AddScoped<IIngestionStatusSettings, AgriForecast.Infrastructure.Services.IngestionRead.IngestionStatusSettings>();
@@ -83,6 +86,7 @@ public static class InfsDependencyInjection
         services.AddSingleton<IBackgroundWorkLauncher, AgriForecast.Infrastructure.Services.IngestionControl.BackgroundWorkLauncher>();
         services.AddScoped<IIngestionWatermarkRepository, IngestionWatermarkRepository>();
         services.AddScoped<IIngestionRunRepository, IngestionRunRepository>();
+        services.AddScoped<IUserCropWatchlistRepository, UserCropWatchlistRepository>();
         services.AddScoped<IUserRepository, UserRepository>();
         services.AddScoped<IPasswordHasher, PasswordHasher>();
         services.AddScoped<IJwtTokenGenerator, JwtTokenGenerator>();
