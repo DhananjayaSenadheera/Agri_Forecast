@@ -43,6 +43,8 @@ public class GetIngestionRunsValidatorTests
     [InlineData("DAMBULLA_DEC", true)]
     [InlineData("harti", true)]        // case-insensitive
     [InlineData("cbsl_macro", true)]
+    [InlineData("FORECAST_SNAPSHOT", true)]
+    [InlineData("forecast_snapshot", true)]  // case-insensitive
     [InlineData("BOGUS", false)]
     [InlineData("DAMBULLA", false)]    // partial is not a match
     public void Source_KnownOnly(string? source, bool expectedValid)

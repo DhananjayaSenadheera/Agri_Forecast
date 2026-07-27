@@ -405,11 +405,15 @@ class SnapshotForecastsRequest(BaseModel):
 def snapshot_forecasts_endpoint(req: SnapshotForecastsRequest):
     """Run the forecast-snapshot pass (one prediction per crop) and the maturing pass.
 
-    Called by the .NET Ingestion Worker last in the daily pass, so it predicts against
-    that night's freshly ingested prices. Per-crop failures are counted inside the summary
-    and never fail the request; a rejected snapshotDate is a 422, and only an unexpected
-    whole-pass failure surfaces as a 502, which the Worker records without advancing its
-    watermark. The module is imported lazily so a breakage here cannot block serving
+    Called by trigger_forecast_snapshot.py (a Python entry point in the daily pipeline's
+    build-features container), AFTER build_features.py has rebuilt CropFeatureDaily --
+    see the PRD's 2026-07-27 CORRECTED note in 4.2: this is what the snapshot/mature
+    passes actually read, and a caller earlier in the pipeline (the original spec's ".NET
+    Worker, last in its pass") would predict and score against a feature store one
+    pipeline-day stale. Per-crop failures are counted inside the summary and never fail
+    the request; a rejected snapshotDate is a 422, and only an unexpected whole-pass
+    failure surfaces as a 502, which the caller records without raising further (fail-soft
+    -- PRD 3.7). The module is imported lazily so a breakage here cannot block serving
     startup or /predict.
 
     The response is the PRD 4.2 summary shape plus ONE added key, `snapshot.frozen`: the

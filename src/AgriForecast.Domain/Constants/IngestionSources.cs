@@ -24,10 +24,21 @@ public static class IngestionSources
     /// </summary>
     public const string FeatureBuild = "FEATURE_BUILD";
 
+    /// <summary>
+    /// Run row for the nightly forecast-snapshot trigger (farmer-portfolio PRD 4.2). Written by
+    /// trigger_forecast_snapshot.py (Python, agriforecast_ml/snapshot_run_log.py), invoked from the
+    /// daily pipeline's build-features container AFTER build_features.py — not by any .NET ingestion
+    /// service (the original ".NET Worker, last in its pass" design was corrected 2026-07-27: the
+    /// snapshot/mature passes read CropFeatureDaily, which is only current once the feature build has
+    /// run). This key exists here purely so the admin runs list/filters recognise it — it is a real run
+    /// row (listed and filterable), not an ingestion source.
+    /// </summary>
+    public const string ForecastSnapshot = "FORECAST_SNAPSHOT";
+
     /// <summary>Every source key that can appear in <c>IngestionRuns.Source</c>.</summary>
     public static readonly IReadOnlyCollection<string> KnownKeys = new[]
     {
-        DambullaDec, Weather, Economic, News, Harti, Cbsl, CbslMacro, FeatureBuild
+        DambullaDec, Weather, Economic, News, Harti, Cbsl, CbslMacro, FeatureBuild, ForecastSnapshot
     };
 
     /// <summary>

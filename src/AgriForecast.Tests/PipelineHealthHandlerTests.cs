@@ -32,9 +32,14 @@ public class PipelineHealthHandlerTests
     private static readonly DateTime FireUtc = new(2026, 7, 26, 15, 30, 0, DateTimeKind.Utc);
     private const string ExpectedNight = "2026-07-26";
 
-    // The seven real ingestion sources, i.e. everything except FEATURE_BUILD.
+    // The seven real ingestion-Worker sources, i.e. everything except FEATURE_BUILD and
+    // FORECAST_SNAPSHOT — both of the latter are written by standalone Python steps in the
+    // build-features container, each minting its own solo BatchId (see FeatureBuild() below and
+    // trigger_forecast_snapshot.py), never joining the Worker's shared batch that CleanBatch simulates.
     private static readonly string[] IngestionSourceKeys =
-        IngestionSources.KnownKeys.Where(k => k != IngestionSources.FeatureBuild).ToArray();
+        IngestionSources.KnownKeys
+            .Where(k => k != IngestionSources.FeatureBuild && k != IngestionSources.ForecastSnapshot)
+            .ToArray();
 
     // In-memory IngestionRuns + IngestionVerifications, mirroring PipelineHealthReadStore's semantics —
     // including the two-pass batch scoping, which is the only reason a batch that merely SPILLED into

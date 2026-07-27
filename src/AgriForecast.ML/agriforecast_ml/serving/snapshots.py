@@ -542,12 +542,13 @@ def run(snapshot_date: date | str | None = None, *, run_mature: bool = True,
     failures are counted in `errors` and never raise: this job is report-only and must
     not fail a pipeline.
     """
-    engine = get_engine()
     if isinstance(snapshot_date, str):
         snapshot_date = date.fromisoformat(snapshot_date)
     snap_date = snapshot_date or date.today()
     as_of = today or date.today()
     _validate_snapshot_date(snap_date, as_of)
+
+    engine = get_engine()
 
     snapshot_summary, snapshot_failures = _snapshot_pass(engine, snap_date, dry_run=dry_run)
     if run_mature:
