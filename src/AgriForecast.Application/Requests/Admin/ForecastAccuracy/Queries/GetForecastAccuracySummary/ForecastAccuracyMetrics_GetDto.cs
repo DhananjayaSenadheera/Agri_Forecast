@@ -10,9 +10,10 @@ public class ForecastAccuracyMetrics_GetDto
     // Matured rows in this group — the population.
     public int MaturedCount { get; set; }
 
-    // Of those, the rows carrying a usable percentage error: the denominator of mape/medianApe/
-    // signedBias. Below maturedCount only if the maturing pass left an error column null, which is
-    // worth seeing rather than smoothing over.
+    // Of those, the rows carrying BOTH a percentage error and a signed error. It is the denominator of
+    // mape, medianApe AND signedBias: the three are computed over that one shared filter, so the
+    // denominators coincide by construction rather than by luck. Below maturedCount only if the maturing
+    // pass left an error column null, which is worth seeing rather than smoothing over.
     public int ScoredCount { get; set; }
 
     // Mean absolute percentage error, in PERCENT units (12.5 = 12.5%). Sensitive to outliers, which on

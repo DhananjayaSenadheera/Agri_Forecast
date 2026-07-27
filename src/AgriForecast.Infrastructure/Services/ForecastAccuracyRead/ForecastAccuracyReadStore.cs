@@ -42,12 +42,14 @@ public class ForecastAccuracyReadStore : IForecastAccuracyReadStore
     }
 
     public async Task<IReadOnlyList<ForecastSnapshotScoringRow>> GetMaturedScoringRowsAsync(
-        CancellationToken ct = default)
+        DateOnly fromSnapshotDate, CancellationToken ct = default)
     {
-        // MATURED ONLY. The other three states carry no actual price to score against, and letting one
-        // through would move a metric without ever showing up as a row in the ledger.
+        // MATURED ONLY, and only inside the caller's window. The other three states carry no actual
+        // price to score against, and letting one through would move a metric without ever showing up
+        // as a row in the ledger.
         return await _db.ForecastSnapshots.AsNoTracking()
             .Where(s => s.MaturityState == ForecastSnapshotMaturityStates.Matured)
+            .Where(s => s.SnapshotDate >= fromSnapshotDate)
             .Select(s => new ForecastSnapshotScoringRow(
                 s.ActivePredictor,
                 s.ModelVersion,
@@ -69,6 +71,11 @@ public class ForecastAccuracyReadStore : IForecastAccuracyReadStore
         if (cropId.HasValue)
             q = q.Where(s => s.CropId == cropId.Value);
 
+        // KNOWN AND ACCEPTED: this comparison runs under the database's case-INSENSITIVE collation, so
+        // ?modelVersion=V17 matches rows stored as "v17", while the summary's in-memory grouping is
+        // Ordinal and would keep "V17" and "v17" apart. The two can only disagree if the writer ever
+        // varies the casing, which it does not (the version string is minted once per training run), and
+        // a forgiving filter is the friendlier behaviour for a hand-typed admin query string.
         if (!string.IsNullOrWhiteSpace(modelVersion))
             q = q.Where(s => s.ModelVersion == modelVersion);
 
@@ -86,7 +93,7 @@ public class ForecastAccuracyReadStore : IForecastAccuracyReadStore
         // on the outer query — ordering inside a subquery is not guaranteed to survive the join.
         var items = await q
             .Join(
-                _db.Crops.AsNoTracking(),
+                _db.Crops,
                 s => s.CropId,
                 c => c.Id,
                 (s, c) => new { Snapshot = s, Crop = c })

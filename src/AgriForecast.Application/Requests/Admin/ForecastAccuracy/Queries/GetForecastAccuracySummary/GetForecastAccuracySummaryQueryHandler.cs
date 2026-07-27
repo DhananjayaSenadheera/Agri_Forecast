@@ -6,9 +6,9 @@ using MediatR;
 
 namespace AgriForecast.Application.Requests.Admin.ForecastAccuracy.Queries.GetForecastAccuracySummary;
 
-// Two reads (the state census, then the matured scoring rows) and the aggregation from
-// ForecastAccuracyMath. The handler stays a mapper: all the maths is in that one tested class, and the
-// DB is behind IForecastAccuracyReadStore.
+// Two reads (the all-time state census, then the matured scoring rows inside the window) and the
+// aggregation from ForecastAccuracyMath. The handler stays a mapper: all the maths is in that one tested
+// class, and the DB is behind IForecastAccuracyReadStore.
 //
 // An empty table is a normal answer, not an error: zero counts, null latest date, and empty group lists.
 public class GetForecastAccuracySummaryQueryHandler
@@ -21,12 +21,20 @@ public class GetForecastAccuracySummaryQueryHandler
     public async Task<Result<ForecastAccuracySummary_GetDto>> Handle(
         GetForecastAccuracySummaryQuery request, CancellationToken cancellationToken)
     {
+        // The census is ALL-TIME on purpose (see ForecastAccuracySummary_GetDto.Counts); only the
+        // scoring rows are windowed.
         var census = await _store.GetCensusAsync(cancellationToken);
-        var matured = await _store.GetMaturedScoringRowsAsync(cancellationToken);
+
+        // SnapshotDate is a plain calendar date with no zone attached, so the cutoff is taken from UTC
+        // today. At the ±5:30 Colombo offset that can move the boundary by one day either way, which is
+        // immaterial for a window measured in hundreds of days and keeps the handler clock-free.
+        var fromSnapshotDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-request.WindowDays);
+        var matured = await _store.GetMaturedScoringRowsAsync(fromSnapshotDate, cancellationToken);
 
         var dto = new ForecastAccuracySummary_GetDto
         {
             GeneratedAtUtc = AsUtc(DateTime.UtcNow),
+            WindowDays = request.WindowDays,
             LatestSnapshotDate = census.LatestSnapshotDate.HasValue
                 ? Fmt(census.LatestSnapshotDate.Value)
                 : null,

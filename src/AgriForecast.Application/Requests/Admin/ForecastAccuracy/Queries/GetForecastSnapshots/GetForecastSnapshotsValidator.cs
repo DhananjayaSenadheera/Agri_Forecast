@@ -25,9 +25,14 @@ public class GetForecastSnapshotsValidator : AbstractValidator<GetForecastSnapsh
 
         // An all-zeroes GUID matches nothing and is almost always a client bug (an unset variable
         // serialised). Rejected loudly instead of returning a confusing empty page.
+        //
+        // OverridePropertyName because the rule is expressed on the nullable's .Value: without it the
+        // 400 body keys the error under "CropId.Value", which is an implementation detail of this
+        // validator rather than the name of anything the caller sent.
         RuleFor(q => q.CropId!.Value)
             .NotEqual(Guid.Empty)
             .When(q => q.CropId.HasValue)
+            .OverridePropertyName(nameof(GetForecastSnapshotsQuery.CropId))
             .WithMessage("cropId must not be an empty GUID.");
 
         RuleFor(q => q.ModelVersion!)

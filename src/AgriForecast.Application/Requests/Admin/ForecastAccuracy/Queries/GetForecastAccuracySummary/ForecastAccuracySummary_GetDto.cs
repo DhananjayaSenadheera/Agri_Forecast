@@ -10,6 +10,11 @@ public class ForecastAccuracySummary_GetDto
     // When this summary was computed, so the admin page can show the staleness of its own poll.
     public DateTime GeneratedAtUtc { get; set; }
 
+    // The window the AGGREGATES cover: matured rows whose snapshotDate falls in the last N days. Echoed
+    // back so a number is never read without knowing what it spans — the same MAPE means something very
+    // different over 30 days than over 10 years.
+    public int WindowDays { get; set; }
+
     // yyyy-MM-dd of the newest snapshot on file, or null when the table is empty. This is the nightly
     // job's heartbeat: a date that stops advancing means the snapshot pass has stopped running, which
     // no accuracy metric would otherwise reveal.
@@ -17,10 +22,16 @@ public class ForecastAccuracySummary_GetDto
 
     // Row census across every maturity state. Counts, unlike accuracy, are not split by predictor —
     // they describe the ledger, not the model's skill.
+    //
+    // DELIBERATE ASYMMETRY: counts are ALL-TIME, the metrics below are WINDOWED. The census answers "is
+    // the nightly job running and is the ledger healthy?", which a window would hide — a pile of
+    // actual_unavailable rows from eighteen months ago is still a fact about the pipeline. The metrics
+    // answer "how is the model doing lately?", which all-time history would blur. So counts.matured is
+    // expected to exceed the summed maturedCount of the groups, and that gap is not a bug.
     public ForecastSnapshotCounts_GetDto Counts { get; set; } = new();
 
-    // Aggregates over MATURED rows only, one entry per active predictor (e.g. "residual" vs
-    // "crop_mean_fallback"). Empty when nothing has matured yet.
+    // Aggregates over MATURED rows inside windowDays only, one entry per active predictor (e.g.
+    // "residual" vs "crop_mean_fallback"). Empty when nothing has matured in the window.
     public List<PredictorAccuracy_GetDto> ByActivePredictor { get; set; } = new();
 
     // The same aggregates keyed by (modelVersion, activePredictor). The predictor stays in the key: a

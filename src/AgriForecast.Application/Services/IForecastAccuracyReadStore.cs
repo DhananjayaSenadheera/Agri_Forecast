@@ -13,11 +13,16 @@ public interface IForecastAccuracyReadStore
     // rows have no actual yet, actual_unavailable rows were never scored, and not_maturable rows can
     // never be scored; including any of them would silently dilute the aggregates.
     //
+    // fromSnapshotDate BOUNDS the read (SnapshotDate >= it): the caller always passes a window, so this
+    // never becomes a full-table scan as the ledger grows. It is a required parameter, not an optional
+    // filter, precisely so that "no window" is not expressible here.
+    //
     // Deliberately a lean row projection rather than a SQL GROUP BY: the headline metric is the MEDIAN
     // absolute percentage error, which EF cannot translate, and computing half the metrics in SQL and
-    // half in memory is how the two drift apart. At ~96 crops/day (~35k rows a year, of which only the
-    // matured subset lands here) eight scalar columns per row is a small read for an admin-only page.
-    Task<IReadOnlyList<ForecastSnapshotScoringRow>> GetMaturedScoringRowsAsync(CancellationToken ct = default);
+    // half in memory is how the two drift apart. Eight scalar columns per row over a bounded window is
+    // a small read for an admin-only page.
+    Task<IReadOnlyList<ForecastSnapshotScoringRow>> GetMaturedScoringRowsAsync(
+        DateOnly fromSnapshotDate, CancellationToken ct = default);
 
     // Page of snapshot rows, newest SnapshotDate first (Id DESC tiebreak), plus the total matching count.
     // 1-based paging. Filters are AND-combined; a null filter is NO filter. maturedOnly narrows to the

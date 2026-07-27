@@ -26,22 +26,33 @@ public class ForecastAccuracyHandlerTests
     // record of what the handler actually asked for.
     private sealed class FakeStore : IForecastAccuracyReadStore
     {
-        public List<ForecastSnapshotScoringRow> Matured = new();
+        // Matured scoring rows paired with the SnapshotDate the real store filters them by (the scoring
+        // projection itself does not carry the date — the window is applied in SQL).
+        public List<(ForecastSnapshotScoringRow Row, DateOnly SnapshotDate)> Matured = new();
         public List<ForecastSnapshotListRow> Snapshots = new();
         public ForecastSnapshotCensus Census = new(0, 0, 0, 0, 0, null);
 
+        public DateOnly? CapturedFromSnapshotDate;
         public Guid? CapturedCropId;
         public string? CapturedModelVersion;
         public bool? CapturedMaturedOnly;
         public int CapturedPage;
         public int CapturedPageSize;
 
+        // Seeds a matured row inside the window (dated today), the common case for the metric tests.
+        public void AddMatured(ForecastSnapshotScoringRow row, DateOnly? snapshotDate = null)
+            => Matured.Add((row, snapshotDate ?? DateOnly.FromDateTime(DateTime.UtcNow)));
+
         public Task<ForecastSnapshotCensus> GetCensusAsync(CancellationToken ct = default)
             => Task.FromResult(Census);
 
         public Task<IReadOnlyList<ForecastSnapshotScoringRow>> GetMaturedScoringRowsAsync(
-            CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<ForecastSnapshotScoringRow>>(Matured);
+            DateOnly fromSnapshotDate, CancellationToken ct = default)
+        {
+            CapturedFromSnapshotDate = fromSnapshotDate;
+            return Task.FromResult<IReadOnlyList<ForecastSnapshotScoringRow>>(
+                Matured.Where(m => m.SnapshotDate >= fromSnapshotDate).Select(m => m.Row).ToList());
+        }
 
         public Task<ForecastSnapshotsPage> GetSnapshotsPageAsync(
             int page, int pageSize, Guid? cropId, string? modelVersion, bool maturedOnly,
@@ -180,9 +191,9 @@ public class ForecastAccuracyHandlerTests
     {
         var store = new FakeStore();
         for (var i = 0; i < 4; i++)
-            store.Matured.Add(SRow(predictor: Model, percentageError: 4m));
+            store.AddMatured(SRow(predictor: Model, percentageError: 4m));
         for (var i = 0; i < 4; i++)
-            store.Matured.Add(SRow(predictor: Fallback, percentageError: 40m));
+            store.AddMatured(SRow(predictor: Fallback, percentageError: 40m));
 
         var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
 
@@ -232,9 +243,9 @@ public class ForecastAccuracyHandlerTests
     public async Task Summary_ByModelVersion_IsKeyedByVersionAndPredictor()
     {
         var store = new FakeStore();
-        store.Matured.Add(SRow(predictor: Model, modelVersion: "v16", percentageError: 8m));
-        store.Matured.Add(SRow(predictor: Model, modelVersion: "v17", percentageError: 4m));
-        store.Matured.Add(SRow(predictor: Fallback, modelVersion: "v17", percentageError: 40m));
+        store.AddMatured(SRow(predictor: Model, modelVersion: "v16", percentageError: 8m));
+        store.AddMatured(SRow(predictor: Model, modelVersion: "v17", percentageError: 4m));
+        store.AddMatured(SRow(predictor: Fallback, modelVersion: "v17", percentageError: 40m));
 
         var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
 
@@ -256,8 +267,8 @@ public class ForecastAccuracyHandlerTests
     public async Task Summary_NullModelVersion_IsItsOwnGroup_SortedLast()
     {
         var store = new FakeStore();
-        store.Matured.Add(SRow(modelVersion: null, percentageError: 30m));
-        store.Matured.Add(SRow(modelVersion: "v17", percentageError: 4m));
+        store.AddMatured(SRow(modelVersion: null, percentageError: 30m));
+        store.AddMatured(SRow(modelVersion: "v17", percentageError: 4m));
 
         var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
 
@@ -274,7 +285,7 @@ public class ForecastAccuracyHandlerTests
     {
         var store = new FakeStore();
         foreach (var ape in new[] { 5m, 6m, 7m, 8m, 200m })
-            store.Matured.Add(SRow(percentageError: ape));
+            store.AddMatured(SRow(percentageError: ape));
 
         var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
 
@@ -288,8 +299,8 @@ public class ForecastAccuracyHandlerTests
     public async Task Summary_Ape_IsTheAbsoluteValueOfTheStoredSignedPercentageError()
     {
         var store = new FakeStore();
-        store.Matured.Add(SRow(percentageError: -12m));
-        store.Matured.Add(SRow(percentageError: 12m));
+        store.AddMatured(SRow(percentageError: -12m));
+        store.AddMatured(SRow(percentageError: 12m));
 
         var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
 
@@ -303,7 +314,7 @@ public class ForecastAccuracyHandlerTests
     {
         var store = new FakeStore();
         foreach (var ape in new[] { 2m, 4m, 6m, 10m })
-            store.Matured.Add(SRow(percentageError: ape));
+            store.AddMatured(SRow(percentageError: ape));
 
         MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model)
             .MedianApe.Should().Be(5.00m);
@@ -315,10 +326,10 @@ public class ForecastAccuracyHandlerTests
     public async Task Summary_SignedBias_KeepsItsSign_AndCancellationIsReportedNotHidden()
     {
         var store = new FakeStore();
-        store.Matured.Add(SRow(predictor: Model, signedError: 10m));
-        store.Matured.Add(SRow(predictor: Model, signedError: -10m));
-        store.Matured.Add(SRow(predictor: Fallback, signedError: -8m));
-        store.Matured.Add(SRow(predictor: Fallback, signedError: -4m));
+        store.AddMatured(SRow(predictor: Model, signedError: 10m));
+        store.AddMatured(SRow(predictor: Model, signedError: -10m));
+        store.AddMatured(SRow(predictor: Fallback, signedError: -8m));
+        store.AddMatured(SRow(predictor: Fallback, signedError: -4m));
 
         var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
 
@@ -331,8 +342,8 @@ public class ForecastAccuracyHandlerTests
     public async Task Summary_IntervalCoverage_IsReportedAgainstNominalEighty()
     {
         var store = new FakeStore();
-        for (var i = 0; i < 3; i++) store.Matured.Add(SRow(withinInterval: true));
-        for (var i = 0; i < 2; i++) store.Matured.Add(SRow(withinInterval: false));
+        for (var i = 0; i < 3; i++) store.AddMatured(SRow(withinInterval: true));
+        for (var i = 0; i < 2; i++) store.AddMatured(SRow(withinInterval: false));
 
         var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
 
@@ -350,8 +361,8 @@ public class ForecastAccuracyHandlerTests
     public async Task Summary_MaturedRowWithNullErrorColumns_IsExcluded_NotCountedAsZeroError()
     {
         var store = new FakeStore();
-        store.Matured.Add(SRow(percentageError: 20m, withinInterval: true));
-        store.Matured.Add(SRow(percentageError: null, signedError: null, withinInterval: null));
+        store.AddMatured(SRow(percentageError: 20m, withinInterval: true));
+        store.AddMatured(SRow(percentageError: null, signedError: null, withinInterval: null));
 
         var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
 
@@ -362,12 +373,35 @@ public class ForecastAccuracyHandlerTests
         m.IntervalCoverage.Should().Be(1.0000m);
     }
 
+    // The three error metrics share ONE denominator by construction: a row missing EITHER error column
+    // is excluded from mape, medianApe AND signedBias, so scoredCount describes all three. Without the
+    // shared filter, signedBias would be averaged over 2 rows while the count beside it said 1.
+    [Theory]
+    [InlineData(true)]  // percentageError present, signedError missing
+    [InlineData(false)] // signedError present, percentageError missing
+    public async Task Summary_RowMissingEitherErrorColumn_IsExcludedFromAllThreeMetrics(bool signedIsNull)
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(percentageError: 20m, signedError: 6m));
+        store.AddMatured(signedIsNull
+            ? SRow(percentageError: 100m, signedError: null)
+            : SRow(percentageError: null, signedError: 60m));
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.MaturedCount.Should().Be(2);
+        m.ScoredCount.Should().Be(1);   // the honest denominator for all three below
+        m.Mape.Should().Be(20.00m);     // the half-row never reaches any of them
+        m.MedianApe.Should().Be(20.00m);
+        m.SignedBias.Should().Be(6.00m);
+    }
+
     // A group with nothing measurable reports nulls and zero counts, never 0.0.
     [Fact]
     public async Task Summary_GroupWithNoUsableColumns_ReportsNulls_NotZeroes()
     {
         var store = new FakeStore();
-        store.Matured.Add(SRow(percentageError: null, signedError: null, withinInterval: null,
+        store.AddMatured(SRow(percentageError: null, signedError: null, withinInterval: null,
             referencePrice: null, actualPrice: null));
 
         var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
@@ -389,13 +423,13 @@ public class ForecastAccuracyHandlerTests
     {
         var store = new FakeStore();
         // hit: predicted up (105 > 90), actual up (100 > 90)
-        store.Matured.Add(SRow(predictedPrice: 105m, actualPrice: 100m, referencePrice: 90m));
+        store.AddMatured(SRow(predictedPrice: 105m, actualPrice: 100m, referencePrice: 90m));
         // hit: predicted down, actual down
-        store.Matured.Add(SRow(predictedPrice: 80m, actualPrice: 85m, referencePrice: 90m));
+        store.AddMatured(SRow(predictedPrice: 80m, actualPrice: 85m, referencePrice: 90m));
         // miss: predicted up, actual down
-        store.Matured.Add(SRow(predictedPrice: 105m, actualPrice: 85m, referencePrice: 90m));
+        store.AddMatured(SRow(predictedPrice: 105m, actualPrice: 85m, referencePrice: 90m));
         // miss: predicted down, actual up
-        store.Matured.Add(SRow(predictedPrice: 80m, actualPrice: 95m, referencePrice: 90m));
+        store.AddMatured(SRow(predictedPrice: 80m, actualPrice: 95m, referencePrice: 90m));
 
         var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
 
@@ -410,9 +444,9 @@ public class ForecastAccuracyHandlerTests
     public async Task Summary_DirectionalAccuracy_NullReferenceRows_AreExcluded_NotScoredAsMisses()
     {
         var store = new FakeStore();
-        store.Matured.Add(SRow(predictedPrice: 105m, actualPrice: 100m, referencePrice: 90m)); // hit
-        store.Matured.Add(SRow(referencePrice: null));  // no anchor
-        store.Matured.Add(SRow(actualPrice: null));     // never scored against an actual
+        store.AddMatured(SRow(predictedPrice: 105m, actualPrice: 100m, referencePrice: 90m)); // hit
+        store.AddMatured(SRow(referencePrice: null));  // no anchor
+        store.AddMatured(SRow(actualPrice: null));     // never scored against an actual
 
         var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
 
@@ -428,11 +462,79 @@ public class ForecastAccuracyHandlerTests
     public async Task Summary_DirectionalAccuracy_FlatPrediction_MatchesOnlyAFlatActual()
     {
         var store = new FakeStore();
-        store.Matured.Add(SRow(predictedPrice: 90m, actualPrice: 90m, referencePrice: 90m));  // hit
-        store.Matured.Add(SRow(predictedPrice: 90m, actualPrice: 95m, referencePrice: 90m));  // miss
+        store.AddMatured(SRow(predictedPrice: 90m, actualPrice: 90m, referencePrice: 90m));  // hit
+        store.AddMatured(SRow(predictedPrice: 90m, actualPrice: 95m, referencePrice: 90m));  // miss
 
         MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model)
             .DirectionalAccuracy.Should().Be(0.5000m);
+    }
+
+    // ---------------------------------------------------------------- SUMMARY: the window
+
+    // The window bounds the METRICS only. A row that aged out still exists in the ledger census — the
+    // asymmetry is deliberate, and this test is what stops someone "fixing" it by windowing the counts.
+    [Fact]
+    public async Task Summary_RowsOutsideTheWindow_LeaveTheMetrics_ButStayInTheCounts()
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var store = new FakeStore
+        {
+            Census = new ForecastSnapshotCensus(
+                Total: 2, Pending: 0, Matured: 2, ActualUnavailable: 0, NotMaturable: 0,
+                LatestSnapshotDate: today)
+        };
+        store.AddMatured(SRow(percentageError: 5m), today.AddDays(-10));   // inside
+        store.AddMatured(SRow(percentageError: 95m), today.AddDays(-400)); // aged out
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        MetricsFor(dto, Model).MaturedCount.Should().Be(1);
+        MetricsFor(dto, Model).Mape.Should().Be(5.00m); // NOT 50 — the old row is out of the window
+        dto.Counts.Matured.Should().Be(2);              // but still counted in the ledger census
+    }
+
+    [Fact]
+    public async Task Summary_DefaultWindow_IsOneYear_AndIsEchoedBack()
+    {
+        var store = new FakeStore();
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        dto.WindowDays.Should().Be(365);
+        GetForecastAccuracySummaryQuery.DefaultWindowDays.Should().Be(365);
+        store.CapturedFromSnapshotDate.Should().Be(DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-365));
+    }
+
+    // An explicit window is passed to the store as a cutoff date and echoed on the response, so a number
+    // is never shown without the span it covers.
+    [Fact]
+    public async Task Summary_ExplicitWindow_BoundsTheStoreReadAndIsEchoedBack()
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var store = new FakeStore();
+        store.AddMatured(SRow(percentageError: 5m), today.AddDays(-3));
+        store.AddMatured(SRow(percentageError: 95m), today.AddDays(-40));
+
+        var dto = (await SummaryHandler(store).Handle(
+            new GetForecastAccuracySummaryQuery { WindowDays = 30 }, default)).Data;
+
+        dto.WindowDays.Should().Be(30);
+        store.CapturedFromSnapshotDate.Should().Be(today.AddDays(-30));
+        MetricsFor(dto, Model).Mape.Should().Be(5.00m);
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(-1, false)]
+    [InlineData(1, true)]
+    [InlineData(365, true)]
+    [InlineData(3650, true)]
+    [InlineData(3651, false)]
+    public void SummaryValidator_BoundsTheWindow(int windowDays, bool expectedValid)
+    {
+        new GetForecastAccuracySummaryValidator()
+            .Validate(new GetForecastAccuracySummaryQuery { WindowDays = windowDays })
+            .IsValid.Should().Be(expectedValid);
     }
 
     // ---------------------------------------------------------------- SNAPSHOTS: paging and filters
@@ -663,7 +765,14 @@ public class ForecastAccuracyHandlerTests
     {
         var v = new GetForecastSnapshotsValidator();
 
-        v.Validate(new GetForecastSnapshotsQuery { CropId = Guid.Empty }).IsValid.Should().BeFalse();
+        var rejected = v.Validate(new GetForecastSnapshotsQuery { CropId = Guid.Empty });
+        rejected.IsValid.Should().BeFalse();
+
+        // The 400 body keys the error under the parameter the caller actually sent, not under the
+        // nullable-unwrapping this validator does internally.
+        rejected.Errors.Should().ContainSingle()
+            .Which.PropertyName.Should().Be(nameof(GetForecastSnapshotsQuery.CropId));
+
         v.Validate(new GetForecastSnapshotsQuery { CropId = Guid.NewGuid() }).IsValid.Should().BeTrue();
         v.Validate(new GetForecastSnapshotsQuery { CropId = null }).IsValid.Should().BeTrue();
     }
@@ -717,8 +826,8 @@ public class ForecastAccuracyHandlerTests
     public async Task Controller_Summary_ReturnsTheSplitAggregates()
     {
         var store = new FakeStore();
-        store.Matured.Add(SRow(predictor: Model, percentageError: 4m));
-        store.Matured.Add(SRow(predictor: Fallback, percentageError: 40m));
+        store.AddMatured(SRow(predictor: Model, percentageError: 4m));
+        store.AddMatured(SRow(predictor: Fallback, percentageError: 40m));
 
         var mediator = new Mock<IMediator>();
         mediator
@@ -726,11 +835,15 @@ public class ForecastAccuracyHandlerTests
             .Returns((GetForecastAccuracySummaryQuery q, CancellationToken ct) =>
                 new GetForecastAccuracySummaryQueryHandler(store).Handle(q, ct));
 
-        var response = await new AdminForecastAccuracyController(mediator.Object).GetSummary();
+        var response = await new AdminForecastAccuracyController(mediator.Object).GetSummary(windowDays: 30);
 
         var ok = Assert.IsType<OkObjectResult>(response);
         var dto = Assert.IsType<ForecastAccuracySummary_GetDto>(ok.Value);
         dto.ByActivePredictor.Select(g => g.ActivePredictor).Should().BeEquivalentTo(new[] { Model, Fallback });
+
+        // ?windowDays= binds and reaches the store as a cutoff date rather than being silently dropped.
+        dto.WindowDays.Should().Be(30);
+        store.CapturedFromSnapshotDate.Should().Be(DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-30));
     }
 
     // The maturity-state strings on the wire are the shared .NET/Python contract, not free text: prove
