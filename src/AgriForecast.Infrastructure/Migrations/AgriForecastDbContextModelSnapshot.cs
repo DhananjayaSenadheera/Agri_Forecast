@@ -1153,7 +1153,12 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.HasIndex(new[] { "CropId", "SnapshotDate" }, "UX_ForecastSnapshots_CropSnapshotDate")
                         .IsUnique();
 
-                    b.ToTable("ForecastSnapshots");
+                    b.ToTable("ForecastSnapshots", t =>
+                        {
+                            t.HasCheckConstraint("CK_ForecastSnapshots_Band", "[UpperBound] >= [LowerBound] AND [LowerBound] >= 0");
+
+                            t.HasCheckConstraint("CK_ForecastSnapshots_MaturityState", "[MaturityState] COLLATE Latin1_General_BIN2 IN ('pending', 'matured', 'actual_unavailable', 'not_maturable')");
+                        });
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.IngestionRun", b =>

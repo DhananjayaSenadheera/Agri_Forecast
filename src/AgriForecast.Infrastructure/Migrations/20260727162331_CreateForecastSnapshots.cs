@@ -42,6 +42,8 @@ namespace AgriForecast.Infrastructure.Migrations
                 constraints: table =>
                 {
                     table.PrimaryKey("PK_ForecastSnapshots", x => x.Id);
+                    table.CheckConstraint("CK_ForecastSnapshots_Band", "[UpperBound] >= [LowerBound] AND [LowerBound] >= 0");
+                    table.CheckConstraint("CK_ForecastSnapshots_MaturityState", "[MaturityState] COLLATE Latin1_General_BIN2 IN ('pending', 'matured', 'actual_unavailable', 'not_maturable')");
                     table.ForeignKey(
                         name: "FK_ForecastSnapshots_Crops_CropId",
                         column: x => x.CropId,

@@ -506,6 +506,30 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
         // CreatedAtUtc is DB-defaulted so a Python INSERT that omits it still stamps a creation instant.
         modelBuilder.Entity<ForecastSnapshot>(e =>
         {
+            // The entity's factory guards do NOT run on the production write path — the Python job writes
+            // these rows with raw SQL — so the two invariants that must never be violated live in the DB
+            // itself. Mirrors the ISJSON guard on IngestionVerifications.
+            e.ToTable(t =>
+            {
+                // Keep in lockstep with ForecastSnapshotMaturityStates. An unknown state would otherwise
+                // sit invisible: it matches no filter, so the maturing sweep would skip the row forever.
+                //
+                // COLLATE Latin1_General_BIN2 forces an EXACT, case-sensitive match. The database's own
+                // collation is case-insensitive, so without it 'Pending' would be accepted — harmless to
+                // SQL, but Python compares these strings case-SENSITIVELY, so such a row would silently
+                // vanish from the accuracy aggregates. Verified live: 'Pending' is rejected, 'pending' is
+                // not.
+                t.HasCheckConstraint(
+                    "CK_ForecastSnapshots_MaturityState",
+                    "[MaturityState] COLLATE Latin1_General_BIN2 IN ('pending', 'matured', 'actual_unavailable', 'not_maturable')");
+
+                // A band may be clipped at zero but may never be inverted — an inverted band would make
+                // WithinInterval meaningless and render a nonsense range to the farmer.
+                t.HasCheckConstraint(
+                    "CK_ForecastSnapshots_Band",
+                    "[UpperBound] >= [LowerBound] AND [LowerBound] >= 0");
+            });
+
             e.Property(x => x.SnapshotDate).HasColumnType("date").IsRequired();
             e.Property(x => x.HarvestDate).HasColumnType("date");
             e.Property(x => x.ActualObservedDate).HasColumnType("date");
