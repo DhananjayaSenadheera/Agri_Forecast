@@ -92,26 +92,62 @@ def _within_carry_forward_staleness(obs_date, as_of: date) -> bool:
     return age <= _CARRY_FORWARD_STALENESS_DAYS
 
 
+def _last_avgprice_at_or_before(crop_id: str, as_of: date,
+                                max_back_days: int | None = None):
+    """THE price series: newest non-null CropFeatureDaily.AvgPrice at or before as_of.
+
+    This is the one series the training label is a shift of (`price.shift(-gp)` over the
+    ffilled AvgPrice column in features.build_crop_features). Everything that needs "the
+    price that was known at date D" - the serving carry-forward anchor and the forecast
+    snapshot's matured actual - MUST come through here, or serve and score would silently
+    drift onto different definitions of the same number.
+
+    max_back_days, when given, refuses a value older than that many days before as_of.
+    The snapshot maturing pass passes SNAPSHOT_MATCH_BACK_DAYS (== features._FFILL_LIMIT)
+    so its actual is exactly the carry the label's ffill would have made. Left None the
+    scan is unbounded and the caller applies its own staleness rule.
+
+    CropFeatureDaily holds TRADING DAYS ONLY - build_crop_features reindexes to a daily
+    grid to compute the rolling windows but then drops back to `out.loc[is_trading]`
+    before persisting - so the returned observation_date is always a real trading day, not
+    a forward-filled calendar day, and callers can record it as an audit of how far the
+    price was carried.
+
+    Returns (price, observation_date) or None when nothing qualifies. No positivity or
+    staleness filtering happens here - those are caller policy, not series identity.
+    """
+    clauses = ["CropId = :cid", "ObservationDate <= :asof", "AvgPrice IS NOT NULL"]
+    params: dict = {"cid": str(crop_id).lower(), "asof": as_of}
+    if max_back_days is not None:
+        clauses.append("ObservationDate >= :floor")
+        params["floor"] = as_of - timedelta(days=int(max_back_days))
+    sql = text(
+        "SELECT TOP 1 AvgPrice, ObservationDate FROM CropFeatureDaily WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY ObservationDate DESC"
+    )
+    with get_engine().connect() as conn:
+        df = pd.read_sql(sql, conn, params=params)
+    if not len(df) or pd.isna(df["AvgPrice"].iloc[0]):
+        return None
+    return float(df["AvgPrice"].iloc[0]), df["ObservationDate"].iloc[0]
+
+
 def _carry_forward_price(crop_id: str, as_of: date) -> float | None:
     """Last non-null positive AvgPrice at or before as_of, if it is inside the staleness cap.
 
     Returns None when there is no scoreable price, or the newest one is older than the
     cap, so the caller fails closed to the incumbent. Both endpoints use this so they
-    agree on the anchor.
+    agree on the anchor. The read itself is _last_avgprice_at_or_before - the shared
+    series definition - and only the staleness/positivity policy lives here.
     """
-    sql = text("""
-        SELECT TOP 1 AvgPrice, ObservationDate FROM CropFeatureDaily
-        WHERE CropId = :cid AND ObservationDate <= :asof AND AvgPrice IS NOT NULL
-        ORDER BY ObservationDate DESC
-    """)
-    with get_engine().connect() as conn:
-        df = pd.read_sql(sql, conn, params={"cid": crop_id, "asof": as_of})
-    if not len(df) or pd.isna(df["AvgPrice"].iloc[0]):
+    hit = _last_avgprice_at_or_before(crop_id, as_of)
+    if hit is None:
         return None
-    if not _within_carry_forward_staleness(df["ObservationDate"].iloc[0], as_of):
+    value, obs_date = hit
+    if not _within_carry_forward_staleness(obs_date, as_of):
         return None
-    v = float(df["AvgPrice"].iloc[0])
-    return v if v > 0 else None
+    return value if value > 0 else None
 
 
 def _spread_source(crop_id: str, fb_q: dict) -> dict:
