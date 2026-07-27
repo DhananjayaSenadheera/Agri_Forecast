@@ -204,12 +204,43 @@ public class ForecastSnapshotTests
     }
 
     [Fact]
-    public void CreateNotMaturable_AppliesTheSameArgumentGuards()
+    public void CreateNotMaturable_Throws_WhenCropIdEmpty()
     {
         var act = () => ForecastSnapshot.CreateNotMaturable(
             Guid.Empty, Snapshot, 200m, 150m, 260m, "Low", "crop_mean_fallback", CreatedUtc);
 
         act.Should().Throw<ArgumentException>().And.ParamName.Should().Be("cropId");
+    }
+
+    [Theory]
+    [InlineData("", "residual", 200, 150, 260, "confidence")]
+    [InlineData("   ", "residual", 200, 150, 260, "confidence")]
+    [InlineData("High", "", 200, 150, 260, "activePredictor")]
+    [InlineData("High", "   ", 200, 150, 260, "activePredictor")]
+    [InlineData("High", "residual", 0, 0, 260, "predictedPrice")]
+    [InlineData("High", "residual", -1, 0, 260, "predictedPrice")]
+    [InlineData("High", "residual", 200, -0.01, 260, "lowerBound")]
+    [InlineData("High", "residual", 200, 260, 150, "upperBound")]
+    public void CreateNotMaturable_AppliesTheSameArgumentGuardsAsCreatePending(
+        string confidence, string activePredictor, decimal predicted, decimal lower, decimal upper,
+        string expectedParam)
+    {
+        // A not_maturable row is terminal on arrival, so a bad value in it can never be corrected later —
+        // it must be rejected by exactly the same guards as a pending row.
+        var act = () => ForecastSnapshot.CreateNotMaturable(
+            CropId, Snapshot, predicted, lower, upper, confidence, activePredictor, CreatedUtc);
+
+        act.Should().Throw<ArgumentException>().And.ParamName.Should().Be(expectedParam);
+    }
+
+    [Fact]
+    public void CreateNotMaturable_Throws_WhenReferencePriceNegative()
+    {
+        var act = () => ForecastSnapshot.CreateNotMaturable(
+            CropId, Snapshot, 200m, 150m, 260m, "Low", "crop_mean_fallback", CreatedUtc,
+            referencePrice: -5m);
+
+        act.Should().Throw<ArgumentOutOfRangeException>().And.ParamName.Should().Be("referencePrice");
     }
 
     // Mature.
@@ -303,12 +334,44 @@ public class ForecastSnapshotTests
         act.Should().Throw<ArgumentOutOfRangeException>().And.ParamName.Should().Be("actualPrice");
     }
 
-    [Fact]
-    public void Mature_Throws_WhenTheObservationIsInTheFuture()
+    // The carry-back window: the actual must come from [HarvestDate - 5, HarvestDate]. 5 mirrors the ML
+    // constant SNAPSHOT_MATCH_BACK_DAYS (== the feature pipeline's _FFILL_LIMIT).
+
+    [Theory]
+    [InlineData(0)]   // exactly the harvest date
+    [InlineData(-1)]
+    [InlineData(-5)]  // the far edge of the carry-back window
+    public void Mature_Accepts_AnObservationInsideTheCarryBackWindow(int dayOffset)
     {
         var snap = Pending();
+        var observed = Harvest.AddDays(dayOffset);
 
-        var act = () => snap.Mature(180m, DateOnly.FromDateTime(MaturedUtc).AddDays(1), MaturedUtc);
+        snap.Mature(180m, observed, MaturedUtc);
+
+        snap.MaturityState.Should().Be(ForecastSnapshotMaturityStates.Matured);
+        snap.ActualObservedDate.Should().Be(observed);
+    }
+
+    [Fact]
+    public void Mature_Throws_WhenTheObservationIsAfterTheHarvestDate()
+    {
+        // A post-harvest price is hindsight the forecast never had.
+        var snap = Pending();
+
+        var act = () => snap.Mature(180m, Harvest.AddDays(1), MaturedUtc);
+
+        act.Should().Throw<ArgumentOutOfRangeException>().And.ParamName.Should().Be("actualObservedDate");
+    }
+
+    [Theory]
+    [InlineData(-6)]
+    [InlineData(-30)]
+    public void Mature_Throws_WhenTheObservationIsOlderThanTheCarryBackWindow(int dayOffset)
+    {
+        // A stale quote from a different market week must not be scored as the harvest-day price.
+        var snap = Pending();
+
+        var act = () => snap.Mature(180m, Harvest.AddDays(dayOffset), MaturedUtc);
 
         act.Should().Throw<ArgumentOutOfRangeException>().And.ParamName.Should().Be("actualObservedDate");
     }
@@ -395,6 +458,19 @@ public class ForecastSnapshotTests
 
         act.Should().Throw<InvalidOperationException>();
         snap.MaturityState.Should().Be(ForecastSnapshotMaturityStates.Matured);
+    }
+
+    [Fact]
+    public void MarkActualUnavailable_Throws_WhenTheRowWasAlreadyMarkedUnavailable()
+    {
+        // Double give-up: the second sweep must not re-stamp MaturedAtUtc and move the audit trail.
+        var snap = Pending();
+        snap.MarkActualUnavailable(MaturedUtc);
+
+        var act = () => snap.MarkActualUnavailable(MaturedUtc.AddDays(1));
+
+        act.Should().Throw<InvalidOperationException>();
+        snap.MaturedAtUtc.Should().Be(MaturedUtc, "the first give-up instant is the one that stands");
     }
 
     [Fact]

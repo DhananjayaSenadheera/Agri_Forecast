@@ -72,6 +72,12 @@ public class ForecastSnapshot
     // and Python computations of the same column cannot drift.
     private const decimal PercentageErrorDenominatorFloor = 0.000001m;
 
+    // How many days BEFORE the harvest date the maturing sweep may carry an actual price back from. The
+    // .NET mirror of the ML constant SNAPSHOT_MATCH_BACK_DAYS, which is itself pinned to the feature
+    // pipeline's _FFILL_LIMIT so serving and maturing cannot drift apart. An actual taken from outside
+    // this window is not the harvest-day price and must never be scored as one.
+    private const int MatchBackDays = 5;
+
     private ForecastSnapshot() { }
 
     /// <summary>
@@ -198,6 +204,12 @@ public class ForecastSnapshot
     /// (the trading day the carry-back landed on). Fills the error columns and MaturedAtUtc only — every
     /// prediction column is left exactly as served.
     /// </summary>
+    /// <remarks>
+    /// The observation must fall inside [HarvestDate - MatchBackDays, HarvestDate]. A price from AFTER the
+    /// harvest date is hindsight the forecast never had; a price from further back than the carry-back
+    /// window is a stale quote for a different market week. Either one would score the model against the
+    /// wrong number, so both are rejected rather than silently accepted.
+    /// </remarks>
     public void Mature(decimal actualPrice, DateOnly actualObservedDate, DateTime maturedAtUtc)
     {
         EnsurePending(nameof(Mature));
@@ -205,8 +217,19 @@ public class ForecastSnapshot
         if (actualPrice <= 0)
             throw new ArgumentOutOfRangeException(nameof(actualPrice), "Actual price must be positive.");
 
-        if (actualObservedDate > DateOnly.FromDateTime(maturedAtUtc))
-            throw new ArgumentOutOfRangeException(nameof(actualObservedDate), "Actual observation cannot be in the future.");
+        // A pending row always carries a harvest date: CreatePending requires one, and the rows that lack
+        // one are minted not_maturable, which EnsurePending has already rejected above.
+        var harvestDate = HarvestDate!.Value;
+
+        if (actualObservedDate > harvestDate)
+            throw new ArgumentOutOfRangeException(
+                nameof(actualObservedDate),
+                "Actual observation cannot be after the harvest date — that price is hindsight the forecast never had.");
+
+        if (actualObservedDate < harvestDate.AddDays(-MatchBackDays))
+            throw new ArgumentOutOfRangeException(
+                nameof(actualObservedDate),
+                $"Actual observation is more than {MatchBackDays} days before the harvest date, outside the carry-back window.");
 
         var signed = PredictedPrice - actualPrice;
 
