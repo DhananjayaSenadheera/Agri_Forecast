@@ -328,6 +328,25 @@ class TestUnavailableTiming:
         rec, _, _ = self._run(monkeypatch, self.HARVEST + timedelta(days=60))
         assert rec.matured == []
 
+    def test_a_non_positive_actual_is_never_scored(self, monkeypatch):
+        """A zero/negative AvgPrice is not a harvest price. Scoring it would also
+        blow PercentageError's column range through the 1e-6 clip, and a row that
+        fails to write would retry every night forever - so it is refused and
+        ages out through the normal give-up path."""
+        monkeypatch.setattr(predict, "_last_avgprice_at_or_before",
+                            lambda cid, d, mbd=None: (0.0, d))
+        rec = MatureRecorder()
+        rec.install(monkeypatch, [_pending("r1", CROP_A, self.HARVEST)])
+        summary, failures = snapshots._mature_pass(
+            object(), self.HARVEST, dry_run=False)
+        assert rec.matured == [] and failures == 0
+        assert summary["stillPending"] == 1
+        # ...and it does go terminal eventually rather than retrying forever.
+        rec2 = MatureRecorder()
+        rec2.install(monkeypatch, [_pending("r1", CROP_A, self.HARVEST)])
+        snapshots._mature_pass(object(), self.HARVEST + timedelta(days=15), dry_run=False)
+        assert rec2.unavailable == ["r1"]
+
     def test_grace_constant_is_documented_and_ordered(self):
         """The grace constant is the latency rationale, not a branch: it must sit
         between "just missed" and the give-up line, or it describes nothing."""
@@ -335,6 +354,93 @@ class TestUnavailableTiming:
         assert (snapshots.SNAPSHOT_MATCH_BACK_DAYS
                 < snapshots.SNAPSHOT_MATURE_GRACE_DAYS
                 < snapshots.SNAPSHOT_UNAVAILABLE_AFTER_DAYS == 14)
+
+
+# ---------------------------------------------------------------------------
+# 3b. Do not score a carried price before the harvest day has had its chance (B1)
+# ---------------------------------------------------------------------------
+
+class TestNoEarlyMaturing:
+    """The nightly pass runs while the feature store typically ends at H-1. Without
+    this rule every row would freeze an H-1 price as its harvest actual on the very
+    first sweep - permanently, since matured rows are frozen - and AvgPrice moves
+    about 10% day over day. Maturing is irreversible, so waiting is cheap and being
+    wrong is not."""
+
+    HARVEST = date(2026, 3, 10)
+
+    def _run(self, monkeypatch, observed, today):
+        monkeypatch.setattr(predict, "_last_avgprice_at_or_before",
+                            lambda cid, d, mbd=None: (90.0, observed))
+        rec = MatureRecorder()
+        rec.install(monkeypatch, [_pending("r1", CROP_A, self.HARVEST)])
+        summary, failures = snapshots._mature_pass(object(), today, dry_run=False)
+        assert failures == 0
+        return rec, summary
+
+    def test_the_harvest_days_own_price_matures_immediately(self, monkeypatch):
+        rec, summary = self._run(monkeypatch, self.HARVEST, self.HARVEST)
+        assert summary["matured"] == 1
+        assert rec.matured[0]["actual_observed_date"] == self.HARVEST
+
+    def test_a_carried_price_inside_the_window_leaves_the_row_pending(self, monkeypatch):
+        """Only H-1 is available and the harvest day's price may still publish:
+        wait, do not freeze the wrong number."""
+        rec, summary = self._run(monkeypatch, self.HARVEST - timedelta(days=1),
+                                 self.HARVEST)
+        assert rec.matured == []
+        assert summary == {"scanned": 1, "matured": 0, "stillPending": 1,
+                           "markedUnavailable": 0, "maxHarvestDateMatured": None}
+
+    def test_still_pending_one_day_before_the_grace_line(self, monkeypatch):
+        rec, summary = self._run(
+            monkeypatch, self.HARVEST - timedelta(days=1),
+            self.HARVEST + timedelta(days=snapshots.SNAPSHOT_MATURE_GRACE_DAYS - 1))
+        assert rec.matured == [] and summary["stillPending"] == 1
+
+    def test_the_carry_is_accepted_once_the_grace_window_has_passed(self, monkeypatch):
+        """The harvest day's price has had its publication window and is not
+        coming; the carry is now the honest best answer - exactly what the
+        label's own ffill would use."""
+        rec, summary = self._run(
+            monkeypatch, self.HARVEST - timedelta(days=1),
+            self.HARVEST + timedelta(days=snapshots.SNAPSHOT_MATURE_GRACE_DAYS))
+        assert summary["matured"] == 1
+        assert rec.matured[0]["actual_observed_date"] == self.HARVEST - timedelta(days=1)
+
+    def test_the_exact_day_wins_even_long_after_the_grace_window(self, monkeypatch):
+        """Ordering-independence: the rule is a property of the dates, not of
+        which branch is checked first."""
+        rec, summary = self._run(monkeypatch, self.HARVEST,
+                                 self.HARVEST + timedelta(days=30))
+        assert summary["matured"] == 1
+        assert rec.matured[0]["actual_observed_date"] == self.HARVEST
+
+    def test_the_terminal_path_is_unchanged(self, monkeypatch):
+        """No price at all past the give-up line is still actual_unavailable, and
+        the give-up line still sits beyond the grace window so a row that waited
+        for its exact day gets its carry considered first."""
+        monkeypatch.setattr(predict, "_last_avgprice_at_or_before",
+                            lambda cid, d, mbd=None: None)
+        rec = MatureRecorder()
+        rec.install(monkeypatch, [_pending("r1", CROP_A, self.HARVEST)])
+        summary, _ = snapshots._mature_pass(
+            object(),
+            self.HARVEST + timedelta(days=snapshots.SNAPSHOT_UNAVAILABLE_AFTER_DAYS + 1),
+            dry_run=False)
+        assert rec.unavailable == ["r1"] and summary["markedUnavailable"] == 1
+        assert (snapshots.SNAPSHOT_MATURE_GRACE_DAYS
+                < snapshots.SNAPSHOT_UNAVAILABLE_AFTER_DAYS)
+
+    def test_a_row_that_waited_still_matures_before_it_can_be_given_up(self, monkeypatch):
+        """The two windows must not race: at the give-up line a carried price is
+        long since acceptable, so a row with ANY price in reach matures rather
+        than being marked unavailable."""
+        rec, summary = self._run(
+            monkeypatch, self.HARVEST - timedelta(days=1),
+            self.HARVEST + timedelta(days=snapshots.SNAPSHOT_UNAVAILABLE_AFTER_DAYS + 1))
+        assert summary["matured"] == 1 and summary["markedUnavailable"] == 0
+        assert rec.unavailable == []
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +612,60 @@ class TestSnapshotPass:
         snapshots._snapshot_pass(object(), date(2026, 1, 2), dry_run=False)
         assert len(store.rows) == 2
 
+    def test_every_attempted_crop_lands_in_exactly_one_bucket(self, monkeypatch):
+        """inserted + updated + frozen + failures == cropsAttempted. Without the
+        `frozen` count a re-run over matured days would report all zeros and be
+        indistinguishable from a pass that silently did nothing."""
+        crops = [{"cropId": CROP_A, "cropName": "A"},
+                 {"cropId": CROP_B, "cropName": "B"},
+                 {"cropId": "cccccccc-0000-0000-0000-000000000003", "cropName": "C"},
+                 {"cropId": "dddddddd-0000-0000-0000-000000000004", "cropName": "Bad"}]
+        d = date(2026, 1, 1)
+        store = FakeSnapshotStore()
+        # A: already matured -> frozen.  B: pending -> updated.  C: absent -> inserted.
+        store.rows[(CROP_A, d)] = {"maturity_state": snapshots.MATURITY_MATURED}
+        store.rows[(CROP_B, d)] = {"maturity_state": snapshots.MATURITY_PENDING}
+
+        def payload_for(cid, pd_):
+            if cid.startswith("dddddddd"):
+                raise RuntimeError("boom")
+            return _payload(cid, plant_date=pd_)
+
+        _install_snapshot_fakes(monkeypatch, crops=crops, payload_for=payload_for,
+                                store=store)
+        s, failures = snapshots._snapshot_pass(object(), d, dry_run=False)
+        assert (s["inserted"], s["updated"], s["frozen"], failures) == (1, 1, 1, 1)
+        assert s["inserted"] + s["updated"] + s["frozen"] + failures == s["cropsAttempted"]
+
+    def test_a_non_positive_growth_period_is_not_maturable(self, monkeypatch):
+        """A 0 or negative horizon would put the harvest date on or before the
+        plant date - not a forecast at all."""
+        store = _install_snapshot_fakes(
+            monkeypatch,
+            payload_for=lambda cid, d: _payload(cid, gp=0, plant_date=d))
+        summary, _ = snapshots._snapshot_pass(object(), date(2026, 1, 1), dry_run=False)
+        assert summary["notMaturable"] == 1
+        row = store.rows[(CROP_A, date(2026, 1, 1))]
+        assert row["harvest_date"] is None
+        assert row["maturity_state"] == snapshots.MATURITY_NOT_MATURABLE
+
+    def test_upsert_sql_casts_the_key_types_explicitly(self):
+        """CropId is uniqueidentifier and SnapshotDate is date in the .NET schema;
+        an implicit conversion on the join can also cost the unique index."""
+        sql = str(snapshots._UPSERT_SQL)
+        assert "CAST(:crop_id AS uniqueidentifier)" in sql
+        assert "CAST(:snapshot_date AS date)" in sql
+        # The INSERT reuses the already-converted source columns.
+        assert "VALUES (:id, s.CropId, s.SnapshotDate" in sql
+
+    def test_maturity_states_are_exact_lowercase(self):
+        """The .NET CHECK constraint uses a binary collation: wrong casing is a
+        hard INSERT failure, not a silently-stored variant."""
+        assert snapshots.MATURITY_PENDING == "pending"
+        assert snapshots.MATURITY_MATURED == "matured"
+        assert snapshots.MATURITY_ACTUAL_UNAVAILABLE == "actual_unavailable"
+        assert snapshots.MATURITY_NOT_MATURABLE == "not_maturable"
+
     def test_upsert_sql_keys_on_crop_and_snapshot_date_only(self):
         """ModelVersion is deliberately NOT part of the key: a day belongs to
         whichever version served it."""
@@ -633,7 +793,7 @@ class TestFailureIsolation:
         _install_snapshot_fakes(
             monkeypatch,
             payload_for=lambda cid, d: (_ for _ in ()).throw(RuntimeError("boom")))
-        out = snapshots.run(date(2026, 1, 1), run_mature=False)
+        out = snapshots.run(date(2026, 1, 1), run_mature=False, today=date(2026, 1, 1))
         assert out["status"] == "ok"
         assert out["errors"]["snapshotCropFailures"] == 1
 
@@ -685,6 +845,9 @@ class TestDryRun:
 # ---------------------------------------------------------------------------
 
 class TestRunSummaryShape:
+    SNAP = date(2026, 3, 1)
+    TODAY = date(2026, 3, 2)
+
     def _run(self, monkeypatch, **kw):
         _install_snapshot_fakes(monkeypatch)
         monkeypatch.setattr(predict, "_last_avgprice_at_or_before",
@@ -692,19 +855,20 @@ class TestRunSummaryShape:
         monkeypatch.setattr(snapshots, "_pending_rows",
                             lambda engine, today: [_pending("r1", CROP_A, date(2026, 3, 1))])
         monkeypatch.setattr(snapshots, "_write_maturity", lambda engine, fields: None)
-        return snapshots.run(date(2026, 1, 1), today=date(2026, 3, 2), **kw)
+        return snapshots.run(self.SNAP, today=self.TODAY, **kw)
 
     def test_exact_summary_keys(self, monkeypatch):
         out = self._run(monkeypatch)
         assert set(out) == {"status", "snapshot", "mature", "errors"}
+        # PRD 4.2 keys plus the deliberate `frozen` addition.
         assert set(out["snapshot"]) == {"snapshotDate", "cropsAttempted", "inserted",
-                                        "updated", "modelServed", "fallbackServed",
-                                        "notMaturable", "modelVersion"}
+                                        "updated", "frozen", "modelServed",
+                                        "fallbackServed", "notMaturable", "modelVersion"}
         assert set(out["mature"]) == {"scanned", "matured", "stillPending",
                                       "markedUnavailable", "maxHarvestDateMatured"}
         assert set(out["errors"]) == {"snapshotCropFailures", "matureRowFailures"}
         assert out["status"] == "ok"
-        assert out["snapshot"]["snapshotDate"] == "2026-01-01"
+        assert out["snapshot"]["snapshotDate"] == "2026-03-01"
         assert out["snapshot"]["modelVersion"] == "v17"
         assert out["mature"]["matured"] == 1
 
@@ -715,7 +879,7 @@ class TestRunSummaryShape:
 
     def test_snapshot_date_accepts_an_iso_string(self, monkeypatch):
         _install_snapshot_fakes(monkeypatch)
-        out = snapshots.run("2026-02-03", run_mature=False)
+        out = snapshots.run("2026-02-03", run_mature=False, today=date(2026, 2, 3))
         assert out["snapshot"]["snapshotDate"] == "2026-02-03"
 
     def test_snapshot_date_defaults_to_today(self, monkeypatch):
@@ -725,41 +889,116 @@ class TestRunSummaryShape:
 
 
 # ---------------------------------------------------------------------------
+# 9b. snapshotDate bounds (B2)
+# ---------------------------------------------------------------------------
+
+class TestSnapshotDateBounds:
+    TODAY = date(2026, 3, 10)
+
+    def _run(self, monkeypatch, snap):
+        _install_snapshot_fakes(monkeypatch)
+        return snapshots.run(snap, run_mature=False, today=self.TODAY)
+
+    def test_today_is_accepted(self, monkeypatch):
+        out = self._run(monkeypatch, self.TODAY)
+        assert out["snapshot"]["snapshotDate"] == self.TODAY.isoformat()
+
+    def test_tomorrow_is_rejected(self, monkeypatch):
+        """A forecast cannot be recorded as having been made on a day that has
+        not happened - the row's whole value is that it is point-in-time."""
+        with pytest.raises(snapshots.SnapshotDateError) as e:
+            self._run(monkeypatch, self.TODAY + timedelta(days=1))
+        assert "future" in str(e.value)
+
+    def test_the_catch_up_bound_is_accepted_at_its_edge(self, monkeypatch):
+        """Exactly SNAPSHOT_MATURE_GRACE_DAYS back is a legitimate catch-up."""
+        snap = self.TODAY - timedelta(days=snapshots.SNAPSHOT_MATURE_GRACE_DAYS)
+        out = self._run(monkeypatch, snap)
+        assert out["snapshot"]["snapshotDate"] == snap.isoformat()
+
+    def test_one_day_past_the_catch_up_bound_is_rejected(self, monkeypatch):
+        """Re-predicting further back would store a hindsight forecast as if it
+        had been made at the time. Backfill needs its own labelled path."""
+        snap = self.TODAY - timedelta(days=snapshots.SNAPSHOT_MATURE_GRACE_DAYS + 1)
+        with pytest.raises(snapshots.SnapshotDateError) as e:
+            self._run(monkeypatch, snap)
+        assert "hindsight" in str(e.value)
+
+    def test_rejection_happens_before_any_work(self, monkeypatch):
+        """The refusal must not have already predicted or written anything."""
+        def boom(*a, **k):
+            raise AssertionError("nothing may run for a rejected date")
+        _install_snapshot_fakes(monkeypatch)
+        monkeypatch.setattr(snapshots, "_active_crops", boom)
+        with pytest.raises(snapshots.SnapshotDateError):
+            snapshots.run(self.TODAY + timedelta(days=1), today=self.TODAY)
+
+    def test_a_rejected_date_is_not_a_pass_failure(self):
+        """SnapshotDateError must stay distinguishable from a pass failure, or
+        the API could not tell 422 from 502."""
+        assert issubclass(snapshots.SnapshotDateError, ValueError)
+
+
+# ---------------------------------------------------------------------------
 # 10. Static leakage guards (PRD 3.1)
 # ---------------------------------------------------------------------------
 
-_FORBIDDEN_IN_TRAINING_PATH = ("ForecastSnapshots", "UserSales", "UserCropWatchlist")
+# The write-only serving artifacts, by name.
+_FORBIDDEN_TABLES = ("ForecastSnapshots", "UserSales", "UserCropWatchlist")
+
+# Reaching the same tables through the writer's own API. A loader could import this
+# module and call its primitives without ever typing "ForecastSnapshots", and a
+# table-name scan alone would wave that straight through - so the import path is banned
+# on the training side too.
+_FORBIDDEN_MODULE_REFS = ("serving.snapshots", "import snapshots", "snapshots.TABLE")
 
 # The single sanctioned writer. Everything else on the training/feature side must
 # not even name the table.
 _SNAPSHOT_WRITER = ML_ROOT / "agriforecast_ml" / "serving" / "snapshots.py"
 
+# ...and the single sanctioned CALLER of it: the HTTP entry point. Any third module
+# importing the writer is the leak this guard exists to catch.
+_SNAPSHOT_CALLER = ML_ROOT / "agriforecast_ml" / "serving" / "app.py"
 
-def _training_path_sources() -> list[Path]:
+
+def _all_sources() -> list[Path]:
     """Every Python module that can reach the model's inputs: the whole package
-    plus the top-level pipeline scripts, minus the snapshot writer itself.
+    plus the top-level pipeline scripts.
 
     Scanning the WHOLE tree (rather than a hand-listed set of loaders) is
     deliberate - a future loader added anywhere is covered without anyone
     remembering to extend this list.
     """
-    files = sorted((ML_ROOT / "agriforecast_ml").rglob("*.py"))
-    files += sorted(ML_ROOT.glob("*.py"))
-    return [f for f in files if f.resolve() != _SNAPSHOT_WRITER.resolve()]
+    return sorted((ML_ROOT / "agriforecast_ml").rglob("*.py")) + sorted(ML_ROOT.glob("*.py"))
+
+
+def _scan(tokens, allowed: set[Path]) -> list[str]:
+    allowed = {p.resolve() for p in allowed}
+    offenders = []
+    for path in _all_sources():
+        if path.resolve() in allowed:
+            continue
+        src = path.read_text(encoding="utf-8")
+        offenders += [f"{path.relative_to(ML_ROOT)}: {t}" for t in tokens if t in src]
+    return offenders
 
 
 class TestLeakageGuards:
-    def test_no_training_or_feature_module_mentions_the_serving_artifacts(self):
-        offenders: list[str] = []
-        for path in _training_path_sources():
-            src = path.read_text(encoding="utf-8")
-            for name in _FORBIDDEN_IN_TRAINING_PATH:
-                if name in src:
-                    offenders.append(f"{path.relative_to(ML_ROOT)}: {name}")
+    def test_no_other_module_names_the_serving_artifacts(self):
+        offenders = _scan(_FORBIDDEN_TABLES, {_SNAPSHOT_WRITER})
         assert not offenders, (
             "Forecast snapshots and user-entered sales are write-only serving "
             "artifacts. A module on the feature/training path referencing them is "
             "a self-referential lookahead: " + "; ".join(offenders))
+
+    def test_no_other_module_imports_the_snapshot_writer(self):
+        """The bypass the table-name scan cannot see: import the writer, call its
+        primitives, never type the table name."""
+        offenders = _scan(_FORBIDDEN_MODULE_REFS, {_SNAPSHOT_WRITER, _SNAPSHOT_CALLER})
+        assert not offenders, (
+            "Only the serving app may import the snapshot writer; reaching it from "
+            "anywhere else routes serving output back toward the model: "
+            + "; ".join(offenders))
 
     def test_the_loaders_are_specifically_clean(self):
         """Named-and-shamed subset, so a failure points straight at the law."""
@@ -767,8 +1006,17 @@ class TestLeakageGuards:
                     "agriforecast_ml/train/dataset.py", "agriforecast_ml/store.py",
                     "build_features.py"):
             src = (ML_ROOT / rel).read_text(encoding="utf-8")
-            for name in _FORBIDDEN_IN_TRAINING_PATH:
+            for name in _FORBIDDEN_TABLES + _FORBIDDEN_MODULE_REFS:
                 assert name not in src, f"{rel} must never read {name}"
+
+    def test_the_module_ref_tokens_would_actually_fire(self, tmp_path):
+        """Non-vacuity for the bypass guard: a synthetic loader that imports the
+        writer without naming the table must be caught by SOME token."""
+        leak = ("from agriforecast_ml.serving import snapshots\n"
+                "rows = snapshots._pending_rows(engine, today)\n")
+        assert any(t in leak for t in _FORBIDDEN_MODULE_REFS)
+        # ...and the table-name scan alone would NOT have caught it.
+        assert not any(t in leak for t in _FORBIDDEN_TABLES)
 
     def test_the_guard_is_not_vacuous(self):
         """If the writer itself stopped naming the table, the scan above would
@@ -877,9 +1125,9 @@ class TestSnapshotEndpoint:
         monkeypatch.setenv("ML_ADMIN_API_KEY", "k")
         summary = {"status": "ok",
                    "snapshot": {"snapshotDate": "2026-01-01", "cropsAttempted": 1,
-                                "inserted": 1, "updated": 0, "modelServed": 1,
-                                "fallbackServed": 0, "notMaturable": 0,
-                                "modelVersion": "v17"},
+                                "inserted": 1, "updated": 0, "frozen": 0,
+                                "modelServed": 1, "fallbackServed": 0,
+                                "notMaturable": 0, "modelVersion": "v17"},
                    "mature": {"scanned": 0, "matured": 0, "stillPending": 0,
                               "markedUnavailable": 0, "maxHarvestDateMatured": None},
                    "errors": {"snapshotCropFailures": 0, "matureRowFailures": 0}}
@@ -899,6 +1147,22 @@ class TestSnapshotEndpoint:
         assert seen["snapshot_date"] == date(2026, 1, 1)
         assert seen["dry_run"] is True
         assert seen["run_mature"] is True     # defaults to on
+
+    def test_a_rejected_snapshot_date_is_422_not_502(self, monkeypatch, app):
+        """A refused request is the caller's problem to fix, not a server fault -
+        the Worker must be able to tell "I asked wrongly" from "the pass broke"."""
+        from starlette.testclient import TestClient
+        monkeypatch.setenv("ML_ADMIN_API_KEY", "k")
+        monkeypatch.setattr(
+            snapshots, "run",
+            lambda *a, **k: (_ for _ in ()).throw(
+                snapshots.SnapshotDateError("snapshotDate 2030-01-01 is in the future")))
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(SNAPSHOT_PATH, headers={"X-API-Key": "k"},
+                           json={"snapshotDate": "2030-01-01"})
+        assert resp.status_code == 422
+        assert "future" in resp.json()["detail"]
+        assert "Traceback" not in resp.text
 
     def test_a_whole_pass_failure_is_a_502_not_a_traceback(self, monkeypatch, app):
         from starlette.testclient import TestClient

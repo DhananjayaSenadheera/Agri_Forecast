@@ -107,6 +107,12 @@ def _last_avgprice_at_or_before(crop_id: str, as_of: date,
     so its actual is exactly the carry the label's ffill would have made. Left None the
     scan is unbounded and the caller applies its own staleness rule.
 
+    CropFeatureDaily holds TRADING DAYS ONLY - build_crop_features reindexes to a daily
+    grid to compute the rolling windows but then drops back to `out.loc[is_trading]`
+    before persisting - so the returned observation_date is always a real trading day, not
+    a forward-filled calendar day, and callers can record it as an audit of how far the
+    price was carried.
+
     Returns (price, observation_date) or None when nothing qualifies. No positivity or
     staleness filtering happens here - those are caller policy, not series identity.
     """

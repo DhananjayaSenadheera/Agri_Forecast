@@ -389,10 +389,12 @@ class SnapshotForecastsRequest(BaseModel):
     """Orchestration knobs for the nightly forecast-snapshot pass.
 
     snapshotDate is the plant date every forecast in the pass is made for; absent means
-    today, which is what the Worker sends. runMature also scores the snapshots whose
-    harvest date has arrived - it is a separate switch only so a backfill can write
-    snapshot rows without a maturing sweep. dryRun computes and counts a full pass
-    without writing anything.
+    today, which is what the Worker sends. It must be today or at most
+    SNAPSHOT_MATURE_GRACE_DAYS old - enough to catch up a missed night, not enough to
+    re-predict history with hindsight - and anything outside that is a 422. runMature also
+    scores the snapshots whose harvest date has arrived; it is a separate switch only so a
+    catch-up can write snapshot rows without a maturing sweep. dryRun computes and counts
+    a full pass without writing anything.
     """
     snapshotDate: Optional[date] = None
     runMature: bool = True
@@ -405,9 +407,16 @@ def snapshot_forecasts_endpoint(req: SnapshotForecastsRequest):
 
     Called by the .NET Ingestion Worker last in the daily pass, so it predicts against
     that night's freshly ingested prices. Per-crop failures are counted inside the summary
-    and never fail the request; only an unexpected whole-pass failure surfaces as a 502,
-    which the Worker records without advancing its watermark. The module is imported
-    lazily so a breakage here cannot block serving startup or /predict.
+    and never fail the request; a rejected snapshotDate is a 422, and only an unexpected
+    whole-pass failure surfaces as a 502, which the Worker records without advancing its
+    watermark. The module is imported lazily so a breakage here cannot block serving
+    startup or /predict.
+
+    The response is the PRD 4.2 summary shape plus ONE added key, `snapshot.frozen`: the
+    count of rows the pass deliberately left alone because they had already matured.
+    Without it, inserted + updated no longer accounts for every attempted crop and a
+    re-run over old days would report all-zeros indistinguishably from a no-op. The .NET
+    mirror adopts the extended shape.
     """
     try:
         from . import snapshots
@@ -424,6 +433,11 @@ def snapshot_forecasts_endpoint(req: SnapshotForecastsRequest):
             run_mature=req.runMature,
             dry_run=req.dryRun,
         )
+    except snapshots.SnapshotDateError as exc:
+        # A refused request, not a failure: the caller asked for a date we will not
+        # forecast for. The message is safe to return - it is about the caller's own
+        # input and carries no internals.
+        raise HTTPException(status_code=422, detail=str(exc))
     except Exception:
         _log.exception("Forecast snapshot pass failed")
         raise HTTPException(
