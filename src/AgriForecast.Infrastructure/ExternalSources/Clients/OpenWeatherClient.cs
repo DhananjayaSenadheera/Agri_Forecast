@@ -1,9 +1,10 @@
 using System.Globalization;
 using System.Text.Json;
 using AgriForecast.Infrastructure.ExternalSources.DTOs;
+using AgriForecast.Infrastructure.ExternalSources.Interfaces;
 using Microsoft.Extensions.Configuration;
 
-namespace AgriForecast.Infrastructure.ExternalSources.Interfaces;
+namespace AgriForecast.Infrastructure.ExternalSources.Clients;
 
 // OpenWeather One Call 3.0 "day_summary" (historical) — requires the paid
 // "One Call by Call" subscription. Kept as a swappable provider; select via

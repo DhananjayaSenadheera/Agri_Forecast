@@ -8,28 +8,7 @@ using Microsoft.Extensions.Logging;
 
 namespace AgriForecast.Infrastructure.Services.HartiIngestion;
 
-// Orchestrates the multi-market HARTI daily-bulletin ingestion.
-//
-// The HARTI PDF parser is Python and stays Python. This service does not parse PDFs; it triggers the Python
-// pipeline over the same HTTP -> FastAPI seam the rest of the app uses, via the authenticated
-// POST /admin/ingest-harti, then reports the counts and data-quality summary Python returns.
-//
-// Watermark: before triggering it reads the "HARTI" watermark; a Disabled source is a no-op and never a
-// failure. A successful trigger advances LastSuccessUtc and LastObservedDate. A transport or HTTP failure
-// records a failure WITHOUT moving the resume point and then returns, never throwing to the Worker.
-//
-// Late-arrival look-back: the resume lower bound is not the raw watermark. HARTI can publish a bulletin late
-// for a date at or behind the watermark, and a strict "ObservedDate > LastObservedDate" resume would skip it
-// forever. So sinceDate = LastObservedDate - HartiLookbackDays (default 7), re-scanning roughly the last week
-// each pass; the idempotent upsert makes that free. A null watermark stays null, meaning a full backfill.
-//
-// First run: a cold full backfill parses the entire ~3000-PDF corpus and can exceed HartiIngestTimeoutSeconds,
-// so it may never bootstrap over HTTP. Seed it once with the CLI `python ingest_harti.py`, after which these
-// incremental passes take over; the transport-timeout log message says exactly that.
-//
-// Self-healing is the Python canonical layer's job, run in-process as part of the same admin call: unresolved
-// commodity labels stay CropId NULL and are logged, never auto-provisioned into duplicate crops, and unknown
-// markets are skipped with a warning rather than invented. This service only surfaces those counts.
+
 public class HartiBulletinIngestionService : IHartiBulletinIngestionService
 {
     public const string SourceKey = "HARTI";
@@ -90,10 +69,7 @@ public class HartiBulletinIngestionService : IHartiBulletinIngestionService
                 "via the MlService__AdminApiKey environment variable. The value must match the ML " +
                 "service's ML_ADMIN_API_KEY.");
 
-        // Resume hint with the late-arrival look-back: fetch bulletins after (LastObservedDate -
-        // HartiLookbackDays), so the daily pass does not re-scrape the whole corpus but still catches a
-        // bulletin published late for an already-passed date. A null watermark stays null, which the Python
-        // side treats as no lower bound (a full backfill).
+        
         var lookbackDays = _configuration.GetValue<int?>(LookbackDaysConfigKey) ?? DefaultLookbackDays;
         if (lookbackDays < 0) lookbackDays = 0;   // never widen into the future; a negative would.
         DateOnly? sinceDate = watermark.LastObservedDate?.AddDays(-lookbackDays);

@@ -7,10 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace AgriForecast.API.Controllers;
 
-// Admin "Forecast accuracy": read-only GETs over the frozen forecast ledger (ForecastSnapshots) — how
-// the served predictions actually scored once their harvest dates passed. Admin-locked at the controller
-// level like the rest of the admin surface: these responses expose model-vs-fallback performance and
-// per-version skill, which is operator information, not farmer information.
+
 [ApiController]
 [Route("api/admin/forecast-accuracy")]
 [Authorize(Roles = UserRoles.Admin)]
