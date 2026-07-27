@@ -12,6 +12,28 @@
 # real cluster this becomes a PersistentVolumeClaim or object storage
 # (S3/Azure Blob) populated by the training job — swap the volume, nothing
 # else changes.
+#
+# RESOURCES: sized for PARSE PEAKS, not idle. `docker stats` on the live pod
+# shows ~307MiB idle with the model loaded, but this pod is also where the
+# nightly CBSL/HARTI pdfplumber PDF-parse routes run (serving/app.py's
+# /admin/ingest-* endpoints) -- an OOMKill here doesn't just drop a forecast
+# request, it takes down forecasts AND three ingestion sources at once. A
+# limit sized off idle FastAPI memory undersells that risk: this PR's
+# `build-features` container (plain pandas DB I/O, no PDF parsing) was
+# independently measured at 568MB peak during verification, so pdfplumber's
+# heavier per-page parsing on THIS pod needs real headroom above that, not a
+# limit barely 5x an idle number. 3Gi/1000m is the defensible number on this
+# host (no metrics-server here, so still a documented default, not
+# autoscaler-derived).
+#
+# SECURITY CONTEXT: agriforecast-ml is python:3.12-slim with NO non-root user
+# baked in -- verified empirically (`docker run --rm --entrypoint id
+# agriforecast-ml:latest` -> uid=0(root)). runAsNonRoot is honestly left
+# unset rather than forced (it would crash-loop the pod on the readOnly model
+# mount + normal app writes). Still hardened where it doesn't require
+# non-root: allowPrivilegeEscalation:false + capabilities drop ALL. Making
+# this image non-root is a separate follow-up (Dockerfile surgery: add a
+# user, chown /app, re-verify pip/xgboost/shap still import).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -74,6 +96,12 @@ spec:
               port: 8077
             periodSeconds: 20
             failureThreshold: 3
+          resources:
+            requests: { memory: "512Mi", cpu: "250m" }
+            limits: { memory: "3Gi", cpu: "1000m" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
       volumes:
         - name: models
           hostPath:
