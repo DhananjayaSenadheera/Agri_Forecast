@@ -385,5 +385,52 @@ def ingest_cbsl_macro_endpoint(req: IngestCbslMacroRequest):
         )
 
 
+class SnapshotForecastsRequest(BaseModel):
+    """Orchestration knobs for the nightly forecast-snapshot pass.
+
+    snapshotDate is the plant date every forecast in the pass is made for; absent means
+    today, which is what the Worker sends. runMature also scores the snapshots whose
+    harvest date has arrived - it is a separate switch only so a backfill can write
+    snapshot rows without a maturing sweep. dryRun computes and counts a full pass
+    without writing anything.
+    """
+    snapshotDate: Optional[date] = None
+    runMature: bool = True
+    dryRun: bool = False
+
+
+@admin_router.post("/snapshot-forecasts")
+def snapshot_forecasts_endpoint(req: SnapshotForecastsRequest):
+    """Run the forecast-snapshot pass (one prediction per crop) and the maturing pass.
+
+    Called by the .NET Ingestion Worker last in the daily pass, so it predicts against
+    that night's freshly ingested prices. Per-crop failures are counted inside the summary
+    and never fail the request; only an unexpected whole-pass failure surfaces as a 502,
+    which the Worker records without advancing its watermark. The module is imported
+    lazily so a breakage here cannot block serving startup or /predict.
+    """
+    try:
+        from . import snapshots
+    except Exception:  # pragma: no cover - import wiring guard
+        _log.exception("Forecast snapshot module unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="Forecast snapshot module unavailable.",
+        )
+
+    try:
+        return snapshots.run(
+            snapshot_date=req.snapshotDate,
+            run_mature=req.runMature,
+            dry_run=req.dryRun,
+        )
+    except Exception:
+        _log.exception("Forecast snapshot pass failed")
+        raise HTTPException(
+            status_code=502,
+            detail="Forecast snapshot pass failed.",
+        )
+
+
 # Register the protected admin routes (must come after the routes are declared).
 app.include_router(admin_router)
