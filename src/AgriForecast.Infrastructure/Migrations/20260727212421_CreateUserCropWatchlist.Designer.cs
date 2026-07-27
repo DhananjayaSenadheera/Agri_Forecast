@@ -4,6 +4,7 @@ using AgriForecast.Infrastructure.Database;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AgriForecast.Infrastructure.Migrations
 {
     [DbContext(typeof(AgriForecastDbContext))]
-    partial class AgriForecastDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260727212421_CreateUserCropWatchlist")]
+    partial class CreateUserCropWatchlist
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -69,7 +72,7 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.HasIndex("Alias", "Source", "IsActive")
                         .HasDatabaseName("IX_CommodityAliases_AliasSourceActive");
 
-                    b.ToTable("CommodityAliases", (string)null);
+                    b.ToTable("CommodityAliases");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.Crop", b =>
@@ -102,7 +105,7 @@ namespace AgriForecast.Infrastructure.Migrations
 
                     b.HasIndex("CropCategoryId");
 
-                    b.ToTable("Crops", (string)null);
+                    b.ToTable("Crops");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.CropAgronomyProfile", b =>
@@ -249,7 +252,7 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.HasIndex("CropId", "EconomicCenterId", "Month")
                         .IsUnique();
 
-                    b.ToTable("CropPrices", (string)null);
+                    b.ToTable("CropPrices");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.DefaultSetting", b =>
@@ -294,7 +297,7 @@ namespace AgriForecast.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("DefaultSettings", (string)null);
+                    b.ToTable("DefaultSettings");
 
                     b.HasData(
                         new
@@ -347,7 +350,7 @@ namespace AgriForecast.Infrastructure.Migrations
 
                     b.HasIndex("MarketId");
 
-                    b.ToTable("EconomicCenters", (string)null);
+                    b.ToTable("EconomicCenters");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.EconomicIndicator", b =>
@@ -381,7 +384,7 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.HasIndex("Date", "IndicatorCode")
                         .IsUnique();
 
-                    b.ToTable("EconomicIndicators", (string)null);
+                    b.ToTable("EconomicIndicators");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.FestivalCalendarEntry", b =>
@@ -418,7 +421,7 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.HasIndex("FestivalKey", "Date")
                         .IsUnique();
 
-                    b.ToTable("FestivalCalendarEntries", (string)null);
+                    b.ToTable("FestivalCalendarEntries");
 
                     b.HasData(
                         new
@@ -1153,7 +1156,7 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.HasIndex(new[] { "CropId", "SnapshotDate" }, "UX_ForecastSnapshots_CropSnapshotDate")
                         .IsUnique();
 
-                    b.ToTable("ForecastSnapshots", null, t =>
+                    b.ToTable("ForecastSnapshots", t =>
                         {
                             t.HasCheckConstraint("CK_ForecastSnapshots_Band", "[UpperBound] >= [LowerBound] AND [LowerBound] >= 0");
 
@@ -1217,7 +1220,7 @@ namespace AgriForecast.Infrastructure.Migrations
                         .IsDescending(false, true)
                         .HasDatabaseName("IX_IngestionRuns_SourceStartedUtc");
 
-                    b.ToTable("IngestionRuns", (string)null);
+                    b.ToTable("IngestionRuns");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.IngestionVerification", b =>
@@ -1269,7 +1272,7 @@ namespace AgriForecast.Infrastructure.Migrations
                         .IsDescending()
                         .HasDatabaseName("IX_IngestionVerifications_RunUtc");
 
-                    b.ToTable("IngestionVerifications", null, t =>
+                    b.ToTable("IngestionVerifications", t =>
                         {
                             t.HasCheckConstraint("CK_IngestionVerifications_ChecksJson_IsJson", "ISJSON([ChecksJson]) = 1");
                         });
@@ -1307,7 +1310,7 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.HasIndex("Source")
                         .IsUnique();
 
-                    b.ToTable("IngestionWatermarks", (string)null);
+                    b.ToTable("IngestionWatermarks");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.MacroSeriesPoint", b =>
@@ -1351,7 +1354,7 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.HasIndex("SeriesCode", "ReferenceDate", "PublishedAt")
                         .IsUnique();
 
-                    b.ToTable("MacroSeriesPoints", (string)null);
+                    b.ToTable("MacroSeriesPoints");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.Market", b =>
@@ -1396,7 +1399,7 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.HasIndex("MarketCode")
                         .IsUnique();
 
-                    b.ToTable("Markets", (string)null);
+                    b.ToTable("Markets");
 
                     b.HasData(
                         new
@@ -1576,7 +1579,7 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.HasIndex("Source", "ExternalProductId", "PriceDate")
                         .IsUnique();
 
-                    b.ToTable("MarketPrices", (string)null);
+                    b.ToTable("MarketPrices");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.ModelTrainingRun", b =>
@@ -1646,7 +1649,7 @@ namespace AgriForecast.Infrastructure.Migrations
                         .IsUnique()
                         .HasDatabaseName("IX_ModelTrainingRuns_Version");
 
-                    b.ToTable("ModelTrainingRuns", (string)null);
+                    b.ToTable("ModelTrainingRuns");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.NewsEvent", b =>
@@ -1684,7 +1687,7 @@ namespace AgriForecast.Infrastructure.Migrations
 
                     b.HasIndex("PublishedAt");
 
-                    b.ToTable("NewsEvents", (string)null);
+                    b.ToTable("NewsEvents");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.NewsEventCrop", b =>
@@ -1699,7 +1702,7 @@ namespace AgriForecast.Infrastructure.Migrations
 
                     b.HasIndex("CropId");
 
-                    b.ToTable("NewsEventCrops", (string)null);
+                    b.ToTable("NewsEventCrops");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.NewsEventMarket", b =>
@@ -1714,7 +1717,7 @@ namespace AgriForecast.Infrastructure.Migrations
 
                     b.HasIndex("MarketId");
 
-                    b.ToTable("NewsEventMarkets", (string)null);
+                    b.ToTable("NewsEventMarkets");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.PolicyFlag", b =>
@@ -1759,7 +1762,7 @@ namespace AgriForecast.Infrastructure.Migrations
 
                     b.HasIndex("EffectiveFrom");
 
-                    b.ToTable("PolicyFlags", (string)null);
+                    b.ToTable("PolicyFlags");
 
                     b.HasData(
                         new
@@ -1919,7 +1922,7 @@ namespace AgriForecast.Infrastructure.Migrations
                         .HasDatabaseName("UX_PriceObservations_MarketCommodityNameDateSource")
                         .HasFilter("[ExternalCommodityId] IS NULL");
 
-                    b.ToTable("PriceObservations", (string)null);
+                    b.ToTable("PriceObservations");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.RefreshTokenRecord", b =>
@@ -2009,7 +2012,7 @@ namespace AgriForecast.Infrastructure.Migrations
                         .IsDescending()
                         .HasDatabaseName("IX_SystemErrors_OccurredUtc");
 
-                    b.ToTable("SystemErrors", (string)null);
+                    b.ToTable("SystemErrors");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.User", b =>
@@ -2051,7 +2054,7 @@ namespace AgriForecast.Infrastructure.Migrations
                     b.HasIndex("Username")
                         .IsUnique();
 
-                    b.ToTable("Users", (string)null);
+                    b.ToTable("Users");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.UserActivityEvent", b =>
@@ -2147,7 +2150,7 @@ namespace AgriForecast.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("WeatherRecords", (string)null);
+                    b.ToTable("WeatherRecords");
                 });
 
             modelBuilder.Entity("AgriForecast.Domain.Entities.CommodityAlias", b =>
