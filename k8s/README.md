@@ -92,7 +92,10 @@ The API contains a **pipeline sentinel**: once a night at **22:30 Asia/Colombo**
 (90 minutes after the 21:00 fire) it reads its own
 `GET /api/admin/pipeline/health` in-process and emails the owner when the night
 was not green — `missing` (did not run), `failed`, `gate_blocked` or `partial`.
-A night still `running` is re-read every 30 minutes until it settles. On a good
+A night still `running` is re-read every 30 minutes until it settles, and so is
+a `missing` one **until the 6-hour catch-up window closes at 03:00** — a node
+asleep at 21:00 may legitimately start at 02:00 and still count, so an empty
+window at 22:30 is "not yet", not "never". On a good
 night it sends a one-line **all-clear heartbeat**, on purpose: an alert-only
 sentinel is indistinguishable from a broken one, so missing mail is itself the
 signal. Every message links back to `/admin/logs/ingestion`.
@@ -130,6 +133,7 @@ at startup and never tries again.
 | `Sentinel:RunningRecheckMinutes` | `Sentinel__RunningRecheckMinutes` | `30` | Re-read interval for a still-running night |
 | `Sentinel:AdminLogsUrl` | `Sentinel__AdminLogsUrl` | cluster UI ingestion log | Link at the foot of every message |
 | `Smtp:Host` / `Smtp:Port` | `Smtp__Host` / `Smtp__Port` | `smtp.gmail.com` / `587` | STARTTLS |
+| `Smtp:SendTimeoutSeconds` | `Smtp__SendTimeoutSeconds` | `30` | Hard deadline on one send (`SmtpClient.Timeout` does **not** bound `SendMailAsync`) |
 | `Smtp:User` / `From` / `To` / `Password` | `Smtp__*` | *(empty)* | From `agri-smtp`; `From` defaults to `User`, `To` accepts a comma-separated list |
 
 To turn alerts back **off**: `kubectl delete secret agri-smtp -n agriforecast`

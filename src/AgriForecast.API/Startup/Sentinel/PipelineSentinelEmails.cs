@@ -8,9 +8,10 @@ namespace AgriForecast.API.Startup.Sentinel;
 /// <summary>
 /// Turns a pipeline-health snapshot into the plain-text email the owner reads at breakfast.
 /// <para>The one-line explanation of each state uses the SAME words as the admin banner in the app, so
-/// the mail and the screen tell one story: "did not run", "stopped with an error", "blocked at data
-/// verification", "ran partially". Rewording one side without the other is how an operator learns to
-/// distrust both.</para>
+/// the mail and the screen tell one story: "did not run", "stopped with an error", "blocked at the
+/// quality check", "ran partially". "Quality check" rather than "data verification" is deliberate — it
+/// is the phrase the UI uses (en.json qualityCheck), and rewording one side without the other is how an
+/// operator learns to distrust both.</para>
 /// <para>Honesty rules baked in here: the state token is printed verbatim (never softened), the detail
 /// fields are printed even when they are empty (an absent feature build is shown as "(none)", not
 /// omitted so the mail looks tidier), and the green heartbeat says out loud that its own absence is a
@@ -54,12 +55,13 @@ public static class PipelineSentinelEmails
     private static string Explain(string state) => state switch
     {
         PipelineHealthStates.Missing =>
-            "the pipeline did not run at all. Nothing was ingested, so today's prices, weather and " +
-            "features are yesterday's.",
+            "the pipeline did not run — nothing started within the catch-up window that follows the " +
+            "scheduled time. Nothing was ingested, so today's prices, weather and features are " +
+            "yesterday's.",
         PipelineHealthStates.Failed =>
             "the pipeline stopped with an error — the day's data may be incomplete or unchecked.",
         PipelineHealthStates.GateBlocked =>
-            "the pipeline was blocked at data verification — bad data was kept out. The feature store " +
+            "the pipeline was blocked at the quality check — bad data was kept out. The feature store " +
             "was deliberately not rebuilt from it.",
         PipelineHealthStates.Partial =>
             "the pipeline ran partially. Some sources landed and some did not, so the day's data is " +
@@ -80,7 +82,7 @@ public static class PipelineSentinelEmails
             .AppendLine("Details")
             .AppendLine($"  Night ({zoneLabel}):    {health.ExpectedForDate}")
             .AppendLine($"  State:                  {health.State}")
-            .AppendLine($"  Verification:           {Or(health.VerificationStatus)}")
+            .AppendLine($"  Quality check:          {Or(health.VerificationStatus)}")
             .AppendLine($"  Feature build:          {Or(health.FeatureBuildStatus)}")
             .AppendLine($"  Batch id:               {Or(health.BatchId?.ToString())}")
             .AppendLine($"  Started (UTC):          {Or(Utc(health.StartedUtc))}")

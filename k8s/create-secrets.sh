@@ -121,7 +121,10 @@ echo "secret agri-ml-key: created/updated"
 SMTP_USER="${SMTP_USER:-}"
 if [ -z "$SMTP_USER" ]; then
   printf 'Gmail address for pipeline alerts (Enter to SKIP email alerts): '
-  read -r SMTP_USER
+  # `|| true` on every SMTP prompt: read returns 1 at EOF, and under `set -e` that would abort the
+  # script AFTER the three real secrets were already written — a non-interactive run (CI, a piped
+  # invocation) must skip email cleanly, not exit 1 having half-finished.
+  read -r SMTP_USER || true
 fi
 
 if [ -z "$SMTP_USER" ]; then
@@ -130,7 +133,7 @@ else
   SMTP_PASSWORD="${SMTP_PASSWORD:-}"
   if [ -z "$SMTP_PASSWORD" ]; then
     printf 'Gmail APP PASSWORD for %s (16 chars, input hidden): ' "$SMTP_USER"
-    read -rs SMTP_PASSWORD
+    read -rs SMTP_PASSWORD || true
     echo ""
   fi
   if [ -z "$SMTP_PASSWORD" ]; then
@@ -144,7 +147,7 @@ else
   SMTP_TO="${SMTP_TO:-}"
   if [ -z "$SMTP_TO" ]; then
     printf 'Send alerts TO (Enter for %s): ' "$SMTP_USER"
-    read -r SMTP_TO
+    read -r SMTP_TO || true
   fi
   [ -z "$SMTP_TO" ] && SMTP_TO="$SMTP_USER"
 

@@ -56,26 +56,48 @@ public class PipelineSentinelHostedService : BackgroundService
             return;
         }
 
+        // Resolved up front and LOGGED as an instant, not just as a wall-clock preference. A restart at
+        // 22:35 legitimately skips tonight, and without this line that is indistinguishable in
+        // `kubectl logs` from a sentinel that is quietly broken — the operator sees no mail either way.
+        var nextCheckUtc = PipelineScheduleClock.ResolveNextOccurrenceUtc(
+            _timeProvider.GetUtcNow().UtcDateTime, _schedule.ScheduleTimeZone, _settings.LocalCheckTime);
+
         _logger.LogInformation(
-            "Pipeline sentinel armed: nightly check at {CheckTime} {Zone}; green heartbeat {Heartbeat}.",
+            "Pipeline sentinel armed: nightly check at {CheckTime} {Zone}; green heartbeat {Heartbeat}; " +
+            "next check {NextCheckUtc:yyyy-MM-dd HH:mm:ss}Z.",
             _settings.LocalCheckTime.ToString("HH\\:mm"),
             _schedule.ScheduleTimeZone.Id,
-            _settings.SendGreenHeartbeat ? "ON" : "OFF");
+            _settings.SendGreenHeartbeat ? "ON" : "OFF",
+            nextCheckUtc);
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 var nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
-                var nextCheckUtc = PipelineScheduleClock.ResolveNextOccurrenceUtc(
-                    nowUtc, _schedule.ScheduleTimeZone, _settings.LocalCheckTime);
+                var wait = nextCheckUtc - nowUtc;
 
-                // Strictly-after by construction, so this delay is always positive and the loop can never
-                // spin — including right after a check that finished at the check time itself.
-                await Task.Delay(nextCheckUtc - nowUtc, _timeProvider, stoppingToken);
+                // Defensive: a check that somehow overran its own next slot would make this negative,
+                // which Task.Delay rejects. Re-anchor on the clock and go round again rather than throw.
+                if (wait <= TimeSpan.Zero)
+                {
+                    nextCheckUtc = PipelineScheduleClock.ResolveNextOccurrenceUtc(
+                        nowUtc, _schedule.ScheduleTimeZone, _settings.LocalCheckTime);
+                    continue;
+                }
+
+                await Task.Delay(wait, _timeProvider, stoppingToken);
 
                 var outcome = await _sentinel.RunNightlyCheckAsync(stoppingToken);
                 _logger.LogInformation("Pipeline sentinel nightly check: {Outcome}.", outcome);
+
+                // The next slot is computed from THIS slot, never from "now". A check can legitimately
+                // return hours late (a missing night is re-read until the catch-up window closes at
+                // 03:00), and anchoring on the clock afterwards would resolve to the SAME night's check
+                // time again and fire a second time. Advancing from the previous instant makes a
+                // same-night double-fire structurally impossible instead of merely unlikely.
+                nextCheckUtc = PipelineScheduleClock.ResolveNextOccurrenceUtc(
+                    nextCheckUtc, _schedule.ScheduleTimeZone, _settings.LocalCheckTime);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

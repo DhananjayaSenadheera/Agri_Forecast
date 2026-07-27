@@ -30,8 +30,11 @@ public enum SentinelOutcome
 }
 
 /// <summary>
-/// The nightly check itself: read pipeline health, wait out a night that is still running, then send
+/// The nightly check itself: read pipeline health, wait out a night that has not settled yet, then send
 /// exactly one email — an alert when something went wrong, an all-clear heartbeat when it did not.
+/// <para>"Not settled" is two states, not one: a night still <c>running</c>, and a <c>missing</c> night
+/// whose catch-up window has not closed (a node asleep at 21:00 may legitimately start at 02:00 and still
+/// count). Both are re-read on the same cadence and the same bound.</para>
 /// <para>Separated from the hosted service so the whole decision matrix runs in a unit test against a
 /// fake probe, a fake mailer and a virtual clock. The hosted service is only the timer around it.</para>
 /// <para>FAIL-OPEN by construction: every path except cancellation is caught, logged and turned into an
@@ -72,22 +75,32 @@ public class PipelineSentinel
         }
 
         var recheck = TimeSpan.FromMinutes(_settings.RunningRecheckMinutes);
+        var startUtc = _timeProvider.GetUtcNow().UtcDateTime;
 
-        // How long a still-running night may be waited out: up to ONE re-check interval before the next
-        // scheduled fire. Past that the next pipeline run is about to start and would muddy the picture,
-        // so the sentinel reports what it last saw rather than waiting forever. In practice this is
-        // never reached — the health endpoint itself stops calling a stalled run "running" once
+        // How long a night that has not settled may be waited out: up to ONE re-check interval before the
+        // next scheduled fire. Past that the next pipeline run is about to start and would muddy the
+        // picture, so the sentinel reports what it last saw rather than waiting forever. In practice this
+        // is never reached — the health endpoint itself stops calling a stalled run "running" once
         // Ingestion:RunningStalenessMinutes lapses, which flips it to a terminal state first.
         var giveUpUtc = PipelineScheduleClock.ResolveNextOccurrenceUtc(
-            _timeProvider.GetUtcNow().UtcDateTime,
-            _schedule.ScheduleTimeZone,
-            _schedule.LocalFireTime) - recheck;
+            startUtc, _schedule.ScheduleTimeZone, _schedule.LocalFireTime) - recheck;
+
+        // When "nothing has run" stops being provisional and becomes a fact. The CronJob's
+        // startingDeadlineSeconds (mirrored as CatchUpWindowMinutes, 6h) means a node that was asleep at
+        // 21:00 may legitimately start the pipeline as late as 03:00 and still count as this night's run.
+        // The 22:30 check sits INSIDE that window, so an empty window at 22:30 is not yet evidence of a
+        // miss — emailing "did not run at all" there and having the banner read green the next morning
+        // would burn the alert's credibility on the one state it exists to catch.
+        var catchUpEndsUtc = PipelineScheduleClock
+            .ResolveMostRecentFire(startUtc, _schedule.ScheduleTimeZone, _schedule.LocalFireTime)
+            .Utc
+            .AddMinutes(_schedule.CatchUpWindowMinutes);
 
         var health = await ProbeAsync(cancellationToken);
         if (health is null) return SentinelOutcome.ProbeFailed;
 
         var recheckCount = 0;
-        while (health.State == PipelineHealthStates.Running
+        while (IsProvisional(health.State, _timeProvider.GetUtcNow().UtcDateTime, catchUpEndsUtc)
                && _timeProvider.GetUtcNow().UtcDateTime + recheck <= giveUpUtc)
         {
             await Task.Delay(recheck, _timeProvider, cancellationToken);
@@ -107,7 +120,7 @@ public class PipelineSentinel
         if (recheckCount > 0)
         {
             _logger.LogInformation(
-                "Pipeline sentinel re-checked a running night {Count} time(s); final state {State}.",
+                "Pipeline sentinel re-checked an unsettled night {Count} time(s); final state {State}.",
                 recheckCount, health.State);
         }
 
@@ -152,6 +165,16 @@ public class PipelineSentinel
 
         return isGreen ? SentinelOutcome.HeartbeatSent : SentinelOutcome.AlertSent;
     }
+
+    // Which states are not yet the night's final answer, and so are worth waiting on:
+    //   * "running" — something is in flight, by definition unfinished;
+    //   * "missing" — but ONLY while the catch-up window is still open, because until it closes an empty
+    //     window means "not started YET", not "never started".
+    // Everything else is terminal on sight. Note the asymmetry: a night that has already failed is never
+    // re-checked in the hope it improves, because it will not.
+    private static bool IsProvisional(string state, DateTime nowUtc, DateTime catchUpEndsUtc) =>
+        state == PipelineHealthStates.Running ||
+        (state == PipelineHealthStates.Missing && nowUtc < catchUpEndsUtc);
 
     // Null means "could not read". Never throws except on cancellation.
     private async Task<PipelineHealth_GetDto?> ProbeAsync(CancellationToken cancellationToken)

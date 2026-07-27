@@ -24,6 +24,10 @@ public interface ISentinelMailer
     /// Sends the message. Throws on any transport failure — the caller is expected to swallow and log,
     /// because an alerting bug must never take the API down. Implementations must never put the SMTP
     /// password into an exception message, a log line, or the email itself.
+    /// <para>LIVENESS CONTRACT: an implementation MUST complete — succeed or throw — within a bounded
+    /// time of its own making, even if the passed token is never cancelled. The only caller is a
+    /// once-a-night background loop, so a send that hangs does not merely lose one email: the loop never
+    /// reaches its next wait and every future night goes unchecked.</para>
     /// </summary>
     Task SendAsync(SentinelEmail email, CancellationToken cancellationToken = default);
 }

@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using AgriForecast.API.Startup.Sentinel;
 using AgriForecast.Application.Requests.Admin.Pipeline;
 using AgriForecast.Application.Requests.Admin.Pipeline.Queries.GetPipelineHealth;
@@ -116,12 +119,71 @@ public class PipelineSentinelTests
         public bool Throws { get; init; }
         public int Calls { get; private set; }
 
+        /// <summary>When set, every read records the virtual instant it happened at.</summary>
+        public TimeProvider? Clock { get; init; }
+
+        public List<DateTime> Instants { get; } = new();
+
+        /// <summary>Stops an otherwise endless hosted-service loop after N reads.</summary>
+        public CancellationTokenSource? StopAfter { get; init; }
+
+        public int StopAfterCalls { get; init; }
+
         public Task<PipelineHealth_GetDto?> ReadAsync(CancellationToken cancellationToken)
         {
             Calls++;
+            if (Clock is not null) Instants.Add(Clock.GetUtcNow().UtcDateTime);
             if (Throws) throw new InvalidOperationException("the database is unreachable");
             if (_scripted.Count > 0) _last = _scripted.Dequeue();
+            if (StopAfter is not null && Calls >= StopAfterCalls) StopAfter.Cancel();
             return Task.FromResult(_last);
+        }
+    }
+
+    // An SMTP endpoint that accepts the TCP connection and then says NOTHING, ever — no 220 greeting, no
+    // close. This is the failure SmtpClient.Timeout does not cover, and the one that would otherwise
+    // park the nightly loop forever.
+    private sealed class BlackholeSmtpServer : IDisposable
+    {
+        private readonly TcpListener _listener;
+        private readonly List<TcpClient> _accepted = new();
+        private readonly CancellationTokenSource _cts = new();
+
+        public BlackholeSmtpServer()
+        {
+            _listener = new TcpListener(IPAddress.Loopback, 0);
+            _listener.Start();
+            Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    while (!_cts.IsCancellationRequested)
+                    {
+                        var client = await _listener.AcceptTcpClientAsync(_cts.Token);
+                        lock (_accepted) _accepted.Add(client); // hold it open and stay silent
+                    }
+                }
+                catch
+                {
+                    // Listener stopped or token cancelled — expected on teardown.
+                }
+            });
+        }
+
+        public int Port { get; }
+
+        public void Dispose()
+        {
+            _cts.Cancel();
+            lock (_accepted)
+            {
+                foreach (var client in _accepted) client.Dispose();
+            }
+
+            _listener.Stop();
+            _cts.Dispose();
         }
     }
 
@@ -160,10 +222,12 @@ public class PipelineSentinelTests
 
     // ---- the decision matrix ------------------------------------------------------------------------
 
+    // "missing" is deliberately absent here: it is the one non-green state that is NOT terminal on
+    // sight, because the catch-up window may still be open. It has its own three tests below.
     [Theory]
-    [InlineData(PipelineHealthStates.Missing, "did not run")]
     [InlineData(PipelineHealthStates.Failed, "stopped with an error")]
-    [InlineData(PipelineHealthStates.GateBlocked, "blocked at data verification")]
+    // "quality check", not "data verification" — the phrase the UI uses (en.json qualityCheck).
+    [InlineData(PipelineHealthStates.GateBlocked, "blocked at the quality check")]
     [InlineData(PipelineHealthStates.Partial, "ran partially")]
     public async Task Every_non_green_state_sends_one_alert_naming_the_state_and_the_night(
         string state, string expectedCopy)
@@ -274,6 +338,69 @@ public class PipelineSentinelTests
         mailer.Sent[0].Body.Should().Contain("never reached a finished state");
     }
 
+    // ---- "missing" and the catch-up window ----------------------------------------------------------
+    //
+    // The 21:00 CronJob carries startingDeadlineSeconds 21600 (CatchUpWindowMinutes 360), so a node
+    // asleep at 21:00 that wakes at 02:00 still runs the pipeline and still counts as this night. The
+    // 22:30 check sits INSIDE that window. Emailing "did not run at all" at 22:30 and having the banner
+    // read green the next morning would spend the alert's credibility on the exact state it exists to
+    // catch — so "missing" is provisional until the window closes at 03:00 Colombo (21:30Z).
+
+    [Fact]
+    public async Task A_night_that_starts_late_inside_the_catch_up_window_is_never_alerted_as_missing()
+    {
+        var clock = new VirtualTimeProvider(CheckUtc);
+        var probe = new FakeProbe(
+            Snapshot(PipelineHealthStates.Missing),   // 22:30 — nothing has started YET
+            Snapshot(PipelineHealthStates.Missing),   // 23:00 — still nothing
+            Snapshot(PipelineHealthStates.Partial));  // 23:30 — the late run landed
+        var mailer = new FakeMailer();
+
+        var outcome = await Build(probe, mailer, clock).RunNightlyCheckAsync(CancellationToken.None);
+
+        clock.Waits.Should().Equal(TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(30));
+        outcome.Should().Be(SentinelOutcome.AlertSent);
+        mailer.Sent.Should().ContainSingle();
+        // The real verdict, and NOT the premature "did not run" that would have been a false alarm.
+        mailer.Sent[0].Subject.Should().Be($"AgriForecast pipeline: partial for {Night}");
+        mailer.Sent[0].Body.Should().NotContain("did not run");
+    }
+
+    [Fact]
+    public async Task A_missing_night_is_alerted_once_the_catch_up_window_closes_empty()
+    {
+        var clock = new VirtualTimeProvider(CheckUtc);
+        var mailer = new FakeMailer();
+        var probe = new FakeProbe(Snapshot(PipelineHealthStates.Missing));
+
+        var outcome = await Build(probe, mailer, clock).RunNightlyCheckAsync(CancellationToken.None);
+
+        // 21:00 Colombo fire = 15:30Z; + 360 minutes = 21:30Z, i.e. 03:00 Colombo. From the 17:00Z check
+        // that is 4.5 hours, so nine 30-minute re-reads and then the verdict — ONE alert, not nine.
+        clock.Waits.Should().HaveCount(9);
+        clock.GetUtcNow().UtcDateTime.Should().Be(new DateTime(2026, 7, 26, 21, 30, 0, DateTimeKind.Utc));
+        outcome.Should().Be(SentinelOutcome.AlertSent);
+        mailer.Sent.Should().ContainSingle();
+        mailer.Sent[0].Subject.Should().Be($"AgriForecast pipeline: missing for {Night}");
+        mailer.Sent[0].Body.Should().Contain("did not run");
+    }
+
+    [Fact]
+    public async Task A_missing_night_is_alerted_immediately_when_the_window_has_already_closed()
+    {
+        // 22:00Z is 03:30 Colombo the next morning: the fire being reported on is still 21:00 on the
+        // 26th, and its catch-up window shut half an hour ago. Nothing left to wait for.
+        var clock = new VirtualTimeProvider(new DateTime(2026, 7, 26, 22, 0, 0, DateTimeKind.Utc));
+        var mailer = new FakeMailer();
+
+        var outcome = await Build(new FakeProbe(Snapshot(PipelineHealthStates.Missing)), mailer, clock)
+            .RunNightlyCheckAsync(CancellationToken.None);
+
+        clock.Waits.Should().BeEmpty();
+        outcome.Should().Be(SentinelOutcome.AlertSent);
+        mailer.Sent[0].Subject.Should().Be($"AgriForecast pipeline: missing for {Night}");
+    }
+
     // ---- fail-open ----------------------------------------------------------------------------------
 
     [Fact]
@@ -295,7 +422,7 @@ public class PipelineSentinelTests
     {
         var mailer = new FakeMailer { ThrowOnSend = true };
         var sentinel = Build(
-            new FakeProbe(Snapshot(PipelineHealthStates.Missing)), mailer, new VirtualTimeProvider(CheckUtc));
+            new FakeProbe(Snapshot(PipelineHealthStates.Failed)), mailer, new VirtualTimeProvider(CheckUtc));
 
         var outcome = await sentinel.RunNightlyCheckAsync(CancellationToken.None);
 
@@ -345,7 +472,7 @@ public class PipelineSentinelTests
         await sentinel.RunNightlyCheckAsync(CancellationToken.None);
 
         var body = mailer.Sent[0].Body;
-        body.Should().Contain("Fail");                                   // verification status
+        body.Should().Contain("Quality check:          Fail");            // the UI's phrase, not "Verification"
         body.Should().Contain("6f9619ff-8b86-d011-b42d-00cf4fc964ff");   // batch id
         body.Should().Contain("2026-07-26 15:32:10Z");                   // startedUtc
         body.Should().Contain("http://localhost:30080/admin/logs/ingestion");
@@ -383,7 +510,7 @@ public class PipelineSentinelTests
     {
         // 06:00Z on the 26th is 11:30 Colombo, eleven hours before the 22:30 check.
         var clock = new VirtualTimeProvider(new DateTime(2026, 7, 26, 6, 0, 0, DateTimeKind.Utc));
-        var probe = new FakeProbe(Snapshot(PipelineHealthStates.Missing));
+        var probe = new FakeProbe(Snapshot(PipelineHealthStates.Failed));
         var settings = new TestSentinelSettings();
         using var cts = new CancellationTokenSource();
 
@@ -400,6 +527,62 @@ public class PipelineSentinelTests
         clock.Waits.Should().ContainSingle().Which.Should().Be(TimeSpan.FromHours(11));
         probe.Calls.Should().Be(1);
         mailer.Sent.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task A_restart_after_tonights_check_time_skips_tonight_and_arms_for_tomorrow()
+    {
+        // 17:05Z is 22:35 Colombo — the pod came back five minutes after tonight's slot.
+        var clock = new VirtualTimeProvider(new DateTime(2026, 7, 26, 17, 5, 0, DateTimeKind.Utc));
+        var settings = new TestSentinelSettings();
+        using var cts = new CancellationTokenSource();
+        var probe = new FakeProbe(Snapshot(PipelineHealthStates.Failed)) { Clock = clock };
+        var mailer = new FakeMailer { OnSend = () => cts.Cancel() };
+
+        var service = new PipelineSentinelHostedService(
+            Build(probe, mailer, clock, settings), mailer, settings, Schedule, clock,
+            NullLogger<PipelineSentinelHostedService>.Instance);
+
+        await service.StartAsync(cts.Token);
+        await service.ExecuteTask!;
+
+        // Tonight is NOT retro-fired: the sentinel sleeps 23h55m and reads for the first time at
+        // TOMORROW's 22:30. A missed night is a real gap, and the startup log line carrying the resolved
+        // next-check instant is what lets an operator tell this apart from a broken sentinel.
+        clock.Waits.Should().ContainSingle().Which.Should().Be(new TimeSpan(23, 55, 0));
+        probe.Instants.Should().ContainSingle()
+            .Which.Should().Be(new DateTime(2026, 7, 27, 17, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public async Task A_black_holed_smtp_server_does_not_stop_the_NEXT_night_from_being_checked()
+    {
+        // The regression this guards: SmtpClient.Timeout does not bound SendMailAsync, so before the
+        // send got its own deadline an SMTP endpoint that accepted the connection and never replied
+        // parked RunNightlyCheckAsync forever. The loop would never reach its next wait and EVERY
+        // subsequent night would go unchecked in silence — a worse outage than the one being alerted on.
+        using var blackhole = new BlackholeSmtpServer();
+        var mailer = BlackholeMailer(blackhole.Port);
+        var clock = new VirtualTimeProvider(new DateTime(2026, 7, 26, 6, 0, 0, DateTimeKind.Utc));
+        var settings = new TestSentinelSettings();
+        using var cts = new CancellationTokenSource();
+        var probe = new FakeProbe(Snapshot(PipelineHealthStates.Failed))
+        {
+            Clock = clock, StopAfter = cts, StopAfterCalls = 2
+        };
+
+        var service = new PipelineSentinelHostedService(
+            Build(probe, mailer, clock, settings), mailer, settings, Schedule, clock,
+            NullLogger<PipelineSentinelHostedService>.Instance);
+
+        await service.StartAsync(cts.Token);
+        await service.ExecuteTask!;
+
+        // Night one hung on the send and was cut loose by the deadline; night two still happened.
+        probe.Instants.Should().Equal(
+            new DateTime(2026, 7, 26, 17, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 7, 27, 17, 0, 0, DateTimeKind.Utc));
+        clock.Waits.Should().Equal(TimeSpan.FromHours(11), TimeSpan.FromHours(24));
     }
 
     [Fact]
@@ -475,6 +658,30 @@ public class PipelineSentinelTests
     }
 
     [Fact]
+    public async Task The_smtp_send_is_bounded_by_its_own_deadline_not_by_SmtpClient_Timeout()
+    {
+        // A server that accepts the socket and never sends the 220 greeting. SmtpClient.Timeout is
+        // documented as having NO effect on SendMailAsync, so without the linked CancelAfter this await
+        // never returns.
+        using var blackhole = new BlackholeSmtpServer();
+        var mailer = BlackholeMailer(blackhole.Port);
+        var elapsed = Stopwatch.StartNew();
+
+        var send = mailer.SendAsync(new SentinelEmail("subject", "body"), CancellationToken.None);
+        var finished = await Task.WhenAny(send, Task.Delay(TimeSpan.FromSeconds(20)));
+
+        // Asserted as a race rather than by awaiting, so a regression FAILS here instead of hanging the
+        // whole suite until the runner gives up.
+        ReferenceEquals(finished, send).Should()
+            .BeTrue("a send with no deadline of its own would park the nightly loop forever");
+        elapsed.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(20));
+
+        var act = () => send;
+        (await act.Should().ThrowAsync<Exception>())
+            .Which.Message.Should().NotContain(BlackholePassword);
+    }
+
+    [Fact]
     public async Task An_unconfigured_smtp_mailer_refuses_to_send_and_names_only_config_keys()
     {
         var mailer = new SmtpSentinelMailer(new ConfigurationBuilder().Build());
@@ -489,4 +696,20 @@ public class PipelineSentinelTests
 
     private static IConfiguration Config(Dictionary<string, string?> values) =>
         new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+
+    private const string BlackholePassword = "placeholder-never-used";
+
+    // A REAL SmtpSentinelMailer aimed at the silent local socket, with a 1-second deadline so the tests
+    // that use it cost about a second. Nothing here can reach a real mail server: the host is loopback
+    // and the port is one this test opened.
+    private static SmtpSentinelMailer BlackholeMailer(int port) =>
+        new(Config(new()
+        {
+            ["Smtp:Host"] = "127.0.0.1",
+            ["Smtp:Port"] = port.ToString(),
+            ["Smtp:SendTimeoutSeconds"] = "1",
+            ["Smtp:User"] = "sentinel@invalid.test",
+            ["Smtp:To"] = "sentinel@invalid.test",
+            ["Smtp:Password"] = BlackholePassword
+        }));
 }

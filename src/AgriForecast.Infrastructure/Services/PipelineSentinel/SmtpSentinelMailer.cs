@@ -29,9 +29,11 @@ public class SmtpSentinelMailer : ISentinelMailer
     private const string ToKey = "Smtp:To";
     private const string PasswordKey = "Smtp:Password";
 
+    private const string SendTimeoutKey = "Smtp:SendTimeoutSeconds";
+
     private const string DefaultHost = "smtp.gmail.com";
     private const int DefaultPort = 587;
-    private const int SendTimeoutMilliseconds = 30_000;
+    private const int DefaultSendTimeoutSeconds = 30;
 
     private readonly string _host;
     private readonly int _port;
@@ -39,6 +41,7 @@ public class SmtpSentinelMailer : ISentinelMailer
     private readonly string _password;
     private readonly string _from;
     private readonly string _to;
+    private readonly TimeSpan _sendTimeout;
 
     public bool IsConfigured { get; }
 
@@ -51,6 +54,12 @@ public class SmtpSentinelMailer : ISentinelMailer
             out var port) && port > 0
             ? port
             : DefaultPort;
+
+        _sendTimeout = TimeSpan.FromSeconds(
+            int.TryParse(configuration[SendTimeoutKey], NumberStyles.Integer, CultureInfo.InvariantCulture,
+                out var timeoutSeconds) && timeoutSeconds > 0
+                ? timeoutSeconds
+                : DefaultSendTimeoutSeconds);
 
         _user = (configuration[UserKey] ?? string.Empty).Trim();
         _password = configuration[PasswordKey] ?? string.Empty;
@@ -89,7 +98,10 @@ public class SmtpSentinelMailer : ISentinelMailer
             DeliveryMethod = SmtpDeliveryMethod.Network,
             UseDefaultCredentials = false,
             Credentials = new NetworkCredential(_user, _password),
-            Timeout = SendTimeoutMilliseconds
+            // Bounds the SYNCHRONOUS Send only. Documented .NET behaviour: SmtpClient.Timeout has no
+            // effect on SendMailAsync, which is why the linked token below exists. Set anyway so a
+            // future synchronous call site is not left unbounded.
+            Timeout = (int)_sendTimeout.TotalMilliseconds
         };
 
         using var message = new MailMessage(_from, _to)
@@ -101,6 +113,24 @@ public class SmtpSentinelMailer : ISentinelMailer
             BodyEncoding = Encoding.UTF8
         };
 
-        await client.SendMailAsync(message, cancellationToken);
+        // THE DEADLINE THAT ACTUALLY BINDS. Without it a black-holed SMTP endpoint — one that accepts
+        // the TCP connection and then never speaks — parks this await forever. The caller is a
+        // once-a-night background loop, so "forever" would not just lose tonight's alert: the loop would
+        // never reach its next wait and EVERY future night would silently go unchecked. That is a worse
+        // outage than the one being alerted on, so the send gets a hard wall-clock bound.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(_sendTimeout);
+
+        try
+        {
+            await client.SendMailAsync(message, deadline.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Our deadline fired, not the caller's shutdown. Rethrown as a TimeoutException so the log
+            // says what happened; host and port only, never a credential.
+            throw new TimeoutException(
+                $"SMTP send to {_host}:{_port} did not complete within {_sendTimeout.TotalSeconds:0}s.");
+        }
     }
 }
