@@ -35,9 +35,11 @@
 #       Source='FEATURE_BUILD' from state/lastRunStatus by design (see
 #       IngestionSources.ExcludedFromServiceState -- the feature build runs
 #       last every day, so including it there would permanently mask a
-#       failed DAMBULLA_DEC/WEATHER/ECONOMIC/NEWS run). There is also no
-#       separate ingestion-aware "/health" endpoint; that route is a static
-#       liveness ping for k8s probes. A CRASH inside the QA harness itself
+#       failed DAMBULLA_DEC/WEATHER/ECONOMIC/NEWS run). It ALSO surfaces on
+#       GET /api/admin/pipeline/health (reads the FEATURE_BUILD row directly;
+#       a Failed row = state "failed" = the red admin-wide pipeline banner).
+#       The literal "/health" route is only a static liveness ping for k8s
+#       probes. A CRASH inside the QA harness itself
 #       (a bug, not a failed check) is fail-open and does not touch the row.
 #       Still DETECTION not PREVENTION: the bad row is already in
 #       CropFeatureDaily by the time the gate runs -- it does not block the

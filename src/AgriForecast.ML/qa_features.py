@@ -21,11 +21,12 @@ IngestionSources.ExcludedFromServiceState deliberately excludes FEATURE_BUILD
 from that aggregate on purpose (the feature build runs last every day, so
 without the exclusion it would permanently mask a failed DAMBULLA_DEC /
 WEATHER / ECONOMIC / NEWS run behind an evergreen "succeeded" -- the
-"lastRunStatus-hijack trap"). There is also no separate ingestion-aware
-"health endpoint": the API's literal /health route is a static liveness ping
-({"status":"healthy"}) for k8s probes, unrelated to IngestionRuns. So: real,
-row-level visibility on the runs page -- not a banner flip, not a health
-check.
+"lastRunStatus-hijack trap"). The API's literal /health route is a static
+liveness ping ({"status":"healthy"}) for k8s probes, unrelated to
+IngestionRuns. But GET /api/admin/pipeline/health DOES read the FEATURE_BUILD
+row directly -- a Failed one makes the whole night's state "failed", which
+the admin-wide pipeline banner renders red on every admin page. So a failed
+check here is visible twice: the row on the runs page, and the red banner.
 
 A crash INSIDE this harness (a bug here, not a deliberately failed check) is
 a different case and is fail-open at the build_features.py call site, not

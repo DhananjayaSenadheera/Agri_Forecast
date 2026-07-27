@@ -21,9 +21,11 @@ Precisely what that makes visible (see qa_features.py's module docstring for the
 citation): the Failed row appears in the admin ingestion runs table at /admin/ingestion
 (GET /runs, unfiltered by default) -- it does NOT flip that page's status card/banner,
 which deliberately excludes Source='FEATURE_BUILD' from state/lastRunAtUtc/lastRunStatus
-(IngestionSources.ExcludedFromServiceState, the "lastRunStatus-hijack trap"), and there is
-no separate ingestion-aware "/health" endpoint (that route is a static liveness ping for
-k8s probes). This is still detection, not prevention: the bad row is already in
+(IngestionSources.ExcludedFromServiceState, the "lastRunStatus-hijack trap"). It ALSO
+surfaces on GET /api/admin/pipeline/health, which reads the FEATURE_BUILD row directly:
+a Failed row makes the night's state "failed" and the admin-wide pipeline banner turns
+red. (The literal "/health" route is only a static liveness ping for k8s probes.)
+This is still detection, not prevention: the bad row is already in
 CropFeatureDaily by the time the gate runs. A CRASH inside the harness itself (a bug in
 qa_features, not a failed check) is a different case and is deliberately fail-open here,
 same philosophy as the metrics derivation above -- see `_run_qa_gate`'s docstring.

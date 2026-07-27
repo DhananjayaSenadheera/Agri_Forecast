@@ -339,8 +339,8 @@ class TestMainAuditIntegration:
         failure against what was just persisted. That must still flip the
         FEATURE_BUILD row to Failed (naming qa_features + the failed check)
         and re-raise -- this is the whole point of the gate: a bad build
-        must read Failed, not green, on the admin Logs page / health
-        endpoint."""
+        must read Failed, not green, on the admin runs table and the
+        pipeline health banner."""
         _patch_pipeline(
             monkeypatch, _fake_feats(), written=3,
             qa_result=([], ["all contract columns present, none extra"]),
