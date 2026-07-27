@@ -47,6 +47,43 @@
 #       leakage check covers 42 of 76 feature columns (missing
 #       festivals/macro/price_obs/market_slugs) -- see qa_features.py's
 #       header.
+#   [6b] trigger_forecast_snapshot.py -- runs in the SAME build-features
+#       container, AFTER build_features.py exits 0 (see the container's shell
+#       wrapper below). PRD farmer-portfolio-and-forecast-snapshots.md 4.2,
+#       CORRECTED 2026-07-27: the snapshot/mature passes read CropFeatureDaily,
+#       which is only current once build_features has run, so this step MUST
+#       come after it, not "last in the .NET Worker pass" as the PRD originally
+#       (wrongly) specced. It makes ONE HTTP POST to ml-serving's
+#       /admin/snapshot-forecasts (the in-cluster ClusterIP service -- the
+#       promoted model payload lives there, never re-implemented here) with an
+#       EMPTY body (no snapshotDate -- the service defaults to its own
+#       date.today(); a watermark-derived date would 422 forever after any
+#       outage longer than the service's SNAPSHOT_MATURE_GRACE_DAYS and stop
+#       maturing). It writes ONE IngestionRuns row, Source='FORECAST_SNAPSHOT'
+#       (IngestionSources.FORECAST_SNAPSHOT / KnownKeys) -- Succeeded only on a
+#       clean HTTP 200 "ok" with zero snapshotCropFailures/matureRowFailures;
+#       otherwise Failed with a human-readable counts summary, so a crop
+#       failing every night is visible in the admin Logs hub rather than
+#       hidden behind a 200 status. FAIL-SOFT (PRD 3.7) at TWO layers: the
+#       script itself always exits 0 (a snapshot failure only ever produces a
+#       Failed IngestionRuns row, never a non-zero exit), and the shell
+#       wrapper's `|| true` is belt-and-suspenders on top of that -- this step
+#       can never fail the Job. FORECAST_SNAPSHOTS_ENABLED=false (env below)
+#       skips the HTTP call entirely and records a Skipped row instead --
+#       never silent. If build_features.py itself failed, this step never
+#       runs at all that night (pending ForecastSnapshots rows simply catch up
+#       on the next successful night, by the service's own design). The ONE
+#       documented silent path (N2, PR 0c review): if this step's own DB
+#       engine cannot be constructed (AGRI_DB_* unreachable/misconfigured --
+#       distinct from build_features.py's own DB access, which by definition
+#       already succeeded for this step to even run), trigger_forecast_snapshot
+#       still attempts the HTTP call so the server-side pass can run and
+#       ml-serving's OWN engine can still write ForecastSnapshots, but no local
+#       IngestionRuns audit row is written for that attempt -- there is nothing
+#       left to write it against. This is the single case where a night's
+#       trigger leaves no FORECAST_SNAPSHOT breadcrumb at all; every other
+#       branch (disabled, transport error, non-200, malformed response,
+#       per-crop/per-row failures, clean success) always writes one.
 #
 # Sequencing is expressed as initContainers (k8s runs them strictly in order,
 # each must exit 0 before the next starts) with build_features as the main
@@ -318,15 +355,62 @@ spec:
             # ~96 crops; the QA gate re-reads the full CropFeatureDaily table
             # AND rebuilds Beans' 11-year history twice more for the TC5
             # leakage-by-truncation check, all in this one process.
+            #
+            # [7b] trigger_forecast_snapshot.py runs immediately after, IN THIS
+            # SAME CONTAINER, via the shell wrapper below -- see the [6b] header
+            # comment above for why it must be after build_features, not before.
+            # SENTINEL MARKERS below (SNAPSHOT_TRIGGER_SHELL_START/END) bound the
+            # exact guard logic that tests/test_pipeline_snapshot_step_guard.py
+            # extracts and executes hermetically -- keep the markers on their own
+            # lines if this block is ever edited, or that test's extraction breaks
+            # loudly (it asserts the markers are found) rather than silently
+            # testing stale text.
+            #
+            # N1 (accepted trade-off, PR 0c review): `sh` is this container's PID 1.
+            # A SIGTERM (pod eviction/deletion) hits `sh` directly, which does not
+            # forward it to the `python build_features.py` child by default -- the
+            # child can outlive its normal termination grace period. Not fixed here
+            # (would need `exec`-ing build_features.py as the FINAL command instead
+            # of running it as a child, which is incompatible with running a second
+            # command after it); accepted because activeDeadlineSeconds already
+            # bounds the whole Job and this is the same shape every other `sh -c`
+            # step in this manifest (ingestion, batch-id) already has.
             - name: build-features
               image: agriforecast-ml:latest
               imagePullPolicy: IfNotPresent
-              command: ["python", "build_features.py"]
+              command: ["sh", "-c"]
+              args:
+                # SNAPSHOT_TRIGGER_SHELL_START
+                - |
+                  python build_features.py
+                  build_status=$?
+                  if [ "$build_status" -eq 0 ]; then
+                    python trigger_forecast_snapshot.py || true
+                  else
+                    echo "build_features failed (exit $build_status) -- skipping the forecast-snapshot trigger this run (pending ForecastSnapshots rows catch up the next successful night)" >&2
+                  fi
+                  exit "$build_status"
+                # SNAPSHOT_TRIGGER_SHELL_END
               envFrom:
                 - secretRef: { name: agri-db }
               env:
                 - name: AGRI_DB_HOST
                   value: host.docker.internal
+                # --- forecast-snapshot trigger (trigger_forecast_snapshot.py) ---
+                # Same in-cluster base URL and agri-ml-key/ML_ADMIN_API_KEY secret
+                # the ingestion container already uses for its ML admin calls
+                # (HARTI/CBSL/NEWS) -- see that container's "ML service" env block
+                # above. FORECAST_SNAPSHOTS_ENABLED defaults "true" here: PR 0b
+                # (the /admin/snapshot-forecasts route + snapshot service) is
+                # already live-merged, so this ships enabled from day one, not
+                # behind a disabled flag waiting on a later PR.
+                - name: ML_SERVICE_BASE_URL
+                  value: "http://ml-serving:8077" # in-cluster ClusterIP service
+                - name: ML_ADMIN_API_KEY
+                  valueFrom:
+                    secretKeyRef: { name: agri-ml-key, key: ML_ADMIN_API_KEY }
+                - name: FORECAST_SNAPSHOTS_ENABLED
+                  value: "true"
               resources:
                 requests: { memory: "512Mi", cpu: "250m" }
                 limits: { memory: "1536Mi", cpu: "1000m" }
