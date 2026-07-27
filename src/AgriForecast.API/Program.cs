@@ -49,6 +49,15 @@ builder.Services.AddApplicationLayer();
 // Auth:BootstrapAdminUsername is set and no admin yet exists. No seeded credentials, no migration.
 builder.Services.AddHostedService<AgriForecast.API.Startup.AdminBootstrapHostedService>();
 
+// Nightly pipeline email sentinel: once a night (Sentinel:LocalCheckTime, default 22:30 in the
+// PipelineSchedule time zone) it sends GetPipelineHealthQuery in-process and emails the owner when the
+// night was not green — so a silently dead 21:00 job is noticed without anyone opening the app.
+// Self-disabling: with no Smtp configuration it logs one line and idles, and the API runs as normal.
+builder.Services.AddSingleton<AgriForecast.API.Startup.Sentinel.IPipelineHealthProbe,
+    AgriForecast.API.Startup.Sentinel.MediatorPipelineHealthProbe>();
+builder.Services.AddSingleton<AgriForecast.API.Startup.Sentinel.PipelineSentinel>();
+builder.Services.AddHostedService<AgriForecast.API.Startup.Sentinel.PipelineSentinelHostedService>();
+
 // The API can now RUN an ingestion pass (POST /api/admin/ingestion/service/start), which needs settings
 // that used to belong to the Ingestion Worker alone. Fail loud at boot if they are absent, rather than
 // letting the admin press start and collect a screenful of red run rows. Secrets are deliberately not

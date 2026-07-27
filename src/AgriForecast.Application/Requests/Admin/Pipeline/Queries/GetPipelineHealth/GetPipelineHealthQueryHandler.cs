@@ -55,7 +55,7 @@ public class GetPipelineHealthQueryHandler
     {
         var nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
         var tz = _schedule.ScheduleTimeZone;
-        var fire = ResolveMostRecentFire(nowUtc, tz, _schedule.LocalFireTime);
+        var fire = PipelineScheduleClock.ResolveMostRecentFire(nowUtc, tz, _schedule.LocalFireTime);
 
         // Two windows, deliberately different sizes.
         // The BATCH must have STARTED inside the catch-up window, because that is the k8s rule for what
@@ -67,7 +67,7 @@ public class GetPipelineHealthQueryHandler
         // a 22:25Z manual build read as "no feature build" on a 15:32Z run.
         var windowStart = fire.Utc;
         var windowEnd = fire.Utc.AddMinutes(_schedule.CatchUpWindowMinutes);
-        var nightEnd = ResolveNextFire(fire, tz, _schedule.LocalFireTime);
+        var nightEnd = PipelineScheduleClock.ResolveNextFire(fire, tz, _schedule.LocalFireTime);
 
         var rows = await _store.GetRunsForBatchesStartedBetweenAsync(windowStart, nightEnd, cancellationToken);
 
@@ -172,50 +172,9 @@ public class GetPipelineHealthQueryHandler
             : PipelineHealthStates.Failed;
     }
 
-    // The most recent scheduled fire time that has already passed, as both a UTC instant and the local
-    // (Asia/Colombo) date that names the night. Computed from the zone rather than from UTC arithmetic:
-    // 21:00 Colombo is 15:30 UTC, so between 18:30 UTC and midnight UTC the Colombo date has already
-    // rolled over while the fire being reported on is still yesterday's.
-    private static (DateTime Utc, DateOnly LocalDate) ResolveMostRecentFire(
-        DateTime nowUtc, TimeZoneInfo tz, TimeOnly localFireTime)
-    {
-        var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(
-            DateTime.SpecifyKind(nowUtc, DateTimeKind.Utc), tz);
-
-        var localDate = DateOnly.FromDateTime(nowLocal);
-        if (localDate.ToDateTime(localFireTime) > nowLocal)
-            localDate = localDate.AddDays(-1);
-
-        return (ToUtcInstant(localDate.ToDateTime(localFireTime), tz), localDate);
-    }
-
-    // When this night ends: the next scheduled fire. Always in the future for the night we report on, so
-    // it never actually clips anything today — it is here so the "this night's feature build" rule stays
-    // correct by construction rather than by relying on the handler only ever looking at the newest
-    // night. Recomputed through the zone rather than adding 24h, for the same DST reason as above.
-    private static DateTime ResolveNextFire(
-        (DateTime Utc, DateOnly LocalDate) fire, TimeZoneInfo tz, TimeOnly localFireTime) =>
-        ToUtcInstant(fire.LocalDate.AddDays(1).ToDateTime(localFireTime), tz);
-
-    // Wall clock -> UTC, without throwing on a DST transition. Sri Lanka has no DST so neither branch
-    // fires today, but the zone is configurable and a health endpoint that 500s on a clock change would
-    // be worse than useless.
-    private static DateTime ToUtcInstant(DateTime localWallClock, TimeZoneInfo tz)
-    {
-        var unspecified = DateTime.SpecifyKind(localWallClock, DateTimeKind.Unspecified);
-
-        // Skipped by a spring-forward: no such instant exists, so take the offset in effect just before
-        // the transition, which lands on the first real instant at or after the intended one.
-        if (tz.IsInvalidTime(unspecified))
-            return unspecified - tz.GetUtcOffset(unspecified);
-
-        // Repeated by a fall-back: take the larger offset, i.e. the FIRST of the two occurrences, so the
-        // window opens at the earlier fire rather than an hour late.
-        if (tz.IsAmbiguousTime(unspecified))
-            return unspecified - tz.GetAmbiguousTimeOffsets(unspecified).Max();
-
-        return TimeZoneInfo.ConvertTimeToUtc(unspecified, tz);
-    }
+    // The fire-time / next-fire / DST-safe conversion maths moved to PipelineScheduleClock when the email
+    // sentinel started needing the same answers. Shared deliberately: the banner and the alert email must
+    // report on the SAME night, and two copies of this arithmetic would eventually disagree.
 
     // EF materializes datetime2 as DateTimeKind.Unspecified, so JSON would omit the trailing "Z" and the
     // FE would read these UTC instants as local.
