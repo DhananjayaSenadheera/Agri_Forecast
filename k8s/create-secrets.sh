@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Create/refresh the three AgriForecast Kubernetes secrets (agri-db, agri-jwt,
-# agri-ml-key) in the `agriforecast` namespace.
+# Create/refresh the AgriForecast Kubernetes secrets (agri-db, agri-jwt,
+# agri-ml-key, and the OPTIONAL agri-smtp) in the `agriforecast` namespace.
 #
 # Sources of truth:
 #   - DB creds + ML admin key: the gitignored src/AgriForecast.ML/.env
@@ -9,6 +9,9 @@
 #     hidden interactive prompt (it currently lives in .NET user-secrets:
 #       dotnet user-secrets list --project src/AgriForecast.API   # run it
 #       yourself to copy the value; this script never reads user-secrets).
+#   - SMTP account for the nightly pipeline alert email: OPTIONAL and SKIPPABLE.
+#     Press Enter at the prompt to leave it out; the API then logs
+#     "sentinel disabled: Smtp not configured" and runs exactly as before.
 #
 # Idempotent: safe to re-run after any credential rotation.
 # SECURITY: this script never echoes a secret value and writes no files.
@@ -106,10 +109,59 @@ kubectl create secret generic agri-ml-key -n "$NAMESPACE" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 echo "secret agri-ml-key: created/updated"
 
+# --- agri-smtp (OPTIONAL) ---------------------------------------------------
+# The nightly pipeline sentinel emails the owner when a night was not green.
+# It is entirely opt-in: forecast-api.yaml marks every Smtp__* env as
+# `optional: true`, so a missing agri-smtp secret leaves the pod perfectly
+# healthy and the sentinel simply logs one "disabled" line at startup.
+#
+# GMAIL: the value below is an APP PASSWORD, not the account password —
+# myaccount.google.com -> Security -> 2-Step Verification -> App passwords.
+# Google rejects the account password for SMTP.
+SMTP_USER="${SMTP_USER:-}"
+if [ -z "$SMTP_USER" ]; then
+  printf 'Gmail address for pipeline alerts (Enter to SKIP email alerts): '
+  read -r SMTP_USER
+fi
+
+if [ -z "$SMTP_USER" ]; then
+  echo "secret agri-smtp: skipped (no address given) — pipeline email alerts stay OFF"
+else
+  SMTP_PASSWORD="${SMTP_PASSWORD:-}"
+  if [ -z "$SMTP_PASSWORD" ]; then
+    printf 'Gmail APP PASSWORD for %s (16 chars, input hidden): ' "$SMTP_USER"
+    read -rs SMTP_PASSWORD
+    echo ""
+  fi
+  if [ -z "$SMTP_PASSWORD" ]; then
+    echo "ERROR: an address was given but the app password is empty. Re-run and either" >&2
+    echo "       supply both, or press Enter at the address prompt to skip email." >&2
+    exit 1
+  fi
+
+  # Recipient defaults to the sending account — alerting yourself is the normal
+  # case. A comma-separated list is accepted (MailMessage splits it).
+  SMTP_TO="${SMTP_TO:-}"
+  if [ -z "$SMTP_TO" ]; then
+    printf 'Send alerts TO (Enter for %s): ' "$SMTP_USER"
+    read -r SMTP_TO
+  fi
+  [ -z "$SMTP_TO" ] && SMTP_TO="$SMTP_USER"
+
+  kubectl create secret generic agri-smtp -n "$NAMESPACE" \
+    --from-literal=SMTP_USER="$SMTP_USER" \
+    --from-literal=SMTP_FROM="$SMTP_USER" \
+    --from-literal=SMTP_TO="$SMTP_TO" \
+    --from-literal=SMTP_PASSWORD="$SMTP_PASSWORD" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  echo "secret agri-smtp: created/updated (4 keys) — pipeline email alerts ON"
+  unset SMTP_PASSWORD
+fi
+
 unset JWT ML_KEY AGRI_DB_PASSWORD
 
 echo ""
-echo "All three secrets are in place in namespace '$NAMESPACE'."
+echo "Secrets are in place in namespace '$NAMESPACE'."
 echo "Running deployments do NOT pick up secret changes automatically — after a"
 echo "rotation, restart them:"
 echo "  kubectl rollout restart deployment/ml-serving deployment/forecast-api -n $NAMESPACE"
