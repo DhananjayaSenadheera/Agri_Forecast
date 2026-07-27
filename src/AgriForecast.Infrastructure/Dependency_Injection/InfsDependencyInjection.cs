@@ -62,6 +62,9 @@ public static class InfsDependencyInjection
         services.AddScoped<IIngestionReadStore, AgriForecast.Infrastructure.Services.IngestionRead.IngestionReadStore>();
         // Read-only Logs-hub store. Reads only, on the normal request-scoped DbContext.
         services.AddScoped<ILogsReadStore, AgriForecast.Infrastructure.Services.LogsRead.LogsReadStore>();
+        // Read-only ForecastSnapshots store behind the admin "Forecast accuracy" surface. Reads only —
+        // the nightly Python job owns every write to that table.
+        services.AddScoped<IForecastAccuracyReadStore, AgriForecast.Infrastructure.Services.ForecastAccuracyRead.ForecastAccuracyReadStore>();
         // Resolves the status handler's config at the Infrastructure boundary, keeping configuration out of
         // the Application layer.
         services.AddScoped<IIngestionStatusSettings, AgriForecast.Infrastructure.Services.IngestionRead.IngestionStatusSettings>();

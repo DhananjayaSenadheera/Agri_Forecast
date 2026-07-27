@@ -125,6 +125,19 @@ public class AdminAuthorizationWiringTests
         IsAnonymous(typeof(AdminLogsController), method).Should().BeFalse();
     }
 
+    // AdminForecastAccuracyController: both reads are Admin-only. They expose how the model has actually
+    // scored — model-vs-fallback skill and per-version performance — which is operator information. A
+    // bare [Authorize] would put it in front of farmers, who are shown a forecast, not its error record.
+    [Theory]
+    [InlineData(nameof(AdminForecastAccuracyController.GetSummary))]
+    [InlineData(nameof(AdminForecastAccuracyController.GetSnapshots))]
+    public void AdminForecastAccuracyReads_AreAdminOnly(string method)
+    {
+        IsAdminLocked(typeof(AdminForecastAccuracyController), method).Should().BeTrue(
+            $"AdminForecastAccuracyController.{method} exposes model-accuracy internals and must be Admin-locked");
+        IsAnonymous(typeof(AdminForecastAccuracyController), method).Should().BeFalse();
+    }
+
     // Auth endpoints stay anonymous by design.
     [Theory]
     [InlineData(nameof(AuthController.Register))]
