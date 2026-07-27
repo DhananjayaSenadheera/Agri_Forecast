@@ -30,6 +30,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<IngestionRun> IngestionRuns { get; set; }
     public DbSet<IngestionVerification> IngestionVerifications { get; set; }
     public DbSet<ModelTrainingRun> ModelTrainingRuns { get; set; }
+    public DbSet<ForecastSnapshot> ForecastSnapshots { get; set; }
     public DbSet<UserActivityEvent> UserActivityLog { get; set; }
     public DbSet<SystemError> SystemErrors { get; set; }
 
@@ -497,6 +498,61 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.HasIndex(x => x.TrainedAtUtc)
                 .IsDescending()
                 .HasDatabaseName("IX_ModelTrainingRuns_TrainedAtUtc");
+        });
+
+        // FORECAST SNAPSHOT rows — one frozen prediction per crop per day. Written by the Python nightly
+        // job (insert at snapshot, single update at maturity); .NET owns the schema and reads them.
+        // Date-only columns carry no hidden time, every money column gets explicit precision, and
+        // CreatedAtUtc is DB-defaulted so a Python INSERT that omits it still stamps a creation instant.
+        modelBuilder.Entity<ForecastSnapshot>(e =>
+        {
+            e.Property(x => x.SnapshotDate).HasColumnType("date").IsRequired();
+            e.Property(x => x.HarvestDate).HasColumnType("date");
+            e.Property(x => x.ActualObservedDate).HasColumnType("date");
+
+            e.Property(x => x.PredictedPrice).HasPrecision(10, 2).IsRequired();
+            e.Property(x => x.LowerBound).HasPrecision(10, 2).IsRequired();
+            e.Property(x => x.UpperBound).HasPrecision(10, 2).IsRequired();
+            e.Property(x => x.ReferencePrice).HasPrecision(10, 2);
+            e.Property(x => x.ActualPrice).HasPrecision(10, 2);
+            e.Property(x => x.SignedError).HasPrecision(10, 2);
+            e.Property(x => x.AbsoluteError).HasPrecision(10, 2);
+            e.Property(x => x.PercentageError).HasPrecision(9, 4);
+
+            e.Property(x => x.Confidence).HasMaxLength(20).IsRequired();
+            e.Property(x => x.ActivePredictor).HasMaxLength(50).IsRequired();
+            e.Property(x => x.FallbackTier).HasMaxLength(50);
+            e.Property(x => x.ModelVersion).HasMaxLength(20);
+            e.Property(x => x.ReasonCode).HasMaxLength(100);
+
+            // Stored as a STRING, not the usual enum-as-int: the Python job writes and filters these rows
+            // in raw SQL and the pending index below is literally WHERE MaturityState = 'pending'.
+            // Values are pinned in ForecastSnapshotMaturityStates.
+            e.Property(x => x.MaturityState).HasMaxLength(30).IsRequired();
+
+            e.Property(x => x.CreatedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+
+            // Restrict: a Crop can never be deleted while its forecast history still exists.
+            e.HasOne<Crop>()
+                .WithMany()
+                .HasForeignKey(x => x.CropId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // One row per crop per day — the key the nightly upsert is idempotent on. ModelVersion is
+            // deliberately NOT part of it: a day belongs to whichever version served it.
+            // NOTE the named HasIndex overloads: two indexes share the (CropId, SnapshotDate) property
+            // pair, and the unnamed overload would return the SAME index builder for both and silently
+            // collapse them into one.
+            e.HasIndex(x => new { x.CropId, x.SnapshotDate }, "UX_ForecastSnapshots_CropSnapshotDate")
+                .IsUnique();
+
+            // Maturing sweep hot path: due rows only. Filtered so the index stays tiny as history grows.
+            e.HasIndex(x => x.HarvestDate, "IX_ForecastSnapshots_HarvestDatePending")
+                .HasFilter("[MaturityState] = 'pending'");
+
+            // Dashboard read path: "latest snapshot per crop", newest first.
+            e.HasIndex(x => new { x.CropId, x.SnapshotDate }, "IX_ForecastSnapshots_CropSnapshotDateDesc")
+                .IsDescending(false, true);
         });
 
         // User ACTIVITY rows — one per account or content event, written by IUserActivityAudit. EventType is
