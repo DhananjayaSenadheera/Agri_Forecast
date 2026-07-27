@@ -359,6 +359,10 @@ public class IngestionServiceControlTests
         // running" and block the start button.
         h.Store.CapturedExcluded.Should().BeEquivalentTo(IngestionSources.ExcludedFromServiceState);
         h.Store.CapturedExcluded.Should().Contain(IngestionSources.FeatureBuild);
+        // PR 0c reviewer B2: a Running FORECAST_SNAPSHOT row must likewise never be misread as "ingestion
+        // is running" and block Start/Stop -- IsRunningPerRunRowsAsync is shared by both handlers, so this
+        // one assertion covers Stop too.
+        h.Store.CapturedExcluded.Should().Contain(IngestionSources.ForecastSnapshot);
     }
 
     [Fact]

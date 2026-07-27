@@ -42,13 +42,24 @@ public static class IngestionSources
     };
 
     /// <summary>
-    /// Run sources that must not affect the admin status card's state, lastRunAtUtc or lastRunStatus.
-    /// The feature build runs last every day, so without this exclusion it would permanently be the
-    /// latest run and a failed DAMBULLA_DEC / WEATHER / ECONOMIC / NEWS could never show up there.
+    /// Run sources that must not affect the admin status card's state, lastRunAtUtc or lastRunStatus,
+    /// the pipeline health banner/sentinel, or the running/stopped detection start/stop rely on
+    /// (IsRunningPerRunRowsAsync). Both members here run as standalone Python steps in the build-features
+    /// container, each minting its own solo BatchId — they never join the ingestion Worker's shared batch,
+    /// so their outcome must never stand in for "did the Worker's pass succeed". The feature build runs
+    /// last every day, so without this exclusion it would permanently be the latest run and a failed
+    /// DAMBULLA_DEC / WEATHER / ECONOMIC / NEWS could never show up there. FORECAST_SNAPSHOT runs even
+    /// later (after FEATURE_BUILD): without excluding it too, a Failed snapshot row would flip the
+    /// admin-wide pipeline banner red and fire the sentinel email over a report-only pass (violates PRD
+    /// farmer-portfolio-and-forecast-snapshots.md §3.7 — the snapshot job must never gate anything), and a
+    /// Succeeded snapshot row — being the latest solo batch in the window — would win batch selection and
+    /// paper over a genuinely partial ingestion night as green (the exact silent-failure class the health
+    /// endpoint exists to catch). A Running snapshot row would also be misread by
+    /// IsRunningPerRunRowsAsync as "ingestion still running", blocking Start/Stop.
     /// </summary>
     public static readonly IReadOnlyCollection<string> ExcludedFromServiceState = new[]
     {
-        FeatureBuild
+        FeatureBuild, ForecastSnapshot
     };
 
     /// <summary>True if <paramref name="source"/> is a known ingestion source (case-insensitive).</summary>

@@ -64,6 +64,16 @@ COPY verify_ingestion.py .
 # the nightly-qa-gate PR rather than assuming the COPY list was already
 # complete.
 COPY qa_features.py .
+# trigger_forecast_snapshot.py (PR 0c, farmer-portfolio PRD 4.2) is invoked by
+# k8s/pipeline-daily.yaml's build-features container shell wrapper, AFTER
+# build_features.py exits 0 -- same class of bug as every entry above if
+# omitted: the interpreter would exit 2 (script not found), silently
+# swallowed by the manifest's `|| true` fail-soft wrapper, and zero
+# FORECAST_SNAPSHOT audit rows would ever be written. Caught here BEFORE it
+# could ship, same discipline as the qa_features.py incident above: this
+# Dockerfile change is proved with a real `docker build` + `docker run`
+# below, not assumed correct from the COPY list alone.
+COPY trigger_forecast_snapshot.py .
 
 EXPOSE 8077
 

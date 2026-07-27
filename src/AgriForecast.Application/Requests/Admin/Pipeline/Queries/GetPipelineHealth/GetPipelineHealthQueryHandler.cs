@@ -71,8 +71,8 @@ public class GetPipelineHealthQueryHandler
 
         var rows = await _store.GetRunsForBatchesStartedBetweenAsync(windowStart, nightEnd, cancellationToken);
 
-        // FEATURE_BUILD is not an ingestion source and carries its own solo BatchId, so it can never be
-        // the batch we pick — but it IS the signal rules 5 and 6 turn on, so it is read separately.
+        // Every source in ExcludedFromServiceState (today FEATURE_BUILD and FORECAST_SNAPSHOT) carries its
+        // own solo BatchId, so none of them can ever be the ingestion-Worker batch we pick here.
         var excluded = new HashSet<string>(
             IngestionSources.ExcludedFromServiceState, StringComparer.OrdinalIgnoreCase);
 
@@ -87,8 +87,18 @@ public class GetPipelineHealthQueryHandler
 
         // Every feature-build attempt this night, newest first. More than one means a rebuild after a
         // failed or adjudicated first attempt; the newest is the current truth.
+        //
+        // Filtered on Source == FeatureBuild SPECIFICALLY, not "any excluded source": FORECAST_SNAPSHOT is
+        // also excluded from `batch` above (it must never win batch selection — PR 0c reviewer B2), but it
+        // runs even later than FEATURE_BUILD every night and is report-only (farmer-portfolio PRD §3.7 —
+        // the snapshot pass must never gate ingest/verify/train). If this filter reused the whole
+        // `excluded` set, the newest excluded row on a healthy night would be the FORECAST_SNAPSHOT row,
+        // not the FEATURE_BUILD row, and its outcome would silently become featureBuildStatus below —
+        // a Failed snapshot flipping this banner (and the sentinel email) red over a report-only pass, or
+        // a Succeeded snapshot papering over a feature build that actually failed. FORECAST_SNAPSHOT must
+        // play NO role anywhere in this handler beyond being excluded from `batch`.
         var featureBuildRows = rows
-            .Where(r => excluded.Contains(r.Source)
+            .Where(r => string.Equals(r.Source, IngestionSources.FeatureBuild, StringComparison.OrdinalIgnoreCase)
                         && r.StartedUtc >= windowStart && r.StartedUtc < nightEnd)
             .OrderByDescending(r => r.StartedUtc)
             .ToList();

@@ -64,6 +64,16 @@ _BASE_URL_ENV = "ML_SERVICE_BASE_URL"
 _API_KEY_ENV = "ML_ADMIN_API_KEY"
 _DEFAULT_BASE_URL = "http://127.0.0.1:8077"
 _ENDPOINT_PATH = "/admin/snapshot-forecasts"
+# TODO(S3, PR 0c review, unmeasured): size this from a real POST dryRun=true timing
+# against live ml-serving (~96 crops x predict_harvest + one indexed pending-rows scan
+# -- see snapshots.py's module docstring for the pass shape), with ~4-5x headroom over
+# the measured value, and record the measurement in this comment. Attempted during this
+# review pass via `kubectl port-forward svc/ml-serving 18077:8077` -- reachable
+# (/health = 200) but /admin/snapshot-forecasts 404s: the LIVE deployed ml-serving image
+# predates PR #73/#74 (openapi.json lists only ingest-news/harti/cbsl/cbsl-macro, no
+# snapshot-forecasts route), so no real timing could be taken without rebuilding and
+# redeploying the cluster image, out of scope for this fix-up. 120s is an unmeasured,
+# conservative placeholder pending a redeploy that includes this route.
 _TIMEOUT_SECONDS = 120
 
 _FALSY = {"false", "0", "no", "off", ""}
@@ -112,13 +122,21 @@ def _call_snapshot_endpoint(base_url: str, api_key: str) -> "tuple[int, Optional
         return exc.code, _safe_json(raw), raw
 
 
+def _as_dict(value) -> dict:
+    """Coerce a JSON-decoded value to a dict, or {} for anything else (None, a list, a
+    scalar). ml-serving's response shape is trusted today, but a future contract change
+    or a malformed body must degrade to "unrecognised", never crash the caller with an
+    AttributeError on `.get()` -- see S1/S2 in the PR 0c review."""
+    return value if isinstance(value, dict) else {}
+
+
 def _summarize(payload: dict) -> str:
     """Human-readable one-liner with every count an admin needs to see, including
     `frozen` (PRD 4.2's `snapshot.frozen`) -- without it a re-run over an
     already-matured day looks like it silently did nothing."""
-    snap = payload.get("snapshot") or {}
-    mature = payload.get("mature") or {}
-    errors = payload.get("errors") or {}
+    snap = _as_dict(payload.get("snapshot"))
+    mature = _as_dict(payload.get("mature"))
+    errors = _as_dict(payload.get("errors"))
     return (
         f"snapshotDate={snap.get('snapshotDate')} cropsAttempted={snap.get('cropsAttempted')} "
         f"inserted={snap.get('inserted')} updated={snap.get('updated')} frozen={snap.get('frozen')} "
@@ -146,8 +164,8 @@ def _try_finish_succeeded(engine, run_id, payload: dict) -> None:
     if run_id is None:
         return
     try:
-        snap = payload.get("snapshot") or {}
-        mature = payload.get("mature") or {}
+        snap = _as_dict(payload.get("snapshot"))
+        mature = _as_dict(payload.get("mature"))
         snap_date_str = snap.get("snapshotDate")
         covered = date.fromisoformat(snap_date_str) if snap_date_str else None
         snapshot_run_log.mark_succeeded(
@@ -195,12 +213,30 @@ def skip(engine) -> str:
     return "skipped"
 
 
-def run(engine, base_url: str, api_key: str, *, http_post: HttpPost = _call_snapshot_endpoint) -> str:
+def run(engine, base_url: str, api_key: str, *, http_post: Optional[HttpPost] = None) -> str:
     """Core trigger logic: call the admin endpoint once, decide the outcome, record
     ONE audit row. Never raises -- every branch below is terminal and returns a
     status string ("succeeded" | "failed"); the DB engine and the HTTP caller are
     both injectable so this is testable with no live DB and no live network.
+
+    http_post DELIBERATELY defaults to None and is late-bound to
+    `_call_snapshot_endpoint` inside the function body, not in the signature. A
+    signature default of `http_post: HttpPost = _call_snapshot_endpoint` looks
+    identical but is a real network hazard: default parameter values are evaluated
+    and bound ONCE, at module-import time, to whatever `_call_snapshot_endpoint`
+    object existed then. `monkeypatch.setattr(trigger_forecast_snapshot,
+    "_call_snapshot_endpoint", fake)` replaces the MODULE attribute, but every
+    caller that relies on the already-bound default keeps calling the ORIGINAL
+    function -- test isolation silently breaks and the real urllib POST fires
+    (this bit a version of this function's own test suite: it hit
+    http://127.0.0.1:8077/admin/snapshot-forecasts with the real admin key from
+    .env). Reading the name `_call_snapshot_endpoint` fresh on every call, as done
+    below, resolves it from the module globals AT CALL TIME instead, so a
+    monkeypatch on the module attribute is always honoured.
     """
+    if http_post is None:
+        http_post = _call_snapshot_endpoint
+
     run_id = _try_start(engine)
 
     try:
@@ -225,9 +261,25 @@ def run(engine, base_url: str, api_key: str, *, http_post: HttpPost = _call_snap
         _try_finish_failed(engine, run_id, reason)
         return "failed"
 
-    errors = payload.get("errors") or {}
-    crop_failures = errors.get("snapshotCropFailures") or 0
-    row_failures = errors.get("matureRowFailures") or 0
+    # S2: a missing/renamed `errors` block (or a non-integer count inside it) must NOT
+    # read as "clean" -- `errors.get(...) or 0` used to default both counters to 0 on
+    # anything absent or falsy, so a response that dropped the errors block entirely (a
+    # future contract change, a serving-side bug) would sail straight into Succeeded.
+    # Both counters must be PRESENT and actual ints (bool excluded -- a JSON true/false
+    # is not a count) or this is a malformed response, recorded Failed, never Succeeded.
+    errors = _as_dict(payload.get("errors"))
+    crop_failures = errors.get("snapshotCropFailures")
+    row_failures = errors.get("matureRowFailures")
+    if (not isinstance(crop_failures, int) or isinstance(crop_failures, bool)
+            or not isinstance(row_failures, int) or isinstance(row_failures, bool)):
+        reason = (
+            "Malformed response: errors.snapshotCropFailures/matureRowFailures missing "
+            f"or non-integer (snapshotCropFailures={crop_failures!r}, "
+            f"matureRowFailures={row_failures!r}). Body: {raw[:500]}")
+        logger.error("trigger_forecast_snapshot: %s", reason)
+        _try_finish_failed(engine, run_id, reason)
+        return "failed"
+
     summary = _summarize(payload)
 
     if payload.get("status") == "ok" and crop_failures == 0 and row_failures == 0:
@@ -246,12 +298,35 @@ def run(engine, base_url: str, api_key: str, *, http_post: HttpPost = _call_snap
 
 
 def main() -> int:
-    load_env_file()
+    """Fail-soft entry point (PRD sec 3.7): this function must NEVER raise and must
+    ALWAYS return 0, so a bug here can never fail the pipeline Job.
+
+    Every branch inside _main_impl() is already a deliberately terminal outcome
+    (Succeeded / Failed / Skipped audit row, always exit 0) -- but S1 (PR 0c review):
+    that only covers the cases this module anticipated. Something outside that list
+    (a malformed .env, an unexpected payload shape `run()`'s own type-checks did not
+    foresee, a future contract change) must still degrade to "logged and swallowed",
+    never to a crash that skips the audit row AND propagates a non-zero exit past the
+    manifest's `|| true`. This wrapper is the outermost net making that literally
+    true by construction, not just true of the paths that were thought through.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-8s %(name)s -- %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    try:
+        return _main_impl()
+    except Exception as exc:  # noqa: BLE001 -- the outermost fail-soft net; nothing may escape main()
+        logger.exception(
+            "trigger_forecast_snapshot: unexpected exception escaped the trigger (%s: %s) -- "
+            "swallowed here so the pipeline Job is never failed over a bug in this script.",
+            type(exc).__name__, exc)
+        return 0
+
+
+def _main_impl() -> int:
+    load_env_file()
 
     if not _is_enabled():
         logger.info(

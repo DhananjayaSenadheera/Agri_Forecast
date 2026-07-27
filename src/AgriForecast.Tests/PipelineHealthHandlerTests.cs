@@ -32,13 +32,17 @@ public class PipelineHealthHandlerTests
     private static readonly DateTime FireUtc = new(2026, 7, 26, 15, 30, 0, DateTimeKind.Utc);
     private const string ExpectedNight = "2026-07-26";
 
-    // The seven real ingestion-Worker sources, i.e. everything except FEATURE_BUILD and
-    // FORECAST_SNAPSHOT — both of the latter are written by standalone Python steps in the
-    // build-features container, each minting its own solo BatchId (see FeatureBuild() below and
+    // The real ingestion-Worker sources: every KnownKeys entry EXCEPT ExcludedFromServiceState (today
+    // FEATURE_BUILD and FORECAST_SNAPSHOT). Deliberately DERIVED from the production constant, not
+    // hand-listed — a hand-listed exclusion here is exactly what hid the PR 0c reviewer's B2 finding: this
+    // fixture used to filter out only FeatureBuild, so FORECAST_SNAPSHOT rows kept landing inside
+    // CleanBatch as if they were ordinary Worker sources, and no test could ever have caught it diverging
+    // from the real ExcludedFromServiceState. Both excluded sources are written by standalone Python steps
+    // in the build-features container, each minting its own solo BatchId (see FeatureBuild() below and
     // trigger_forecast_snapshot.py), never joining the Worker's shared batch that CleanBatch simulates.
     private static readonly string[] IngestionSourceKeys =
         IngestionSources.KnownKeys
-            .Where(k => k != IngestionSources.FeatureBuild && k != IngestionSources.ForecastSnapshot)
+            .Except(IngestionSources.ExcludedFromServiceState, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
     // In-memory IngestionRuns + IngestionVerifications, mirroring PipelineHealthReadStore's semantics —
@@ -178,6 +182,30 @@ public class PipelineHealthHandlerTests
                 break; // left unfinished on purpose
             default:
                 run.MarkSkipped(startedUtc.AddSeconds(1));
+                break;
+        }
+        return run;
+    }
+
+    // Mirrors FeatureBuild() above: FORECAST_SNAPSHOT rows also mint a fresh solo BatchId every night (the
+    // Python writer, agriforecast_ml/snapshot_run_log.py) and always run STRICTLY LATER than FEATURE_BUILD
+    // in the same build-features container (PR 0c). Used to reproduce the PR 0c reviewer's B2 scenarios.
+    private static IngestionRun ForecastSnapshot(DateTime startedUtc, IngestionRunStatus status)
+    {
+        var batchId = Guid.NewGuid();
+        var run = IngestionRun.StartRunning(batchId, IngestionSources.ForecastSnapshot, startedUtc);
+        switch (status)
+        {
+            case IngestionRunStatus.Succeeded:
+                run.MarkSucceeded(startedUtc.AddSeconds(30), rowsInserted: 92, distinctCrops: 96);
+                break;
+            case IngestionRunStatus.Failed:
+                run.MarkFailed(startedUtc.AddSeconds(30), "per-crop/per-row failures reported");
+                break;
+            case IngestionRunStatus.Running:
+                break; // left unfinished on purpose
+            default:
+                run.MarkSkipped(startedUtc.AddSeconds(5));
                 break;
         }
         return run;
@@ -722,6 +750,54 @@ public class PipelineHealthHandlerTests
 
         health.BatchId.Should().Be(late);
         health.State.Should().Be(PipelineHealthStates.Green);
+    }
+
+    // --- PR 0c reviewer B2: FORECAST_SNAPSHOT must be pure noise to this endpoint ---------------
+
+    // Scenario 1: a Failed FORECAST_SNAPSHOT row (it runs even later than FEATURE_BUILD, every night)
+    // must never flip this banner red, fire the sentinel email, or overwrite featureBuildStatus with its
+    // own outcome. The snapshot pass is report-only (farmer-portfolio PRD sec 3.7 -- it must never gate
+    // ingest/verify/train), and this banner/sentinel is exactly the kind of gate that law forbids.
+    [Fact]
+    public async Task Green_WhenFeatureBuildSucceededButALaterForecastSnapshotRowFailed()
+    {
+        var batchId = Guid.NewGuid();
+        var store = new FakeStore()
+            .Add(CleanBatch(batchId, FireUtc.AddMinutes(1)))
+            .Add(FeatureBuild(FireUtc.AddMinutes(25), IngestionRunStatus.Succeeded))
+            .Add(ForecastSnapshot(FireUtc.AddMinutes(30), IngestionRunStatus.Failed))
+            .Add(Verification(batchId, IngestionVerificationStatus.Pass, FireUtc.AddMinutes(20)));
+
+        var health = await HealthAsync(store, FireUtc.AddHours(2));
+
+        health.State.Should().Be(PipelineHealthStates.Green,
+            "the snapshot pass is report-only (PRD sec 3.7) and must never gate this banner");
+        health.FeatureBuildStatus.Should().Be("succeeded",
+            "featureBuildStatus must report FEATURE_BUILD's own outcome, never a later excluded source's");
+    }
+
+    // Scenario 2: before FORECAST_SNAPSHOT was added to ExcludedFromServiceState, its solo one-row batch --
+    // starting even later than FEATURE_BUILD -- would win batch selection
+    // (`.OrderByDescending(b => b.FirstStartedUtc)`) and its own trivially-clean rollup would report the
+    // night Green over a genuinely partial ingestion batch: the exact silent-failure class this endpoint
+    // exists to catch (the 8-morning incident).
+    [Fact]
+    public async Task PartialNight_CannotBeMaskedByASucceededForecastSnapshotSoloBatch()
+    {
+        var ingestionBatch = Guid.NewGuid();
+        var store = new FakeStore()
+            .Add(Succeeded(ingestionBatch, IngestionSources.DambullaDec, FireUtc.AddMinutes(1)),
+                 Failed(ingestionBatch, IngestionSources.Harti, FireUtc.AddMinutes(3)))
+            .Add(FeatureBuild(FireUtc.AddMinutes(25), IngestionRunStatus.Succeeded))
+            .Add(ForecastSnapshot(FireUtc.AddMinutes(30), IngestionRunStatus.Succeeded))
+            .Add(Verification(ingestionBatch, IngestionVerificationStatus.Pass, FireUtc.AddMinutes(20)));
+
+        var health = await HealthAsync(store, FireUtc.AddHours(2));
+
+        health.BatchId.Should().Be(ingestionBatch,
+            "the snapshot's solo batch must never be selectable as the night's ingestion batch");
+        health.State.Should().Be(PipelineHealthStates.Partial,
+            "a clean, later FORECAST_SNAPSHOT row must not paper over a genuinely partial ingestion night");
     }
 }
 

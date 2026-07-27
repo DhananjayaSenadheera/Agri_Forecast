@@ -278,6 +278,58 @@ public class AdminIngestionHandlerTests
 
         store.CapturedExcluded.Should().BeEquivalentTo(IngestionSources.ExcludedFromServiceState);
         store.CapturedExcluded.Should().Contain(IngestionSources.FeatureBuild);
+        // PR 0c reviewer B2: FORECAST_SNAPSHOT joined ExcludedFromServiceState alongside FEATURE_BUILD --
+        // pinned explicitly (not just via the BeEquivalentTo above) so a future edit that narrows the
+        // constant back down is caught here, not just by drift-detection.
+        store.CapturedExcluded.Should().Contain(IngestionSources.ForecastSnapshot);
+    }
+
+    // PR 0c reviewer B2: mirrors NewestFeatureBuildRow_DoesNotChange_StateOrLastRunStatus above.
+    // FORECAST_SNAPSHOT runs even later than FEATURE_BUILD every night (same build-features container,
+    // after it) and is report-only -- a Failed or Succeeded snapshot row must never become "the latest
+    // run" for lastRunAtUtc/lastRunStatus, and must never itself flip a partial ingestion night's state.
+    [Fact]
+    public async Task NewestForecastSnapshotRow_DoesNotChange_StateOrLastRunStatus()
+    {
+        var ingestionBatch = Guid.NewGuid();
+        var snapshotBatch = Guid.NewGuid();
+        var ingestionStarted = DateTime.UtcNow.AddMinutes(-30);
+
+        var withoutSnapshot = new FakeStore
+        {
+            Runs =
+            {
+                FRun(IngestionSources.DambullaDec, ingestionBatch, ingestionStarted,
+                    ingestionStarted.AddMinutes(1), IngestionRunStatus.Failed),
+                FRun(IngestionSources.Weather, ingestionBatch, ingestionStarted,
+                    ingestionStarted.AddMinutes(1), IngestionRunStatus.Succeeded)
+            }
+        };
+
+        // Identical, PLUS a newest FORECAST_SNAPSHOT row, Failed, in its own later solo batch.
+        var withSnapshot = new FakeStore
+        {
+            Runs =
+            {
+                FRun(IngestionSources.DambullaDec, ingestionBatch, ingestionStarted,
+                    ingestionStarted.AddMinutes(1), IngestionRunStatus.Failed),
+                FRun(IngestionSources.Weather, ingestionBatch, ingestionStarted,
+                    ingestionStarted.AddMinutes(1), IngestionRunStatus.Succeeded),
+                FRun(IngestionSources.ForecastSnapshot, snapshotBatch, DateTime.UtcNow.AddMinutes(-1),
+                    DateTime.UtcNow, IngestionRunStatus.Failed)
+            }
+        };
+
+        var before = await Status(withoutSnapshot);
+        var after = await Status(withSnapshot);
+
+        after.State.Should().Be(before.State);
+        after.LastRunAtUtc.Should().Be(before.LastRunAtUtc,
+            "lastRunAtUtc must report the ingestion pass, not the snapshot trigger that followed it");
+        after.LastRunStatus.Should().Be(before.LastRunStatus,
+            "a Failed FORECAST_SNAPSHOT row must never overwrite the ingestion batch's own rollup");
+        after.LastRunStatus.Should().Be("partial",
+            "the failed DAMBULLA_DEC row must still surface, unmasked by the snapshot row");
     }
 
     // GET /runs is deliberately NOT filtered — these are real run rows and the admin must be able to

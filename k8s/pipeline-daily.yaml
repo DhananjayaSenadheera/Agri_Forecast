@@ -72,7 +72,18 @@
 #       skips the HTTP call entirely and records a Skipped row instead --
 #       never silent. If build_features.py itself failed, this step never
 #       runs at all that night (pending ForecastSnapshots rows simply catch up
-#       on the next successful night, by the service's own design).
+#       on the next successful night, by the service's own design). The ONE
+#       documented silent path (N2, PR 0c review): if this step's own DB
+#       engine cannot be constructed (AGRI_DB_* unreachable/misconfigured --
+#       distinct from build_features.py's own DB access, which by definition
+#       already succeeded for this step to even run), trigger_forecast_snapshot
+#       still attempts the HTTP call so the server-side pass can run and
+#       ml-serving's OWN engine can still write ForecastSnapshots, but no local
+#       IngestionRuns audit row is written for that attempt -- there is nothing
+#       left to write it against. This is the single case where a night's
+#       trigger leaves no FORECAST_SNAPSHOT breadcrumb at all; every other
+#       branch (disabled, transport error, non-200, malformed response,
+#       per-crop/per-row failures, clean success) always writes one.
 #
 # Sequencing is expressed as initContainers (k8s runs them strictly in order,
 # each must exit 0 before the next starts) with build_features as the main
@@ -354,6 +365,16 @@ spec:
             # lines if this block is ever edited, or that test's extraction breaks
             # loudly (it asserts the markers are found) rather than silently
             # testing stale text.
+            #
+            # N1 (accepted trade-off, PR 0c review): `sh` is this container's PID 1.
+            # A SIGTERM (pod eviction/deletion) hits `sh` directly, which does not
+            # forward it to the `python build_features.py` child by default -- the
+            # child can outlive its normal termination grace period. Not fixed here
+            # (would need `exec`-ing build_features.py as the FINAL command instead
+            # of running it as a child, which is incompatible with running a second
+            # command after it); accepted because activeDeadlineSeconds already
+            # bounds the whole Job and this is the same shape every other `sh -c`
+            # step in this manifest (ingestion, batch-id) already has.
             - name: build-features
               image: agriforecast-ml:latest
               imagePullPolicy: IfNotPresent
