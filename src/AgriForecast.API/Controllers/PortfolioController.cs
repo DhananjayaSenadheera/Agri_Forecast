@@ -1,7 +1,7 @@
 using AgriForecast.API.Extensions;
 using AgriForecast.Application.Requests.Portfolio.Commands.AddWatchlistCrop;
 using AgriForecast.Application.Requests.Portfolio.Commands.RemoveWatchlistCrop;
-using AgriForecast.Application.Requests.Portfolio.Commands.UpdateWatchlistMarket;
+using AgriForecast.Application.Requests.Portfolio.Commands.UpdateWatchlistEntry;
 using AgriForecast.Application.Requests.Portfolio.Common;
 using AgriForecast.Application.Requests.Portfolio.Queries.GetDashboard;
 using AgriForecast.Application.Requests.Portfolio.Queries.GetWatchlist;
@@ -28,6 +28,14 @@ namespace AgriForecast.API.Controllers;
 /// belongs to another farmer. Never a 403: distinguishing the two would confirm that some other farmer
 /// watches that crop.
 /// </para>
+/// <para>
+/// THREE ERROR SHAPES, deliberately distinct. A malformed request is a 400 with the usual
+/// <c>{ errors: [{ property, message }] }</c> body. A row the caller does not own is a 404 with
+/// <c>{ "error": "watchlist_entry_not_found" }</c>. A well-formed request the PRODUCT refuses — the 11th
+/// crop, a 4th market, an impossible planting date — is a 422 with the same <c>{ "error": code }</c> body,
+/// because telling the UI "bad request" for a limit the farmer hit would send a developer hunting a
+/// serialization bug that does not exist.
+/// </para>
 /// </remarks>
 [ApiController]
 [Route("api/portfolio")]
@@ -46,7 +54,8 @@ public class PortfolioController(IMediator mediator) : ControllerBase
     // UI can switch on it rather than parse prose. Mirrors the ingestion service-control 409 bodies.
     private static object ToCodeResponse(string code) => new { error = code };
 
-    // GET /api/portfolio/watchlist — the caller's watched crops, ordered by crop name.
+    // GET /api/portfolio/watchlist — the caller's watched crops (each with its markets and planting
+    // date), ordered by crop name.
     // 200 [] for a farmer who has added nothing; the "add your crops" empty state is a UI concern.
     [HttpGet("watchlist")]
     public async Task<IActionResult> GetWatchlist()
@@ -62,11 +71,13 @@ public class PortfolioController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // POST /api/portfolio/watchlist { cropId, preferredMarketId? } — add a crop.
+    // POST /api/portfolio/watchlist { cropId, marketIds? } — add a crop with 0-3 markets.
     // 200 { item, alreadyPresent } — IDEMPOTENT: re-adding a watched crop returns the existing row with
-    //     alreadyPresent = true rather than a 409. A double-tap is not an error.
-    // 400 — unknown cropId / unknown preferredMarketId (AddWatchlistCropCommandValidator).
-    // An omitted or null preferredMarketId INHERITS the caller's current home market; it never clears it.
+    //     alreadyPresent = true rather than a 409. A double-tap is not an error. Markets sent on a repeat
+    //     add are ADDED to the entry (insert-only), never replaced — replacing is what PUT is for.
+    // 400 — unknown cropId / unknown marketId (AddWatchlistCropCommandValidator).
+    // 422 { "error": "watchlist_full" } — the caller already watches the maximum number of crops.
+    // 422 { "error": "too_many_markets" } — more than the per-crop market cap (counted after de-duping).
     [HttpPost("watchlist")]
     public async Task<IActionResult> AddToWatchlist([FromBody] AddWatchlistCropCommand command)
     {
@@ -81,17 +92,21 @@ public class PortfolioController(IMediator mediator) : ControllerBase
         if (result.IsSuccess)
             return Ok(result.Data);
 
+        if (PortfolioErrors.IsUnprocessable(result.Error))
+            return UnprocessableEntity(ToCodeResponse(result.Error));
+
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // PUT /api/portfolio/watchlist/{cropId} { preferredMarketId? } — set the caller's home market.
-    // 200 { cropId, preferredMarketId, preferredMarketName, appliedToCropCount } — applied to EVERY crop
-    //     the caller watches, in one transaction (one home market per farmer).
+    // PUT /api/portfolio/watchlist/{cropId} { marketIds?, plantedDate? } — update ONE watched crop.
+    // 200 { item, marketsChanged, plantedDateChanged } — item is the full entry in GET's shape.
     // 404 { "error": "watchlist_entry_not_found" } — the caller does not watch that crop.
-    // A null preferredMarketId is meaningful here and clears the market back to the national default.
+    // 422 { "error": "too_many_markets" | "invalid_planted_date" }.
+    // marketIds present = FULL REPLACE ([] clears); omitted = unchanged. plantedDate null = clear,
+    // omitted = unchanged. Per crop only — this never touches the caller's other crops.
     [HttpPut("watchlist/{cropId}")]
-    public async Task<IActionResult> UpdateWatchlistMarket(
-        Guid cropId, [FromBody] UpdateWatchlistMarketCommand command)
+    public async Task<IActionResult> UpdateWatchlistEntry(
+        Guid cropId, [FromBody] UpdateWatchlistEntryCommand command)
     {
         var userId = this.GetActingUserId();
         if (userId is null)
@@ -107,6 +122,9 @@ public class PortfolioController(IMediator mediator) : ControllerBase
 
         if (PortfolioErrors.IsNotFound(result.Error))
             return NotFound(ToCodeResponse(result.Error));
+
+        if (PortfolioErrors.IsUnprocessable(result.Error))
+            return UnprocessableEntity(ToCodeResponse(result.Error));
 
         return BadRequest(ToErrorResponse(result.Error));
     }

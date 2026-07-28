@@ -10,8 +10,8 @@ namespace AgriForecast.Application.Services;
 // from the caller's own watchlist.
 public interface IPortfolioReadStore
 {
-    // The caller's watchlist joined to crop display fields and the preferred market's name, ordered by crop
-    // name. An empty list is a valid answer (the farmer has not added anything yet), never an error.
+    // The caller's watchlist joined to crop display fields, with each crop's watched markets, ordered by
+    // crop name. An empty list is a valid answer (the farmer has not added anything yet), never an error.
     Task<IReadOnlyList<WatchlistRow>> GetWatchlistAsync(Guid userId, CancellationToken ct = default);
 
     // Newest usable ObservedDate at one market, PER CROP. Crops with no usable observation at that market
@@ -52,19 +52,22 @@ public interface IPortfolioReadStore
     Task<bool> CropExistsAsync(Guid cropId, CancellationToken ct = default);
 }
 
-// One watchlist row flattened for the list DTO. PreferredMarketName is null exactly when
-// PreferredMarketId is null (the FK is Restrict, so a set id always resolves).
+// One watchlist row flattened for the list DTO, with the crop's watched markets attached.
 //
-// UpdatedAtUtc is carried but NOT rendered: it is what HomeMarket.Resolve orders on, so the dashboard can
-// answer "which market is this farmer's home market" deterministically from the rows it already has.
+// Markets is ordered oldest-chosen first and may be EMPTY: a farmer who has not picked a market for a crop
+// is a normal state, read as the national / economic-centre default, not as missing data. PlantedDate is
+// likewise null when the farmer has not told us.
 public sealed record WatchlistRow(
     Guid CropId,
     string CropName,
     string? CropCode,
-    Guid? PreferredMarketId,
-    string? PreferredMarketName,
-    DateTime CreatedAtUtc,
-    DateTime UpdatedAtUtc);
+    DateOnly? PlantedDate,
+    IReadOnlyList<WatchlistMarketRow> Markets,
+    DateTime CreatedAtUtc);
+
+// One market a crop is watched at, with the display fields the farmer UI shows. ShortCode is the
+// display-only chip label from Markets.ShortCode — never a key, and empty when unassigned.
+public sealed record WatchlistMarketRow(Guid MarketId, string Name, string ShortCode);
 
 // One crop's freshest usable observation date at one market — the anchor its own trend window is cut from.
 public sealed record CropLatestObservation(Guid CropId, DateOnly LatestDate);

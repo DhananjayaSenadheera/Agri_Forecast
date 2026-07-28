@@ -1,11 +1,12 @@
 using AgriForecast.Application.Requests.Portfolio.Commands.AddWatchlistCrop;
 using AgriForecast.Application.Requests.Portfolio.Commands.RemoveWatchlistCrop;
-using AgriForecast.Application.Requests.Portfolio.Commands.UpdateWatchlistMarket;
+using AgriForecast.Application.Requests.Portfolio.Commands.UpdateWatchlistEntry;
 using AgriForecast.Application.Requests.Portfolio.Common;
 using AgriForecast.Application.Requests.Portfolio.Queries.GetDashboard;
 using AgriForecast.Application.Requests.Portfolio.Queries.GetWatchlist;
 using AgriForecast.Application.Requests.Portfolio.Validators;
 using AgriForecast.Application.Services;
+using AgriForecast.Domain.Constants;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Interfaces;
 using FluentAssertions;
@@ -24,8 +25,10 @@ namespace AgriForecast.Tests;
 /// A foreign row must answer 404, never 403: a 403 would confirm the row exists for somebody else.
 /// </para>
 /// <para>
-/// The second target is the HOME-MARKET INVARIANT: one market per farmer, so any write that sets it
-/// rewrites every row the farmer owns, and a newly added crop inherits the value already in force.
+/// The second target is the CAPS and the PUT MATRIX. Markets are now per crop (up to
+/// WatchlistLimits.MaxMarketsPerCrop of them, on up to MaxCropsPerUser crops), and PUT distinguishes three
+/// states per field — replace, clear, and leave alone — which is exactly the kind of contract that rots
+/// silently if only the happy path is tested.
 /// </para>
 /// Style mirrors ForecastAccuracyHandlerTests.cs.
 /// </summary>
@@ -40,15 +43,23 @@ public class PortfolioHandlerTests
 
     private static readonly Guid Dambulla = Guid.Parse("b2a20001-0000-0000-0000-000000000001");
     private static readonly Guid Keppetipola = Guid.Parse("b2a20001-0000-0000-0000-000000000002");
+    private static readonly Guid Pettah = Guid.Parse("b2a20001-0000-0000-0000-000000000004");
+    private static readonly Guid Meegoda = Guid.Parse("b2a20001-0000-0000-0000-000000000008");
     private static readonly Guid UnknownMarket = Guid.Parse("b2a20001-0000-0000-0000-0000000000ff");
 
     private static readonly DateTime Seeded = new(2026, 7, 20, 6, 0, 0, DateTimeKind.Utc);
+    private static readonly DateOnly Planted = new(2026, 5, 1);
 
     // Fake watchlist repository + unit of work. Holds rows for EVERY user and filters by the id it is
     // asked for, exactly like the real repository's WHERE clause — so an unscoped handler fails here.
+    // Child rows live on the entities themselves (as they do in EF once Included), so the repository's
+    // insert/delete calls are RECORDED rather than replayed: what is asserted is that the handler told the
+    // repository about exactly the rows the entity produced.
     private sealed class FakeWatchlist : IUserCropWatchlistRepository, IUnitofWorkRepository
     {
         public readonly List<UserCropWatchlist> Rows = new();
+        public readonly List<UserCropWatchMarket> AddedMarkets = new();
+        public readonly List<UserCropWatchMarket> RemovedMarkets = new();
         public int CommitCount { get; private set; }
 
         public Task<List<UserCropWatchlist>> GetAllForUserAsync(Guid userId, CancellationToken ct = default)
@@ -62,6 +73,16 @@ public class PortfolioHandlerTests
         }
 
         public void Remove(UserCropWatchlist entity) => Rows.Remove(entity);
+
+        public Task AddMarketsAsync(
+            IEnumerable<UserCropWatchMarket> markets, CancellationToken ct = default)
+        {
+            AddedMarkets.AddRange(markets);
+            return Task.CompletedTask;
+        }
+
+        public void RemoveMarkets(IEnumerable<UserCropWatchMarket> markets)
+            => RemovedMarkets.AddRange(markets);
 
         public Task CommitAsync()
         {
@@ -80,6 +101,7 @@ public class PortfolioHandlerTests
 
         public readonly Dictionary<Guid, (string Name, string? Code)> Crops = new();
         public readonly Dictionary<Guid, PortfolioMarketRow> Markets = new();
+        public readonly Dictionary<Guid, string> MarketShortCodes = new();
         public Guid? EconomicCentreId;
 
         // (marketId, cropId) -> observations. Keyed exactly as the real store queries them.
@@ -90,9 +112,10 @@ public class PortfolioHandlerTests
 
         public void AddCrop(Guid id, string name, string? code = null) => Crops[id] = (name, code);
 
-        public void AddMarket(Guid id, string name, bool isEconomicCentre = false)
+        public void AddMarket(Guid id, string name, bool isEconomicCentre = false, string shortCode = "MKT")
         {
             Markets[id] = new PortfolioMarketRow(id, name, isEconomicCentre);
+            MarketShortCodes[id] = shortCode;
             if (isEconomicCentre) EconomicCentreId = id;
         }
 
@@ -113,12 +136,16 @@ public class PortfolioHandlerTests
                     r.CropId,
                     Crops.TryGetValue(r.CropId, out var c) ? c.Name : "?",
                     Crops.TryGetValue(r.CropId, out var c2) ? c2.Code : null,
-                    r.PreferredMarketId,
-                    r.PreferredMarketId.HasValue && Markets.TryGetValue(r.PreferredMarketId.Value, out var m)
-                        ? m.Name
-                        : null,
-                    r.CreatedAtUtc,
-                    r.UpdatedAtUtc))
+                    r.PlantedDate,
+                    // Oldest-chosen first, exactly like the real store's ORDER BY — the dashboard's
+                    // "first watched market" rule depends on this order being deterministic.
+                    r.Markets
+                        .Select(m => new WatchlistMarketRow(
+                            m.MarketId,
+                            Markets.TryGetValue(m.MarketId, out var mk) ? mk.Name : "?",
+                            MarketShortCodes.TryGetValue(m.MarketId, out var sc) ? sc : string.Empty))
+                        .ToList(),
+                    r.CreatedAtUtc))
                 .OrderBy(r => r.CropName)
                 .ThenBy(r => r.CropId)
                 .ToList();
@@ -168,21 +195,35 @@ public class PortfolioHandlerTests
             => Task.FromResult(Crops.ContainsKey(cropId));
     }
 
-    // A store seeded with the reference data every test needs, plus the two markets and three crops.
+    // A store seeded with the reference data every test needs, plus the markets and three crops.
     private static FakeStore NewStore()
     {
         var store = new FakeStore();
         store.AddCrop(Carrot, "Carrot", "VEG000001");
         store.AddCrop(Tomato, "Tomato", "VEG000002");
         store.AddCrop(Onion, "Onion", "VEG000003");
-        store.AddMarket(Dambulla, "Dambulla Dedicated Economic Centre", isEconomicCentre: true);
-        store.AddMarket(Keppetipola, "Keppetipola Dedicated Economic Centre");
+        store.AddMarket(Dambulla, "Dambulla Dedicated Economic Centre", isEconomicCentre: true, shortCode: "DEC");
+        store.AddMarket(Keppetipola, "Keppetipola Dedicated Economic Centre", shortCode: "KEP");
+        store.AddMarket(Pettah, "Pettah (HARTI wholesale)", shortCode: "PET");
+        store.AddMarket(Meegoda, "Meegoda Dedicated Economic Centre", shortCode: "MEE");
         return store;
     }
 
-    private static void Seed(FakeStore store, Guid userId, Guid cropId, Guid? marketId, int dayOffset = 0)
-        => store.Watchlist.Rows.Add(
-            UserCropWatchlist.Create(userId, cropId, marketId, Seeded.AddDays(dayOffset)));
+    // Seeds one watched crop. Markets are attached in the order given, which is the order the fake store
+    // (and the real one) then reports them in.
+    private static UserCropWatchlist Seed(
+        FakeStore store, Guid userId, Guid cropId, Guid[]? markets = null,
+        int dayOffset = 0, DateOnly? plantedDate = null)
+    {
+        var createdAt = Seeded.AddDays(dayOffset);
+        var row = UserCropWatchlist.Create(userId, cropId, plantedDate, createdAt);
+
+        if (markets is { Length: > 0 })
+            row.ReplaceMarkets(markets, createdAt);
+
+        store.Watchlist.Rows.Add(row);
+        return row;
+    }
 
     private static GetWatchlistQueryHandler WatchlistHandler(FakeStore s) => new(s);
 
@@ -191,8 +232,8 @@ public class PortfolioHandlerTests
     private static AddWatchlistCropCommandHandler AddHandler(FakeStore s) =>
         new(s.Watchlist, s, s.Watchlist, NullLogger<AddWatchlistCropCommandHandler>.Instance);
 
-    private static UpdateWatchlistMarketCommandHandler UpdateHandler(FakeStore s) =>
-        new(s.Watchlist, s, s.Watchlist, NullLogger<UpdateWatchlistMarketCommandHandler>.Instance);
+    private static UpdateWatchlistEntryCommandHandler UpdateHandler(FakeStore s) =>
+        new(s.Watchlist, s, s.Watchlist, NullLogger<UpdateWatchlistEntryCommandHandler>.Instance);
 
     private static RemoveWatchlistCropCommandHandler RemoveHandler(FakeStore s) =>
         new(s.Watchlist, s.Watchlist, NullLogger<RemoveWatchlistCropCommandHandler>.Instance);
@@ -203,9 +244,9 @@ public class PortfolioHandlerTests
     public async Task GetWatchlist_ReturnsOnlyTheCallersCrops()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
-        Seed(store, UserB, Tomato, Keppetipola);
-        Seed(store, UserB, Onion, Keppetipola);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
+        Seed(store, UserB, Tomato, new[] { Keppetipola });
+        Seed(store, UserB, Onion, new[] { Keppetipola });
 
         var result = await WatchlistHandler(store)
             .Handle(new GetWatchlistQuery { UserId = UserA }, default);
@@ -222,7 +263,7 @@ public class PortfolioHandlerTests
     public async Task GetWatchlist_MapsDisplayFields_AndStampsCreatedAtAsUtc()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
+        Seed(store, UserA, Carrot, new[] { Keppetipola, Dambulla }, plantedDate: Planted);
 
         var result = await WatchlistHandler(store)
             .Handle(new GetWatchlistQuery { UserId = UserA }, default);
@@ -230,10 +271,30 @@ public class PortfolioHandlerTests
         var item = result.Data.Single();
         item.CropName.Should().Be("Carrot");
         item.CropCode.Should().Be("VEG000001");
-        item.PreferredMarketId.Should().Be(Dambulla);
-        item.PreferredMarketName.Should().Be("Dambulla Dedicated Economic Centre");
+        item.PlantedDate.Should().Be("2026-05-01",
+            "a planting day is a date string, not an instant — shipping it as a DateTime is how it becomes "
+            + "the day before for half the world");
+        item.Markets.Select(m => m.MarketId).Should().Equal(new[] { Keppetipola, Dambulla },
+            "markets keep the order the farmer chose them in");
+        item.Markets[0].Name.Should().Be("Keppetipola Dedicated Economic Centre");
+        item.Markets[0].ShortCode.Should().Be("KEP");
         item.CreatedAtUtc.Kind.Should().Be(DateTimeKind.Utc,
             "without the Z the UI would read the instant as local time (+5:30 in Sri Lanka)");
+    }
+
+    [Fact]
+    public async Task GetWatchlist_ACropWithNoMarkets_HasAnEmptyListNotNull()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot);
+
+        var result = await WatchlistHandler(store)
+            .Handle(new GetWatchlistQuery { UserId = UserA }, default);
+
+        var item = result.Data.Single();
+        item.Markets.Should().NotBeNull().And.BeEmpty(
+            "no market chosen is a normal state read as the national default, not missing data");
+        item.PlantedDate.Should().BeNull();
     }
 
     [Fact]
@@ -251,80 +312,143 @@ public class PortfolioHandlerTests
     // POST /watchlist.
 
     [Fact]
-    public async Task Add_CreatesRow_AndInheritsTheUsersCurrentHomeMarket()
-    {
-        var store = NewStore();
-        Seed(store, UserA, Carrot, Keppetipola);
-
-        var result = await AddHandler(store).Handle(
-            new AddWatchlistCropCommand { UserId = UserA, CropId = Tomato }, default);
-
-        result.IsSuccess.Should().BeTrue();
-        result.Data.AlreadyPresent.Should().BeFalse();
-        result.Data.Item.PreferredMarketId.Should().Be(Keppetipola,
-            "a new crop joins the farmer's existing home market — adding a crop never resets it");
-        store.Watchlist.Rows.Should().HaveCount(2);
-        store.Watchlist.CommitCount.Should().Be(1);
-    }
-
-    [Fact]
-    public async Task Add_WithNoExistingRows_AndNoMarket_LeavesTheMarketNull()
+    public async Task Add_CreatesRow_WithNoMarkets_WhenNoneAreAskedFor()
     {
         var store = NewStore();
 
         var result = await AddHandler(store).Handle(
             new AddWatchlistCropCommand { UserId = UserA, CropId = Carrot }, default);
 
-        result.Data.Item.PreferredMarketId.Should().BeNull(
-            "null means 'not chosen', which the dashboard resolves to the economic-centre default");
+        result.IsSuccess.Should().BeTrue();
+        result.Data.AlreadyPresent.Should().BeFalse();
+        result.Data.Item.Markets.Should().BeEmpty(
+            "adding a crop without naming a market is legitimate — the dashboard reads it as the "
+            + "economic-centre default");
+        result.Data.Item.PlantedDate.Should().BeNull("POST does not carry a planting date; PUT sets it");
+        store.Watchlist.CommitCount.Should().Be(1);
     }
 
     [Fact]
-    public async Task Add_WithAnExplicitMarket_AppliesItToEveryCropTheUserWatches()
+    public async Task Add_AttachesTheRequestedMarkets_InOrder()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla, dayOffset: 0);
-        Seed(store, UserA, Onion, Dambulla, dayOffset: 1);
 
-        await AddHandler(store).Handle(
+        var result = await AddHandler(store).Handle(
             new AddWatchlistCropCommand
             {
                 UserId = UserA,
-                CropId = Tomato,
-                PreferredMarketId = Keppetipola
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Keppetipola, Dambulla }
             },
             default);
 
-        store.Watchlist.Rows.Where(r => r.UserId == UserA)
-            .Should().OnlyContain(r => r.PreferredMarketId == Keppetipola,
-                "one home market per farmer — setting it on the new crop moves all of them");
+        result.Data.Item.Markets.Select(m => m.MarketId).Should().Equal(Keppetipola, Dambulla);
+        store.Watchlist.AddedMarkets.Should().HaveCount(2,
+            "the handler tells the repository exactly which child rows to insert");
+        store.Watchlist.RemovedMarkets.Should().BeEmpty("an add never deletes");
     }
 
     [Fact]
-    public async Task Add_DoesNotTouchAnotherUsersMarket()
+    public async Task Add_CollapsesDuplicateMarketIds_RatherThanRejectingThem()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
-        Seed(store, UserB, Tomato, Dambulla);
 
-        await AddHandler(store).Handle(
+        var result = await AddHandler(store).Handle(
             new AddWatchlistCropCommand
             {
                 UserId = UserA,
-                CropId = Onion,
-                PreferredMarketId = Keppetipola
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Keppetipola, Keppetipola, Dambulla }
             },
             default);
 
-        store.Watchlist.Rows.Single(r => r.UserId == UserB).PreferredMarketId
-            .Should().Be(Dambulla, "the user-wide update is scoped to the CALLER's rows");
+        result.IsSuccess.Should().BeTrue(
+            "asking for the same market twice is asking for one market, not an error worth a 4xx");
+        result.Data.Item.Markets.Select(m => m.MarketId).Should().Equal(Keppetipola, Dambulla);
+    }
+
+    [Fact]
+    public async Task Add_WithMoreMarketsThanTheCap_Is422TooManyMarkets_AndWritesNothing()
+    {
+        var store = NewStore();
+
+        var result = await AddHandler(store).Handle(
+            new AddWatchlistCropCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Dambulla, Keppetipola, Pettah, Meegoda }
+            },
+            default);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Be(PortfolioErrors.TooManyMarkets);
+        PortfolioErrors.IsUnprocessable(result.Error).Should().BeTrue(
+            "a well-formed request the product refuses is a 422; a 400 would send a developer hunting a "
+            + "serialization bug that is not there");
+        store.Watchlist.Rows.Should().BeEmpty("the crop is not half-added");
+        store.Watchlist.CommitCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Add_UpToTheCropCap_Succeeds_AndTheNextOneIs422WatchlistFull()
+    {
+        var store = NewStore();
+        for (var i = 0; i < WatchlistLimits.MaxCropsPerUser - 1; i++)
+            Seed(store, UserA, Guid.NewGuid(), dayOffset: i);
+
+        // The 10th crop still fits.
+        var last = await AddHandler(store).Handle(
+            new AddWatchlistCropCommand { UserId = UserA, CropId = Carrot }, default);
+
+        last.IsSuccess.Should().BeTrue();
+        store.Watchlist.Rows.Should().HaveCount(WatchlistLimits.MaxCropsPerUser);
+
+        // The 11th does not.
+        var overflow = await AddHandler(store).Handle(
+            new AddWatchlistCropCommand { UserId = UserA, CropId = Tomato }, default);
+
+        overflow.IsSuccess.Should().BeFalse();
+        overflow.Error.Should().Be(PortfolioErrors.WatchlistFull);
+        store.Watchlist.Rows.Should().HaveCount(WatchlistLimits.MaxCropsPerUser,
+            "the refused add leaves the watchlist exactly as it was");
+    }
+
+    [Fact]
+    public async Task Add_AtTheCropCap_StillAnswersARepeatAddIdempotently()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, dayOffset: 0);
+        for (var i = 1; i < WatchlistLimits.MaxCropsPerUser; i++)
+            Seed(store, UserA, Guid.NewGuid(), dayOffset: i);
+
+        var result = await AddHandler(store).Handle(
+            new AddWatchlistCropCommand { UserId = UserA, CropId = Carrot }, default);
+
+        result.IsSuccess.Should().BeTrue(
+            "the cap is about NEW crops; a farmer sitting on the limit re-tapping a crop they already "
+            + "watch has not asked for anything new");
+        result.Data.AlreadyPresent.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Add_CapCountsOnlyTheCallersOwnCrops()
+    {
+        var store = NewStore();
+        for (var i = 0; i < WatchlistLimits.MaxCropsPerUser; i++)
+            Seed(store, UserB, Guid.NewGuid(), dayOffset: i);
+
+        var result = await AddHandler(store).Handle(
+            new AddWatchlistCropCommand { UserId = UserA, CropId = Carrot }, default);
+
+        result.IsSuccess.Should().BeTrue("another farmer's full watchlist is not this farmer's problem");
     }
 
     [Fact]
     public async Task Add_IsIdempotent_WhenTheCropIsAlreadyWatched()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
 
         var result = await AddHandler(store).Handle(
             new AddWatchlistCropCommand { UserId = UserA, CropId = Carrot }, default);
@@ -332,105 +456,342 @@ public class PortfolioHandlerTests
         result.IsSuccess.Should().BeTrue("a double-tap is the user asking for a state they already have");
         result.Data.AlreadyPresent.Should().BeTrue();
         result.Data.Item.CropId.Should().Be(Carrot);
+        result.Data.Item.Markets.Should().ContainSingle(
+            "a repeat add with no markets must not clear the ones already chosen");
         store.Watchlist.Rows.Should().HaveCount(1, "no duplicate row is created");
     }
 
     [Fact]
-    public async Task Add_OfAnAlreadyWatchedCrop_StillAppliesAnExplicitMarketUserWide()
+    public async Task Add_OfAnAlreadyWatchedCrop_AddsMarkets_WithoutRemovingTheExistingOnes()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla, dayOffset: 0);
-        Seed(store, UserA, Tomato, Dambulla, dayOffset: 1);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
 
         var result = await AddHandler(store).Handle(
             new AddWatchlistCropCommand
             {
                 UserId = UserA,
                 CropId = Carrot,
-                PreferredMarketId = Keppetipola
+                MarketIds = new List<Guid> { Keppetipola }
             },
             default);
 
         result.Data.AlreadyPresent.Should().BeTrue();
-        store.Watchlist.Rows.Should().OnlyContain(r => r.PreferredMarketId == Keppetipola);
+        result.Data.Item.Markets.Select(m => m.MarketId).Should().Equal(new[] { Dambulla, Keppetipola },
+            "POST is insert-only; replacing the set is what PUT is for");
+        store.Watchlist.RemovedMarkets.Should().BeEmpty();
     }
 
-    // PUT /watchlist/{cropId}.
-
     [Fact]
-    public async Task Update_SetsTheMarketOnEveryCropTheUserWatches()
+    public async Task Add_DoesNotTouchAnotherUsersRows()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla, dayOffset: 0);
-        Seed(store, UserA, Tomato, Dambulla, dayOffset: 1);
-        Seed(store, UserA, Onion, Dambulla, dayOffset: 2);
+        Seed(store, UserB, Tomato, new[] { Dambulla });
+
+        await AddHandler(store).Handle(
+            new AddWatchlistCropCommand
+            {
+                UserId = UserA,
+                CropId = Onion,
+                MarketIds = new List<Guid> { Keppetipola }
+            },
+            default);
+
+        store.Watchlist.Rows.Single(r => r.UserId == UserB).Markets.Select(m => m.MarketId)
+            .Should().Equal(new[] { Dambulla }, "writes are scoped to the CALLER's rows");
+    }
+
+    // PUT /watchlist/{cropId} — the three-state matrix.
+
+    [Fact]
+    public async Task Update_WithMarketIds_ReplacesTheWholeSet()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla, Keppetipola });
 
         var result = await UpdateHandler(store).Handle(
-            new UpdateWatchlistMarketCommand
+            new UpdateWatchlistEntryCommand
             {
                 UserId = UserA,
                 CropId = Carrot,
-                PreferredMarketId = Keppetipola
+                MarketIds = new List<Guid> { Keppetipola, Pettah }
             },
             default);
 
         result.IsSuccess.Should().BeTrue();
-        result.Data.AppliedToCropCount.Should().Be(3);
-        result.Data.PreferredMarketName.Should().Be("Keppetipola Dedicated Economic Centre");
-        store.Watchlist.Rows.Should().OnlyContain(r => r.PreferredMarketId == Keppetipola);
-        store.Watchlist.CommitCount.Should().Be(1, "the whole user-wide change is one transaction");
+        result.Data.MarketsChanged.Should().BeTrue();
+        result.Data.Item.Markets.Select(m => m.MarketId)
+            .Should().BeEquivalentTo(new[] { Keppetipola, Pettah });
+        store.Watchlist.RemovedMarkets.Select(m => m.MarketId).Should().Equal(new[] { Dambulla },
+            "a full replace deletes exactly what is no longer wanted");
+        store.Watchlist.CommitCount.Should().Be(1, "both halves of the update are one transaction");
     }
 
     [Fact]
-    public async Task Update_ToNull_ClearsTheHomeMarketBackToTheNationalDefault()
+    public async Task Update_WithAnEmptyMarketArray_ClearsThem()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Keppetipola);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
 
         var result = await UpdateHandler(store).Handle(
-            new UpdateWatchlistMarketCommand { UserId = UserA, CropId = Carrot, PreferredMarketId = null },
-            default);
-
-        result.IsSuccess.Should().BeTrue();
-        result.Data.PreferredMarketId.Should().BeNull();
-        result.Data.PreferredMarketName.Should().BeNull();
-        store.Watchlist.Rows.Single().PreferredMarketId.Should().BeNull(
-            "unlike POST, an explicit null on PUT is the farmer choosing the national default");
-    }
-
-    [Fact]
-    public async Task Update_ReportsAppliedCount_EvenWhenTheMarketWasAlreadyInForce()
-    {
-        var store = NewStore();
-        Seed(store, UserA, Carrot, Keppetipola, dayOffset: 0);
-        Seed(store, UserA, Tomato, Keppetipola, dayOffset: 1);
-
-        var result = await UpdateHandler(store).Handle(
-            new UpdateWatchlistMarketCommand
+            new UpdateWatchlistEntryCommand
             {
                 UserId = UserA,
                 CropId = Carrot,
-                PreferredMarketId = Keppetipola
+                MarketIds = new List<Guid>()
             },
             default);
 
-        result.Data.AppliedToCropCount.Should().Be(2,
-            "the count is how many crops the market covers, not how many rows happened to change — "
-            + "a zero there would read as a failure");
+        result.Data.Item.Markets.Should().BeEmpty(
+            "an empty array is a deliberate 'clear my markets'; omitting the field is how a caller says "
+            + "'leave them alone'");
+        result.Data.MarketsChanged.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Update_WithoutMarketIds_LeavesTheMarketsAlone()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla });
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand { UserId = UserA, CropId = Carrot, PlantedDate = Planted },
+            default);
+
+        result.Data.Item.Markets.Select(m => m.MarketId).Should().Equal(Dambulla);
+        result.Data.MarketsChanged.Should().BeFalse();
+        store.Watchlist.RemovedMarkets.Should().BeEmpty(
+            "a planting-date-only update must not silently empty the farmer's market list");
+    }
+
+    [Fact]
+    public async Task Update_ReplacingWithTheSameMarkets_ReportsNoChange()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla });
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Dambulla }
+            },
+            default);
+
+        result.Data.MarketsChanged.Should().BeFalse();
+        store.Watchlist.AddedMarkets.Should().BeEmpty();
+        store.Watchlist.RemovedMarkets.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Update_WithMoreMarketsThanTheCap_Is422_AndChangesNothing()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla });
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Dambulla, Keppetipola, Pettah, Meegoda }
+            },
+            default);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Be(PortfolioErrors.TooManyMarkets);
+        store.Watchlist.Rows.Single().Markets.Select(m => m.MarketId).Should().Equal(new[] { Dambulla },
+            "everything is validated before anything is mutated");
+        store.Watchlist.CommitCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Update_SetsAndClearsThePlantingDate()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot);
+
+        var set = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand { UserId = UserA, CropId = Carrot, PlantedDate = Planted },
+            default);
+
+        set.Data.Item.PlantedDate.Should().Be("2026-05-01");
+        set.Data.PlantedDateChanged.Should().BeTrue();
+
+        var cleared = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand { UserId = UserA, CropId = Carrot, PlantedDate = null },
+            default);
+
+        cleared.Data.Item.PlantedDate.Should().BeNull(
+            "an explicit null clears the date — the farmer un-telling us is a real request");
+        cleared.Data.PlantedDateChanged.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Update_WithoutAPlantingDateKey_LeavesItUnchanged()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, plantedDate: Planted);
+
+        // No assignment to PlantedDate at all: this is the "omitted" state, which System.Text.Json
+        // produces by never calling the setter.
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Dambulla }
+            },
+            default);
+
+        result.Data.Item.PlantedDate.Should().Be("2026-05-01",
+            "omitted and null are different requests: a market-only update must not wipe the date");
+        result.Data.PlantedDateChanged.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Update_WithTheSamePlantingDate_ReportsNoChange()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, plantedDate: Planted);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand { UserId = UserA, CropId = Carrot, PlantedDate = Planted },
+            default);
+
+        result.Data.PlantedDateChanged.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Update_RejectsAPlantingDateInTheFuture()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(7)
+            },
+            default);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Be(PortfolioErrors.InvalidPlantedDate);
+        store.Watchlist.Rows.Single().PlantedDate.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Update_AcceptsTodayAndTomorrow_BecauseTheFarmersDayCanBeAheadOfUtc()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot);
+
+        // Sri Lanka is UTC+5:30, so during their evening the farmer's "today" is already the next UTC
+        // date. One day of slack is what stops the honest answer being rejected.
+        foreach (var offset in new[] { 0, 1 })
+        {
+            var result = await UpdateHandler(store).Handle(
+                new UpdateWatchlistEntryCommand
+                {
+                    UserId = UserA,
+                    CropId = Carrot,
+                    PlantedDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(offset)
+                },
+                default);
+
+            result.IsSuccess.Should().BeTrue($"UTC today +{offset} is a plausible local today");
+        }
+
+        var twoDaysOut = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(2)
+            },
+            default);
+
+        twoDaysOut.Error.Should().Be(PortfolioErrors.InvalidPlantedDate,
+            "no time zone is two days ahead of UTC — that is a future date, not a local one");
+    }
+
+    [Fact]
+    public async Task Update_RejectsAPlantingDateBeforeTheFloor()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = WatchlistLimits.EarliestPlantedDate.AddDays(-1)
+            },
+            default);
+
+        result.Error.Should().Be(PortfolioErrors.InvalidPlantedDate,
+            "a pre-2000 date is a mis-keyed year, not a memory");
+    }
+
+    [Fact]
+    public async Task Update_RejectsABadDateBeforeApplyingTheMarkets()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla });
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Keppetipola },
+                PlantedDate = new DateOnly(1999, 1, 1)
+            },
+            default);
+
+        result.IsSuccess.Should().BeFalse();
+        store.Watchlist.Rows.Single().Markets.Select(m => m.MarketId).Should().Equal(new[] { Dambulla },
+            "a request that fails halfway must leave the entry exactly as it was");
+        store.Watchlist.CommitCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Update_TouchesOnlyTheCropInTheRoute()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla }, dayOffset: 0);
+        Seed(store, UserA, Tomato, new[] { Dambulla }, dayOffset: 1);
+
+        await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Keppetipola }
+            },
+            default);
+
+        store.Watchlist.Rows.Single(r => r.CropId == Tomato).Markets.Select(m => m.MarketId)
+            .Should().Equal(new[] { Dambulla },
+                "markets are per crop now — the old one-home-market-per-farmer rewrite is gone");
     }
 
     [Fact]
     public async Task Update_OfAnotherUsersRow_Is404_AndChangesNothing()
     {
         var store = NewStore();
-        Seed(store, UserB, Tomato, Dambulla);
+        Seed(store, UserB, Tomato, new[] { Dambulla });
 
         var result = await UpdateHandler(store).Handle(
-            new UpdateWatchlistMarketCommand
+            new UpdateWatchlistEntryCommand
             {
                 UserId = UserA,
                 CropId = Tomato,
-                PreferredMarketId = Keppetipola
+                MarketIds = new List<Guid> { Keppetipola }
             },
             default);
 
@@ -438,7 +799,7 @@ public class PortfolioHandlerTests
         result.Error.Should().Be(PortfolioErrors.WatchlistEntryNotFound);
         PortfolioErrors.IsNotFound(result.Error).Should().BeTrue(
             "404, never 403 — a 403 would confirm that somebody else watches that crop");
-        store.Watchlist.Rows.Single().PreferredMarketId.Should().Be(Dambulla);
+        store.Watchlist.Rows.Single().Markets.Select(m => m.MarketId).Should().Equal(Dambulla);
         store.Watchlist.CommitCount.Should().Be(0);
     }
 
@@ -446,14 +807,14 @@ public class PortfolioHandlerTests
     public async Task Update_OfACropNobodyWatches_IsTheSame404()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
 
         var result = await UpdateHandler(store).Handle(
-            new UpdateWatchlistMarketCommand
+            new UpdateWatchlistEntryCommand
             {
                 UserId = UserA,
                 CropId = Onion,
-                PreferredMarketId = Keppetipola
+                MarketIds = new List<Guid> { Keppetipola }
             },
             default);
 
@@ -467,8 +828,8 @@ public class PortfolioHandlerTests
     public async Task Remove_DeletesTheCallersRow()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla, dayOffset: 0);
-        Seed(store, UserA, Tomato, Dambulla, dayOffset: 1);
+        Seed(store, UserA, Carrot, new[] { Dambulla }, dayOffset: 0);
+        Seed(store, UserA, Tomato, new[] { Dambulla }, dayOffset: 1);
 
         var result = await RemoveHandler(store).Handle(
             new RemoveWatchlistCropCommand { UserId = UserA, CropId = Carrot }, default);
@@ -483,7 +844,7 @@ public class PortfolioHandlerTests
     public async Task Remove_OfAnotherUsersRow_Is404_AndLeavesItAlone()
     {
         var store = NewStore();
-        Seed(store, UserB, Tomato, Dambulla);
+        Seed(store, UserB, Tomato, new[] { Dambulla });
 
         var result = await RemoveHandler(store).Handle(
             new RemoveWatchlistCropCommand { UserId = UserA, CropId = Tomato }, default);
@@ -499,7 +860,7 @@ public class PortfolioHandlerTests
     public async Task Remove_OfAnUnwatchedCrop_Is404()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
 
         var result = await RemoveHandler(store).Handle(
             new RemoveWatchlistCropCommand { UserId = UserA, CropId = Onion }, default);
@@ -507,13 +868,13 @@ public class PortfolioHandlerTests
         result.Error.Should().Be(PortfolioErrors.WatchlistEntryNotFound);
     }
 
-    // GET /dashboard — home market.
+    // GET /dashboard — the transitional market block (step 3 replaces it with per-market data).
 
     [Fact]
-    public async Task Dashboard_WithNoChosenMarket_DefaultsToTheEconomicCentre()
+    public async Task Dashboard_TopLevelMarket_DegradesToTheEconomicCentreDefault()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, null);
+        Seed(store, UserA, Carrot, new[] { Keppetipola });
 
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
@@ -521,27 +882,13 @@ public class PortfolioHandlerTests
         var home = result.Data.HomeMarket!;
         home.MarketId.Should().Be(Dambulla);
         home.IsEconomicCenter.Should().BeTrue();
-        home.IsDefault.Should().BeTrue("the farmer has not chosen; this is the default standing in");
+        home.IsDefault.Should().BeTrue(
+            "with markets per crop there is no single home market to report; the block stays only so the "
+            + "current FE keeps rendering, and step 3 replaces it");
     }
 
     [Fact]
-    public async Task Dashboard_WithAChosenMarket_ReportsItAsNonDefaultAndNonEconomicCentre()
-    {
-        var store = NewStore();
-        Seed(store, UserA, Carrot, Keppetipola);
-
-        var result = await DashboardHandler(store)
-            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
-
-        var home = result.Data.HomeMarket!;
-        home.MarketId.Should().Be(Keppetipola);
-        home.IsDefault.Should().BeFalse();
-        home.IsEconomicCenter.Should().BeFalse(
-            "the UI needs this to label the prediction 'National forecast' under a non-centre market");
-    }
-
-    [Fact]
-    public async Task Dashboard_EmptyWatchlist_StillNamesTheDefaultHomeMarket()
+    public async Task Dashboard_EmptyWatchlist_StillNamesTheDefaultMarket()
     {
         var store = NewStore();
 
@@ -560,9 +907,9 @@ public class PortfolioHandlerTests
     public async Task Dashboard_ReturnsOnlyTheCallersCrops()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
-        Seed(store, UserB, Tomato, Dambulla);
-        Seed(store, UserB, Onion, Dambulla);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
+        Seed(store, UserB, Tomato, new[] { Dambulla });
+        Seed(store, UserB, Onion, new[] { Dambulla });
 
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
@@ -574,10 +921,10 @@ public class PortfolioHandlerTests
     // GET /dashboard — price leg.
 
     [Fact]
-    public async Task Dashboard_ServesThePriceFromTheHomeMarket_WhenItHasData()
+    public async Task Dashboard_ServesThePriceFromTheCropsFirstWatchedMarket()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Keppetipola);
+        Seed(store, UserA, Carrot, new[] { Keppetipola, Dambulla });
         store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 7, 25), min: 180m, max: 200m);
         store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 26), min: 300m, max: 320m);
 
@@ -585,17 +932,52 @@ public class PortfolioHandlerTests
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
         var price = result.Data.Items.Single().Price!;
-        price.MarketId.Should().Be(Keppetipola);
+        price.MarketId.Should().Be(Keppetipola,
+            "transitional rule: the FIRST watched market serves the price, and the read store's "
+            + "oldest-chosen order is what makes 'first' deterministic");
         price.IsFallbackMarket.Should().BeFalse();
         price.Price.Should().Be(190m, "the midpoint of the day's band, the same rule the market overview uses");
         price.ObservedDate.Should().Be("2026-07-25");
     }
 
     [Fact]
+    public async Task Dashboard_EachCropUsesItsOwnMarket()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Keppetipola }, dayOffset: 0);
+        Seed(store, UserA, Tomato, new[] { Pettah }, dayOffset: 1);
+        store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 7, 25), min: 180m, max: 200m);
+        store.AddObservation(Pettah, Tomato, new DateOnly(2026, 7, 25), min: 100m, max: 120m);
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        result.Data.Items.Single(i => i.CropId == Carrot).Price!.MarketId.Should().Be(Keppetipola);
+        result.Data.Items.Single(i => i.CropId == Tomato).Price!.MarketId.Should().Be(Pettah);
+    }
+
+    [Fact]
+    public async Task Dashboard_ACropWithNoMarkets_IsServedByTheEconomicCentre_AndNotFlagged()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot);
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 26), min: 300m, max: 320m);
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        var price = result.Data.Items.Single().Price!;
+        price.MarketId.Should().Be(Dambulla);
+        price.IsFallbackMarket.Should().BeFalse(
+            "the economic centre IS the default for a crop with no chosen market — calling it a fallback "
+            + "would tell the farmer their market failed when they never picked one");
+    }
+
+    [Fact]
     public async Task Dashboard_FallsBackToTheEconomicCentre_AndFlagsIt()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Keppetipola);
+        Seed(store, UserA, Carrot, new[] { Keppetipola });
         // Nothing at Keppetipola for this crop; Dambulla has it.
         store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 26), min: 300m, max: 320m);
 
@@ -613,8 +995,8 @@ public class PortfolioHandlerTests
     public async Task Dashboard_MixedCrops_FallBackIndividually()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Keppetipola, dayOffset: 0);
-        Seed(store, UserA, Tomato, Keppetipola, dayOffset: 1);
+        Seed(store, UserA, Carrot, new[] { Keppetipola }, dayOffset: 0);
+        Seed(store, UserA, Tomato, new[] { Keppetipola }, dayOffset: 1);
         store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 7, 25), min: 180m, max: 200m);
         store.AddObservation(Dambulla, Tomato, new DateOnly(2026, 7, 25), min: 100m, max: 120m);
 
@@ -629,7 +1011,7 @@ public class PortfolioHandlerTests
     public async Task Dashboard_NoPriceAnywhere_IsANullLegWithAReason_AndTheCropStillAppears()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Keppetipola);
+        Seed(store, UserA, Carrot, new[] { Keppetipola });
 
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
@@ -650,7 +1032,7 @@ public class PortfolioHandlerTests
         decimal prevMin, decimal prevMax, decimal latestMin, decimal latestMax, string expected)
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
         store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 24), min: prevMin, max: prevMax);
         store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 25), min: latestMin, max: latestMax);
 
@@ -668,7 +1050,7 @@ public class PortfolioHandlerTests
     public async Task Dashboard_SingleObservation_HasANullDirection_NotAFakeSteady()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
         store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 25), min: 180m, max: 200m);
 
         var result = await DashboardHandler(store)
@@ -686,7 +1068,7 @@ public class PortfolioHandlerTests
     public async Task Dashboard_PreviousObservationOlderThanTheTrendWindow_YieldsNoDirection()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
         var latest = new DateOnly(2026, 7, 25);
         store.AddObservation(Dambulla, Carrot, latest, min: 180m, max: 200m);
         // One day outside the inclusive TrendWindowDays window ending at the latest observation.
@@ -708,18 +1090,18 @@ public class PortfolioHandlerTests
     public async Task Dashboard_AStaleCropKeepsItsOwnPrice_WhenAFresherCropIsAlsoWatched()
     {
         // The bug this pins: anchoring the price window on the MAX date across ALL watched crops made a
-        // crop's staleness cutoff depend on its siblings. Carrot (last quoted 1 June at the home market)
+        // crop's staleness cutoff depend on its siblings. Carrot (last quoted 1 June at its own market)
         // showed its price when watched alone and vanished — or worse, came back flagged as an
         // economic-centre fallback price — as soon as daily-quoted Tomato was added.
         var store = NewStore();
-        Seed(store, UserA, Carrot, Keppetipola, dayOffset: 0);
-        Seed(store, UserA, Tomato, Keppetipola, dayOffset: 1);
+        Seed(store, UserA, Carrot, new[] { Keppetipola }, dayOffset: 0);
+        Seed(store, UserA, Tomato, new[] { Keppetipola }, dayOffset: 1);
 
         store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 6, 1), min: 180m, max: 200m);
         store.AddObservation(Keppetipola, Tomato, new DateOnly(2026, 7, 26), min: 100m, max: 120m);
         store.AddObservation(Keppetipola, Tomato, new DateOnly(2026, 7, 27), min: 120m, max: 140m);
-        // The economic centre has a fresh Carrot price. It must NOT be reached for: the home market has a
-        // real Carrot price, and labelling Dambulla's number as the farmer's own would be dishonest.
+        // The economic centre has a fresh Carrot price. It must NOT be reached for: the crop's own market
+        // has a real Carrot price, and labelling Dambulla's number as the farmer's own would be dishonest.
         store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 27), min: 300m, max: 320m);
 
         var result = await DashboardHandler(store)
@@ -731,7 +1113,7 @@ public class PortfolioHandlerTests
         price.ObservedDate.Should().Be("2026-06-01");
         price.MarketId.Should().Be(Keppetipola);
         price.IsFallbackMarket.Should().BeFalse(
-            "the home market does have this price — falling back would misreport whose price it is");
+            "the crop's market does have this price — falling back would misreport whose price it is");
         price.Direction.Should().BeNull("there is no second Carrot observation to compare against");
         carrot.PriceUnavailableReason.Should().BeNull();
 
@@ -744,8 +1126,8 @@ public class PortfolioHandlerTests
     public async Task Dashboard_TrendWindowIsMeasuredFromEachCropsOwnLatestObservation()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla, dayOffset: 0);
-        Seed(store, UserA, Tomato, Dambulla, dayOffset: 1);
+        Seed(store, UserA, Carrot, new[] { Dambulla }, dayOffset: 0);
+        Seed(store, UserA, Tomato, new[] { Dambulla }, dayOffset: 1);
 
         // Carrot's two observations are two days apart but nearly two months behind Tomato's.
         store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 5, 30), min: 160m, max: 180m);
@@ -766,7 +1148,7 @@ public class PortfolioHandlerTests
     public async Task Dashboard_AveragesSeveralRowsForTheSameCropAndDay()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
         // Two sources publishing the same crop/market/day, as HARTI and the DEC scrape both can.
         store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 25), min: 180m, max: 200m); // 190
         store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 25), min: 200m, max: 220m); // 210
@@ -781,7 +1163,7 @@ public class PortfolioHandlerTests
     public async Task Dashboard_UsesWholesaleWhenTheBandIsAbsent()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
         store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 25), wholesale: 175m);
 
         var result = await DashboardHandler(store)
@@ -803,7 +1185,7 @@ public class PortfolioHandlerTests
     public async Task Dashboard_ServesTheNewestSnapshot_Verbatim()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
         store.Snapshots.Add(Snapshot(Carrot, new DateOnly(2026, 7, 20), predicted: 100m));
         store.Snapshots.Add(Snapshot(Carrot, new DateOnly(2026, 7, 27), predicted: 204.55m));
 
@@ -823,10 +1205,28 @@ public class PortfolioHandlerTests
     }
 
     [Fact]
+    public async Task Dashboard_PredictionIsNationalAndIgnoresTheWatchedMarkets()
+    {
+        // Markets are a display choice; the model is not per market. Two crops with different watched
+        // markets get the prediction their snapshot holds, unchanged.
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Keppetipola }, dayOffset: 0);
+        Seed(store, UserA, Tomato, new[] { Pettah }, dayOffset: 1);
+        store.Snapshots.Add(Snapshot(Carrot, new DateOnly(2026, 7, 27), predicted: 204.55m));
+        store.Snapshots.Add(Snapshot(Tomato, new DateOnly(2026, 7, 27), predicted: 88.20m));
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        result.Data.Items.Single(i => i.CropId == Carrot).Prediction!.PredictedPrice.Should().Be(204.55m);
+        result.Data.Items.Single(i => i.CropId == Tomato).Prediction!.PredictedPrice.Should().Be(88.20m);
+    }
+
+    [Fact]
     public async Task Dashboard_NoSnapshot_IsANullLegWithAReason_AndTheCropStillAppears()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
         store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 25), min: 180m, max: 200m);
 
         var result = await DashboardHandler(store)
@@ -842,7 +1242,7 @@ public class PortfolioHandlerTests
     public async Task Dashboard_SnapshotWithNoHarvestDate_RendersWithANullHarvestDate()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, Dambulla);
+        Seed(store, UserA, Carrot, new[] { Dambulla });
         // A not_maturable row: the growth period could not be resolved, so there is no harvest date. It is
         // still a real served prediction and must still render.
         store.Snapshots.Add(new PortfolioSnapshotRow(
@@ -898,7 +1298,7 @@ public class PortfolioHandlerTests
     }
 
     [Fact]
-    public async Task AddValidator_RejectsAnUnknownMarket_ButAcceptsAnOmittedOne()
+    public async Task AddValidator_RejectsAnUnknownMarket_ButAcceptsOmittedAndEmptyLists()
     {
         var store = NewStore();
         var validator = new AddWatchlistCropCommandValidator(store);
@@ -907,40 +1307,70 @@ public class PortfolioHandlerTests
         {
             UserId = UserA,
             CropId = Carrot,
-            PreferredMarketId = UnknownMarket
+            MarketIds = new List<Guid> { Dambulla, UnknownMarket }
         });
-        bad.IsValid.Should().BeFalse();
-        bad.Errors.Should().Contain(e =>
-            e.PropertyName == nameof(AddWatchlistCropCommand.PreferredMarketId),
-            "the error is keyed under the name the caller sent, not PreferredMarketId.Value");
+        bad.IsValid.Should().BeFalse("one bad id in the list fails the request, not just that element");
+
+        var empty = await validator.ValidateAsync(new AddWatchlistCropCommand
+        {
+            UserId = UserA,
+            CropId = Carrot,
+            MarketIds = new List<Guid>()
+        });
+        empty.IsValid.Should().BeTrue();
 
         var omitted = await validator.ValidateAsync(new AddWatchlistCropCommand
         {
             UserId = UserA,
             CropId = Carrot
         });
-        omitted.IsValid.Should().BeTrue("omitted means inherit, which is not a value to validate");
+        omitted.IsValid.Should().BeTrue("adding a crop with no market is a legitimate request");
     }
 
     [Fact]
-    public async Task UpdateValidator_AcceptsANullMarket_ButRejectsAnUnknownOne()
+    public async Task AddValidator_DoesNotEnforceTheCaps()
     {
         var store = NewStore();
-        var validator = new UpdateWatchlistMarketCommandValidator(store);
 
-        var cleared = await validator.ValidateAsync(new UpdateWatchlistMarketCommand
+        var result = await new AddWatchlistCropCommandValidator(store).ValidateAsync(
+            new AddWatchlistCropCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Dambulla, Keppetipola, Pettah, Meegoda }
+            });
+
+        result.IsValid.Should().BeTrue(
+            "the caps are 422 wire codes from the handler so the UI can say WHICH limit was hit; a 400 "
+            + "here would flatten them into 'bad request'");
+    }
+
+    [Fact]
+    public async Task UpdateValidator_AcceptsOmittedMarkets_ButRejectsAnUnknownOne()
+    {
+        var store = NewStore();
+        var validator = new UpdateWatchlistEntryCommandValidator(store);
+
+        var omitted = await validator.ValidateAsync(new UpdateWatchlistEntryCommand
         {
             UserId = UserA,
-            CropId = Carrot,
-            PreferredMarketId = null
+            CropId = Carrot
         });
-        cleared.IsValid.Should().BeTrue("clearing to the national default is a valid choice on PUT");
+        omitted.IsValid.Should().BeTrue("omitting marketIds means 'leave them alone'");
 
-        var unknown = await validator.ValidateAsync(new UpdateWatchlistMarketCommand
+        var cleared = await validator.ValidateAsync(new UpdateWatchlistEntryCommand
         {
             UserId = UserA,
             CropId = Carrot,
-            PreferredMarketId = UnknownMarket
+            MarketIds = new List<Guid>()
+        });
+        cleared.IsValid.Should().BeTrue("clearing every market is a valid choice");
+
+        var unknown = await validator.ValidateAsync(new UpdateWatchlistEntryCommand
+        {
+            UserId = UserA,
+            CropId = Carrot,
+            MarketIds = new List<Guid> { UnknownMarket }
         });
         unknown.IsValid.Should().BeFalse();
     }
@@ -950,17 +1380,35 @@ public class PortfolioHandlerTests
     {
         var store = NewStore();
 
-        var result = await new UpdateWatchlistMarketCommandValidator(store).ValidateAsync(
-            new UpdateWatchlistMarketCommand
+        var result = await new UpdateWatchlistEntryCommandValidator(store).ValidateAsync(
+            new UpdateWatchlistEntryCommand
             {
                 UserId = UserA,
                 CropId = Tomato, // watched by user B in the handler tests
-                PreferredMarketId = Dambulla
+                MarketIds = new List<Guid> { Dambulla }
             });
 
         result.IsValid.Should().BeTrue(
             "ownership is answered by the handler as a flat 404; a validator would make it a 400 that "
             + "distinguishes 'no such row' from 'somebody else's row'");
+    }
+
+    [Fact]
+    public async Task UpdateValidator_LeavesTheDateRangeToTheHandler()
+    {
+        var store = NewStore();
+
+        var result = await new UpdateWatchlistEntryCommandValidator(store).ValidateAsync(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = new DateOnly(1900, 1, 1)
+            });
+
+        result.IsValid.Should().BeTrue(
+            "the range needs a clock, which belongs in a handler — and the answer is the "
+            + "invalid_planted_date 422, not a 400");
     }
 
     [Fact]
@@ -981,22 +1429,29 @@ public class PortfolioHandlerTests
         })).IsValid.Should().BeFalse();
     }
 
-    // Home-market resolution.
+    // The wire codes themselves.
 
     [Fact]
-    public void HomeMarket_Resolve_ReturnsTheNewestWrite_WhenRowsSomehowDisagree()
+    public void WireCodes_AreTheFrozenSnakeCaseStrings_TheUiSwitchesOn()
     {
-        var candidates = new[]
-        {
-            new HomeMarketCandidate(Carrot, Dambulla, new DateTime(2026, 7, 20, 0, 0, 0, DateTimeKind.Utc)),
-            new HomeMarketCandidate(Tomato, Keppetipola, new DateTime(2026, 7, 25, 0, 0, 0, DateTimeKind.Utc))
-        };
+        PortfolioErrors.WatchlistEntryNotFound.Should().Be("watchlist_entry_not_found");
+        PortfolioErrors.WatchlistFull.Should().Be("watchlist_full");
+        PortfolioErrors.TooManyMarkets.Should().Be("too_many_markets");
+        PortfolioErrors.InvalidPlantedDate.Should().Be("invalid_planted_date");
 
-        HomeMarket.Resolve(candidates).Should().Be(Keppetipola,
-            "the rule is total by design: a crash between two writes must not leave the dashboard undefined");
+        PortfolioErrors.UnprocessableCodes.Should().BeEquivalentTo(new[]
+        {
+            "watchlist_full", "too_many_markets", "invalid_planted_date"
+        });
+        PortfolioErrors.IsNotFound("watchlist_full").Should().BeFalse(
+            "the two families map to different status codes and must not overlap");
     }
 
     [Fact]
-    public void HomeMarket_Resolve_OnAnEmptyWatchlist_IsNull()
-        => HomeMarket.Resolve(Array.Empty<HomeMarketCandidate>()).Should().BeNull();
+    public void Caps_AreTheOwnerDecidedNumbers()
+    {
+        WatchlistLimits.MaxCropsPerUser.Should().Be(10);
+        WatchlistLimits.MaxMarketsPerCrop.Should().Be(3);
+        WatchlistLimits.EarliestPlantedDate.Should().Be(new DateOnly(2000, 1, 1));
+    }
 }

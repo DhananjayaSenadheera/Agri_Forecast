@@ -146,7 +146,7 @@ public class AdminAuthorizationWiringTests
     [Theory]
     [InlineData(nameof(PortfolioController.GetWatchlist))]
     [InlineData(nameof(PortfolioController.AddToWatchlist))]
-    [InlineData(nameof(PortfolioController.UpdateWatchlistMarket))]
+    [InlineData(nameof(PortfolioController.UpdateWatchlistEntry))]
     [InlineData(nameof(PortfolioController.RemoveFromWatchlist))]
     [InlineData(nameof(PortfolioController.GetDashboard))]
     public void PortfolioEndpoints_RequireAuth_ButNotAdmin(string method)
