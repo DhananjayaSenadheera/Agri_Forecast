@@ -4,7 +4,7 @@ using MediatR;
 
 namespace AgriForecast.Application.Requests.Portfolio.Commands.AddWatchlistCrop;
 
-// POST /api/portfolio/watchlist { cropId, preferredMarketId? } — add a crop to the CALLER's watchlist.
+// POST /api/portfolio/watchlist { cropId, marketIds? } — add a crop to the CALLER's watchlist.
 //
 // UserId is stamped by the controller from the JWT subject. It is NOT part of the request body: a farmer
 // cannot add a crop to someone else's watchlist by editing the payload.
@@ -16,14 +16,14 @@ public class AddWatchlistCropCommand : IRequest<Result<WatchlistAdd_ResultDto>>
     public Guid CropId { get; set; }
 
     /// <summary>
-    /// Optional home market. When supplied it becomes the caller's home market and is applied to ALL of
-    /// their watchlist rows (one home market per farmer).
+    /// The markets to watch this crop at, 0 to
+    /// <see cref="Domain.Constants.WatchlistLimits.MaxMarketsPerCrop"/> of them. Omitted or empty adds the
+    /// crop with NO markets, which is a legitimate state read as the national / economic-centre default.
     /// <para>
-    /// OMITTED OR NULL MEANS "INHERIT", NOT "CLEAR". Adding a crop must never silently reset a farmer's
-    /// chosen market back to the national default, and JSON cannot distinguish an absent key from an
-    /// explicit null. Clearing the market back to national is what PUT /watchlist/{cropId} is for, where
-    /// null is unambiguous because changing the market is the whole point of the call.
+    /// Duplicate ids are COLLAPSED, not rejected — a client sending the same market twice is asking for one
+    /// market, not making an error worth a 4xx — and the cap is counted after the collapse, so
+    /// <c>[A, A, B]</c> is two markets, not three.
     /// </para>
     /// </summary>
-    public Guid? PreferredMarketId { get; set; }
+    public List<Guid>? MarketIds { get; set; }
 }

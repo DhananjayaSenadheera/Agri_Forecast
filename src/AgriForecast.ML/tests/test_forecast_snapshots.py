@@ -944,7 +944,15 @@ class TestSnapshotDateBounds:
 # ---------------------------------------------------------------------------
 
 # The write-only serving artifacts, by name.
-_FORBIDDEN_TABLES = ("ForecastSnapshots", "UserSales", "UserCropWatchlist")
+_FORBIDDEN_TABLES = (
+    "ForecastSnapshots",
+    "UserSales",
+    "UserCropWatchlist",
+    # The per-crop watched markets. A substring scan for "UserCropWatchlist" does NOT cover this
+    # table - the name is "UserCropWatchMarkets", not a suffix of the parent - so it is listed
+    # explicitly. Which markets a farmer follows is a display choice and must never become a feature.
+    "UserCropWatchMarkets",
+)
 
 # Reaching the same tables through the writer's own API. A loader could import this
 # module and call its primitives without ever typing "ForecastSnapshots", and a

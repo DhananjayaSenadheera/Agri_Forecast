@@ -3,7 +3,7 @@ using AgriForecast.API.Controllers;
 using AgriForecast.Application.common;
 using AgriForecast.Application.Requests.Portfolio.Commands.AddWatchlistCrop;
 using AgriForecast.Application.Requests.Portfolio.Commands.RemoveWatchlistCrop;
-using AgriForecast.Application.Requests.Portfolio.Commands.UpdateWatchlistMarket;
+using AgriForecast.Application.Requests.Portfolio.Commands.UpdateWatchlistEntry;
 using AgriForecast.Application.Requests.Portfolio.Common;
 using AgriForecast.Application.Requests.Portfolio.DTOs;
 using AgriForecast.Application.Requests.Portfolio.Queries.GetDashboard;
@@ -86,17 +86,17 @@ public class PortfolioControllerTests
     [Fact]
     public async Task Update_TakesTheCropFromTheRoute_AndTheUserFromTheJwt()
     {
-        UpdateWatchlistMarketCommand? captured = null;
+        UpdateWatchlistEntryCommand? captured = null;
         var mediator = new Mock<IMediator>();
         mediator
-            .Setup(m => m.Send(It.IsAny<UpdateWatchlistMarketCommand>(), It.IsAny<CancellationToken>()))
-            .Callback((object c, CancellationToken _) => captured = (UpdateWatchlistMarketCommand)c)
-            .ReturnsAsync(Result<WatchlistMarketUpdate_ResultDto>.Success(
-                new WatchlistMarketUpdate_ResultDto()));
+            .Setup(m => m.Send(It.IsAny<UpdateWatchlistEntryCommand>(), It.IsAny<CancellationToken>()))
+            .Callback((object c, CancellationToken _) => captured = (UpdateWatchlistEntryCommand)c)
+            .ReturnsAsync(Result<WatchlistEntryUpdate_ResultDto>.Success(
+                new WatchlistEntryUpdate_ResultDto()));
 
         var controller = ControllerFor(mediator.Object, HttpContextFor(Caller));
 
-        await controller.UpdateWatchlistMarket(RouteCrop, new UpdateWatchlistMarketCommand
+        await controller.UpdateWatchlistEntry(RouteCrop, new UpdateWatchlistEntryCommand
         {
             UserId = Victim,
             CropId = BodyCrop
@@ -162,7 +162,7 @@ public class PortfolioControllerTests
         Assert.IsType<UnauthorizedObjectResult>(
             await controller.AddToWatchlist(new AddWatchlistCropCommand()));
         Assert.IsType<UnauthorizedObjectResult>(
-            await controller.UpdateWatchlistMarket(RouteCrop, new UpdateWatchlistMarketCommand()));
+            await controller.UpdateWatchlistEntry(RouteCrop, new UpdateWatchlistEntryCommand()));
         Assert.IsType<UnauthorizedObjectResult>(await controller.RemoveFromWatchlist(RouteCrop));
 
         mediator.Verify(
@@ -175,11 +175,11 @@ public class PortfolioControllerTests
     [Fact]
     public async Task Update_NotFoundCode_Maps404_WithTheMachineReadableBody()
     {
-        var mediator = MediatorReturning<UpdateWatchlistMarketCommand, Result<WatchlistMarketUpdate_ResultDto>>(
-            Result<WatchlistMarketUpdate_ResultDto>.Failure(PortfolioErrors.WatchlistEntryNotFound));
+        var mediator = MediatorReturning<UpdateWatchlistEntryCommand, Result<WatchlistEntryUpdate_ResultDto>>(
+            Result<WatchlistEntryUpdate_ResultDto>.Failure(PortfolioErrors.WatchlistEntryNotFound));
 
         var response = await ControllerFor(mediator.Object, HttpContextFor(Caller))
-            .UpdateWatchlistMarket(RouteCrop, new UpdateWatchlistMarketCommand());
+            .UpdateWatchlistEntry(RouteCrop, new UpdateWatchlistEntryCommand());
 
         var notFound = Assert.IsType<NotFoundObjectResult>(response);
         notFound.StatusCode.Should().Be(StatusCodes.Status404NotFound,
@@ -213,6 +213,38 @@ public class PortfolioControllerTests
 
         // Only the pinned not-found codes become 404s; everything else keeps the usual 400 shape.
         Assert.IsType<BadRequestObjectResult>(response);
+    }
+
+    [Theory]
+    [InlineData("watchlist_full")]
+    [InlineData("too_many_markets")]
+    [InlineData("invalid_planted_date")]
+    public async Task Update_UnprocessableCode_Maps422_WithTheMachineReadableBody(string code)
+    {
+        var mediator = MediatorReturning<UpdateWatchlistEntryCommand, Result<WatchlistEntryUpdate_ResultDto>>(
+            Result<WatchlistEntryUpdate_ResultDto>.Failure(code));
+
+        var response = await ControllerFor(mediator.Object, HttpContextFor(Caller))
+            .UpdateWatchlistEntry(RouteCrop, new UpdateWatchlistEntryCommand());
+
+        var unprocessable = Assert.IsType<UnprocessableEntityObjectResult>(response);
+        unprocessable.StatusCode.Should().Be(StatusCodes.Status422UnprocessableEntity,
+            "a well-formed request the product refuses is a 422; a 400 would tell the UI the payload was "
+            + "malformed and send a developer hunting a serialization bug that is not there");
+        var body = unprocessable.Value!.GetType().GetProperty("error")!.GetValue(unprocessable.Value) as string;
+        body.Should().Be(code);
+    }
+
+    [Fact]
+    public async Task Add_CapCodes_Map422()
+    {
+        var mediator = MediatorReturning<AddWatchlistCropCommand, Result<WatchlistAdd_ResultDto>>(
+            Result<WatchlistAdd_ResultDto>.Failure(PortfolioErrors.WatchlistFull));
+
+        var response = await ControllerFor(mediator.Object, HttpContextFor(Caller))
+            .AddToWatchlist(new AddWatchlistCropCommand());
+
+        Assert.IsType<UnprocessableEntityObjectResult>(response);
     }
 
     [Fact]

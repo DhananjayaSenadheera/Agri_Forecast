@@ -34,6 +34,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     // Mapped to the singular table name UserCropWatchlist; the DbSet is plural only because the property
     // cannot share its name with the entity type. Same shape as UserActivityLog above.
     public DbSet<UserCropWatchlist> UserCropWatchlists { get; set; }
+    public DbSet<UserCropWatchMarket> UserCropWatchMarkets { get; set; }
     public DbSet<UserActivityEvent> UserActivityLog { get; set; }
     public DbSet<SystemError> SystemErrors { get; set; }
 
@@ -610,27 +611,61 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
                 .HasForeignKey(x => x.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            // RESTRICT on Crops and Markets: reference data a farmer is actively watching cannot be
-            // deleted out from under them, and the delete fails loudly instead of silently emptying a
-            // watchlist. Both FKs are explicitly NoAction/Restrict rather than defaulted, because with
-            // three FKs on one table SQL Server would otherwise reject multiple cascade paths.
+            // RESTRICT on Crops: reference data a farmer is actively watching cannot be deleted out from
+            // under them, and the delete fails loudly instead of silently emptying a watchlist. The FK is
+            // explicitly NoAction/Restrict rather than defaulted, because SQL Server would otherwise reject
+            // multiple cascade paths into this table.
             e.HasOne<Crop>()
                 .WithMany()
                 .HasForeignKey(x => x.CropId)
                 .OnDelete(DeleteBehavior.Restrict);
 
-            e.HasOne<Market>()
-                .WithMany()
-                .HasForeignKey(x => x.PreferredMarketId)
-                .OnDelete(DeleteBehavior.Restrict);
+            // The farmer's own planting day. DATE, not datetime2: a planting day has no time component,
+            // and a hidden 00:00:00 would make "today" ambiguous across timezones.
+            e.Property(x => x.PlantedDate).HasColumnType("date");
 
             e.Property(x => x.CreatedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
             e.Property(x => x.UpdatedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
 
+            // The watched markets of this crop, loaded through the backing field so the collection stays
+            // read-only on the entity: the cap and the no-duplicates rule live in the domain methods, and a
+            // settable navigation would be a way around both.
+            e.HasMany(x => x.Markets)
+                .WithOne()
+                .HasForeignKey(m => m.UserCropWatchlistId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            e.Metadata.FindNavigation(nameof(UserCropWatchlist.Markets))!
+                .SetPropertyAccessMode(PropertyAccessMode.Field);
+
             // One row per crop per farmer. Also the read path for "everything this user watches": UserId is
-            // the leading column, so the user-scoped list and the user-wide home-market update both seek on
-            // this index rather than scanning.
+            // the leading column, so the user-scoped list seeks on this index rather than scanning.
             e.HasIndex(x => new { x.UserId, x.CropId }, "UX_UserCropWatchlist_UserCrop")
+                .IsUnique();
+        });
+
+        // The markets a farmer follows FOR ONE watched crop — children of UserCropWatchlist. Personal data
+        // by inheritance: the row has no UserId of its own and is only ever reachable through its
+        // (already user-scoped) parent.
+        modelBuilder.Entity<UserCropWatchMarket>(e =>
+        {
+            e.ToTable("UserCropWatchMarkets");
+
+            // RESTRICT on Markets, with no inverse navigation: a market a farmer is watching cannot be
+            // deleted out from under them, and Market gains no navigation into personal data. The parent FK
+            // (Cascade) is configured from the UserCropWatchlist side above; declaring it here as well
+            // would give EF two relationships for one column.
+            e.HasOne<Market>()
+                .WithMany()
+                .HasForeignKey(x => x.MarketId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.Property(x => x.CreatedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+
+            // One row per (watched crop, market). The 3-market cap is deliberately NOT a DB constraint —
+            // it is enforced in the domain and answered as the too_many_markets wire code — but "the same
+            // market twice" is a data error, so the database refuses it outright.
+            e.HasIndex(x => new { x.UserCropWatchlistId, x.MarketId }, "UX_UserCropWatchMarkets_EntryMarket")
                 .IsUnique();
         });
 

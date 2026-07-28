@@ -8,8 +8,11 @@ namespace AgriForecast.Application.Requests.Portfolio.DTOs;
 // rather than a fabricated number. An empty watchlist is a 200 with an empty Items list, never a 404.
 public class PortfolioDashboard_GetDto
 {
-    // The market the prices below are shown for. Null only if the database has no economic centre and the
-    // farmer has chosen no market — in practice never, since Dambulla carries IsEconomicCenter = 1.
+    // TRANSITIONAL. Markets are now per WATCHED CROP, so there is no single home market to report and this
+    // block degrades to the economic-centre default (IsDefault always true). It stays only so the current
+    // FE keeps rendering while step 3 replaces the dashboard with per-crop, per-market blocks; each item's
+    // own price already names the market that served it. Null only if the database has no economic centre —
+    // in practice never, since Dambulla carries IsEconomicCenter = 1.
     public PortfolioHomeMarket_GetDto? HomeMarket { get; set; }
 
     public List<PortfolioDashboardItem_GetDto> Items { get; set; } = new();

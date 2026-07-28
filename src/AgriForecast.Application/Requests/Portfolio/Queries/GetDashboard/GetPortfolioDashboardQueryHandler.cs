@@ -31,6 +31,15 @@ namespace AgriForecast.Application.Requests.Portfolio.Queries.GetDashboard;
 /// 3. THE PREDICTION IS READ, NEVER RECOMPUTED. The snapshot's frozen columns pass through verbatim —
 /// a Low-confidence fallback stays Low. No forecasting maths happens in C#.
 /// </para>
+/// <para>
+/// TRANSITIONAL (step 2 of the per-market redesign). The one-home-market-per-farmer rule is gone: each
+/// watched crop now carries its OWN market list. This handler was adapted minimally rather than redesigned
+/// — a crop's price is served from its FIRST watched market (the stable oldest-chosen order the read store
+/// guarantees), with the economic-centre fallback unchanged for crops that market cannot serve, and the
+/// top-level <c>homeMarket</c> degrades to the economic-centre default (<c>isDefault: true</c>) so the
+/// existing response shape and the FE that reads it keep working. STEP 3 REPLACES THIS with per-market
+/// blocks per crop; do not build <c>markets[]</c> into this response in the meantime.
+/// </para>
 /// </remarks>
 public class GetPortfolioDashboardQueryHandler
     : IRequestHandler<GetPortfolioDashboardQuery, Result<PortfolioDashboard_GetDto>>
@@ -57,32 +66,24 @@ public class GetPortfolioDashboardQueryHandler
     {
         var watchlist = await _store.GetWatchlistAsync(request.UserId, cancellationToken);
 
-        // The economic centre is both the default home market and the price fallback, so it is resolved
-        // even for an empty watchlist: the empty-state screen still names the market it would show.
+        // The economic centre is both the default market and the price fallback, so it is resolved even
+        // for an empty watchlist: the empty-state screen still names the market it would show.
         var economicCentre = await _store.GetEconomicCentreMarketAsync(cancellationToken);
 
-        var chosenMarketId = HomeMarket.Resolve(
-            watchlist.Select(w => new HomeMarketCandidate(w.CropId, w.PreferredMarketId, w.UpdatedAtUtc)));
-
-        // A chosen market that no longer resolves cannot happen (the FK is Restrict), but falling back to
-        // the economic centre is the safe answer if it ever did.
-        var chosenMarket = chosenMarketId.HasValue
-            ? await _store.GetMarketAsync(chosenMarketId.Value, cancellationToken)
-            : null;
-
-        var homeMarket = chosenMarket ?? economicCentre;
-        var usingDefault = chosenMarket is null;
-
+        // TRANSITIONAL: with markets now per crop there is no single "home market" to report, so the
+        // top-level block degrades to the economic-centre default. isDefault is therefore always true
+        // here — it stays in the response only so the current FE keeps rendering; step 3 replaces the
+        // whole block with per-crop, per-market data.
         var dto = new PortfolioDashboard_GetDto
         {
-            HomeMarket = homeMarket is null
+            HomeMarket = economicCentre is null
                 ? null
                 : new PortfolioHomeMarket_GetDto
                 {
-                    MarketId = homeMarket.Id,
-                    Name = homeMarket.Name,
-                    IsEconomicCenter = homeMarket.IsEconomicCenter,
-                    IsDefault = usingDefault
+                    MarketId = economicCentre.Id,
+                    Name = economicCentre.Name,
+                    IsEconomicCenter = economicCentre.IsEconomicCenter,
+                    IsDefault = true
                 }
         };
 
@@ -91,16 +92,45 @@ public class GetPortfolioDashboardQueryHandler
 
         var cropIds = watchlist.Select(w => w.CropId).Distinct().ToArray();
 
-        // Home-market prices first.
-        var pricesByCrop = homeMarket is null
-            ? new Dictionary<Guid, PriceLeg>()
-            : await BuildPriceLegsAsync(cropIds, homeMarket, isFallback: false, cancellationToken);
+        // Each crop is served from its OWN first watched market (oldest-chosen; the read store guarantees
+        // that order), or from the economic centre when it watches none. Crops are grouped by that market
+        // so one market still costs one pair of store calls, not one per crop.
+        var primaryMarketByCrop = watchlist.ToDictionary(
+            w => w.CropId,
+            w => w.Markets.Count > 0 ? w.Markets[0].MarketId : economicCentre?.Id);
 
-        // Then, only for the crops the home market could not serve, the economic-centre fallback. Skipped
-        // entirely when the home market IS the economic centre — there is nothing further to fall back to.
-        if (economicCentre is not null && homeMarket is not null && economicCentre.Id != homeMarket.Id)
+        var pricesByCrop = new Dictionary<Guid, PriceLeg>();
+
+        foreach (var group in primaryMarketByCrop
+                     .Where(kvp => kvp.Value.HasValue)
+                     .GroupBy(kvp => kvp.Value!.Value))
         {
-            var missing = cropIds.Where(id => !pricesByCrop.ContainsKey(id)).ToArray();
+            var market = group.Key == economicCentre?.Id
+                ? economicCentre
+                : await _store.GetMarketAsync(group.Key, cancellationToken);
+
+            // A watched market that no longer resolves cannot happen (the FK is Restrict); those crops
+            // simply fall through to the economic-centre pass below rather than failing the request.
+            if (market is null)
+                continue;
+
+            var legs = await BuildPriceLegsAsync(
+                group.Select(kvp => kvp.Key).ToArray(), market, isFallback: false, cancellationToken);
+
+            foreach (var kvp in legs)
+                pricesByCrop[kvp.Key] = kvp.Value;
+        }
+
+        // Then, only for the crops their own market could not serve, the economic-centre fallback. A crop
+        // whose primary market IS the economic centre is skipped: there is nothing further to fall back
+        // to, and it must not be labelled isFallbackMarket for a price its own market really does have.
+        if (economicCentre is not null)
+        {
+            var missing = cropIds
+                .Where(id => !pricesByCrop.ContainsKey(id)
+                             && primaryMarketByCrop.GetValueOrDefault(id) != economicCentre.Id)
+                .ToArray();
+
             if (missing.Length > 0)
             {
                 var fallbackLegs = await BuildPriceLegsAsync(

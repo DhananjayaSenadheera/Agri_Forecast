@@ -19,8 +19,11 @@ public class PortfolioReadStore : IPortfolioReadStore
     public async Task<IReadOnlyList<WatchlistRow>> GetWatchlistAsync(
         Guid userId, CancellationToken ct = default)
     {
-        // The market name is a correlated subquery rather than a left join: PreferredMarketId is nullable,
-        // and a subquery yields null for an unset market without any outer-join key-type gymnastics.
+        // The watched markets are a correlated collection subquery joined to Markets for the display
+        // fields. Ordered oldest-chosen first (CreatedAtUtc, then MarketId as a deterministic tiebreak for
+        // two markets added in the same request), because the dashboard's transitional price rule reads
+        // "the FIRST watched market" — an unordered projection would make which market serves a crop
+        // depend on the query plan.
         return await _db.UserCropWatchlists.AsNoTracking()
             .Where(w => w.UserId == userId)
             .Join(
@@ -34,13 +37,19 @@ public class PortfolioReadStore : IPortfolioReadStore
                 x.Watch.CropId,
                 x.Crop.Name,
                 x.Crop.CropCode,
-                x.Watch.PreferredMarketId,
-                _db.Markets
-                    .Where(m => m.Id == x.Watch.PreferredMarketId)
-                    .Select(m => m.Name)
-                    .FirstOrDefault(),
-                x.Watch.CreatedAtUtc,
-                x.Watch.UpdatedAtUtc))
+                x.Watch.PlantedDate,
+                _db.UserCropWatchMarkets
+                    .Where(wm => wm.UserCropWatchlistId == x.Watch.Id)
+                    .Join(
+                        _db.Markets,
+                        wm => wm.MarketId,
+                        m => m.Id,
+                        (wm, m) => new { Link = wm, Market = m })
+                    .OrderBy(z => z.Link.CreatedAtUtc)
+                    .ThenBy(z => z.Link.MarketId)
+                    .Select(z => new WatchlistMarketRow(z.Market.Id, z.Market.Name, z.Market.ShortCode))
+                    .ToList(),
+                x.Watch.CreatedAtUtc))
             .ToListAsync(ct);
     }
 
