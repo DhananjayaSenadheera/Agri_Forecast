@@ -29,6 +29,7 @@ public class GetMarketsQueryHandler
         {
             Id = r.Id,
             Name = r.Name,
+            ShortCode = r.ShortCode,
             District = r.District,
             MarketType = r.MarketType,
             IsEconomicCenter = r.IsEconomicCenter,

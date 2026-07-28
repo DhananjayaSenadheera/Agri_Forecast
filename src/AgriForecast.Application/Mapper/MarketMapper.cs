@@ -12,6 +12,7 @@ public static class MarketMapper
             name: src.Name,
             district: src.District,
             marketType: src.MarketType,
-            isEconomicCenter: src.IsEconomicCenter);
+            isEconomicCenter: src.IsEconomicCenter,
+            shortCode: src.ShortCode);
     }
 }

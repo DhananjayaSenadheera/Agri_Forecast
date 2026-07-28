@@ -9,6 +9,9 @@ public class Market_GetDto
 {
     public Guid Id { get; set; }
     public string Name { get; set; } = string.Empty;
+    // Short display code shown beside the name (e.g. "DEC", "KEP"). Display-only — the FE must keep
+    // keying on Id. Empty string (never null) when a market has no code assigned yet.
+    public string ShortCode { get; set; } = string.Empty;
     // Nullable: the CBSL NationalAggregate pseudo-market carries no district.
     public string? District { get; set; }
     public MarketType MarketType { get; set; }

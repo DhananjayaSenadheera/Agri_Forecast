@@ -323,8 +323,23 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             // explicitly promoted; the Dambulla DEC row is flagged by a MarketCode-keyed UPDATE.
             e.Property(x => x.IsEconomicCenter).IsRequired().HasDefaultValue(false);
 
+            // Short display code (e.g. "DEC", "KEP"), NOT NULL, 8 chars. Display-only: it is never a key,
+            // an FK or a join column, and nothing in the ML path reads it — everything keys on the
+            // lowercase GUID Id, MarketCode stays the business key.
+            e.Property(x => x.ShortCode).HasMaxLength(8).IsRequired().HasDefaultValue(string.Empty);
+
             // MarketCode is the human-facing business key — unique.
             e.HasIndex(x => x.MarketCode).IsUnique();
+
+            // ShortCode is unique among ASSIGNED codes. The filter is load-bearing: a market registered
+            // through POST api/markets/create without a display code stores '' (no abbreviation can be
+            // derived safely from a name), and an unfiltered unique index would let the first such
+            // registration block every later one. Every seeded market carries a code, so the filter never
+            // hides a real duplicate.
+            e.HasIndex(x => x.ShortCode)
+                .IsUnique()
+                .HasFilter("[ShortCode] <> ''")
+                .HasDatabaseName("UX_Markets_ShortCode");
         });
 
         // Back-compat link EconomicCenter -> Market. Restrict so a Market cannot be deleted out from under an
@@ -681,6 +696,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000001"),
                 MarketCode = "MKT00000001",
+                ShortCode = "DEC",
                 Name = "Dambulla Dedicated Economic Centre",
                 District = (string?)"Matale",
                 MarketType = MarketType.DEC,
@@ -692,6 +708,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000002"),
                 MarketCode = "MKT00000002",
+                ShortCode = "KEP",
                 Name = "Keppetipola Dedicated Economic Centre",
                 District = (string?)"Badulla",
                 MarketType = MarketType.DEC,
@@ -703,6 +720,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000003"),
                 MarketCode = "MKT00000003",
+                ShortCode = "THB",
                 Name = "Thambuttegama Dedicated Economic Centre",
                 District = (string?)"Anuradhapura",
                 MarketType = MarketType.DEC,
@@ -714,6 +732,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000004"),
                 MarketCode = "MKT00000004",
+                ShortCode = "PET",
                 Name = "Pettah (HARTI wholesale)",
                 District = (string?)"Colombo",
                 MarketType = MarketType.Wholesale,
@@ -725,6 +744,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000005"),
                 MarketCode = "MKT00000005",
+                ShortCode = "NAR",
                 Name = "Narahenpita (HARTI retail)",
                 District = (string?)"Colombo",
                 MarketType = MarketType.Retail,
@@ -736,6 +756,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000006"),
                 MarketCode = "MKT00000006",
+                ShortCode = "NAT",
                 Name = "CBSL national average (pseudo-market)",
                 District = (string?)null,
                 MarketType = MarketType.NationalAggregate,
@@ -755,6 +776,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000007"),
                 MarketCode = "MKT00000007",
+                ShortCode = "KAN",
                 Name = "Kandy (HARTI wholesale)",
                 District = (string?)"Kandy",
                 MarketType = MarketType.Wholesale,
@@ -766,6 +788,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000008"),
                 MarketCode = "MKT00000008",
+                ShortCode = "MEE",
                 Name = "Meegoda Dedicated Economic Centre",
                 District = (string?)"Colombo",
                 MarketType = MarketType.DEC,
@@ -777,6 +800,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000009"),
                 MarketCode = "MKT00000009",
+                ShortCode = "NOR",
                 // Best-evidence classification: a municipal wholesale market rather than a designated DEC,
                 // and the least certain of the three.
                 Name = "Norochchole (HARTI wholesale)",
@@ -790,6 +814,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000010"),
                 MarketCode = "MKT00000010",
+                ShortCode = "NUW",
                 Name = "Nuwara Eliya Dedicated Economic Centre",
                 District = (string?)"Nuwara Eliya",
                 MarketType = MarketType.DEC,
@@ -801,6 +826,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000011"),
                 MarketCode = "MKT00000011",
+                ShortCode = "BAN",
                 Name = "Bandarawela (HARTI wholesale)",
                 District = (string?)"Badulla",
                 MarketType = MarketType.Wholesale,
@@ -812,6 +838,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             {
                 Id = Guid.Parse("b2a20001-0000-0000-0000-000000000012"),
                 MarketCode = "MKT00000012",
+                ShortCode = "VEY",
                 Name = "Veyangoda Dedicated Economic Centre",
                 District = (string?)"Gampaha",
                 MarketType = MarketType.DEC,
