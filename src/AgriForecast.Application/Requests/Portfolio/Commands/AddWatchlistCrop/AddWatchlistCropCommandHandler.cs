@@ -25,6 +25,10 @@ namespace AgriForecast.Application.Requests.Portfolio.Commands.AddWatchlistCrop;
 //
 // THE CAPS ARE ANSWERED HERE, NOT BY THE DATABASE: the 11th crop is watchlist_full and a 4th market is
 // too_many_markets, both 422 — a well-formed request the product refuses, which the farmer can act on.
+// The market cap is measured against what the crop would END UP following (existing ∪ requested), not
+// against the request's own length. The entity's own truncation is a last resort reached only on the
+// race-recovery path below, where the alternative — failing a request whose crop is already added — would
+// be worse; on the ordinary path silently dropping a market the caller was told 200 about is not honest.
 public class AddWatchlistCropCommandHandler
     : IRequestHandler<AddWatchlistCropCommand, Result<WatchlistAdd_ResultDto>>
 {
@@ -62,14 +66,34 @@ public class AddWatchlistCropCommandHandler
         var rows = await _watchlist.GetAllForUserAsync(request.UserId, cancellationToken);
         var existing = rows.FirstOrDefault(r => r.CropId == request.CropId);
 
-        // The cap applies to NEW crops only. A repeat add of a crop already watched is idempotent, so it
-        // must keep answering 200 even for a farmer sitting exactly on the limit.
+        // The crop cap applies to NEW crops only. A repeat add of a crop already watched is idempotent, so
+        // it must keep answering 200 even for a farmer sitting exactly on the limit.
         if (existing is null && rows.Count >= WatchlistLimits.MaxCropsPerUser)
         {
             _logger.LogInformation(
                 "Watchlist add rejected for user {UserId}: already watching {CropCount} crops (cap {Cap}).",
                 request.UserId, rows.Count, WatchlistLimits.MaxCropsPerUser);
             return Result<WatchlistAdd_ResultDto>.Failure(PortfolioErrors.WatchlistFull);
+        }
+
+        // The MARKET cap must count what the crop ALREADY follows, not just what this request carries.
+        // Checking the request alone let a crop already on 3 markets take a 4th: the entity truncates
+        // silently and the caller got a 200 saying the market was accepted when it had been dropped. Told
+        // "no" they can remove one; told nothing they never find out.
+        if (existing is not null)
+        {
+            var wouldFollow = existing.Markets.Select(m => m.MarketId)
+                .Union(requestedMarkets)
+                .Count();
+
+            if (wouldFollow > WatchlistLimits.MaxMarketsPerCrop)
+            {
+                _logger.LogInformation(
+                    "Watchlist add rejected for user {UserId}, crop {CropId}: would follow {MarketCount} "
+                    + "markets, cap is {Cap}.",
+                    request.UserId, request.CropId, wouldFollow, WatchlistLimits.MaxMarketsPerCrop);
+                return Result<WatchlistAdd_ResultDto>.Failure(PortfolioErrors.TooManyMarkets);
+            }
         }
 
         var now = DateTime.UtcNow;
@@ -86,7 +110,7 @@ public class AddWatchlistCropCommandHandler
 
         // Insert-only in BOTH branches. On a new row it is simply the initial set; on a repeat add it adds
         // what is missing without touching what the farmer already chose — a POST must never take a market
-        // away, and the cap silently truncates rather than failing a request the caller already satisfied.
+        // away. The over-cap case was already refused above, so nothing is silently truncated here.
         await AttachMarketsAsync(target!, requestedMarkets, now, cancellationToken);
 
         var alreadyPresent = existing is not null;
@@ -102,7 +126,13 @@ public class AddWatchlistCropCommandHandler
             // not inspected: the application layer does not reference EF Core or a database provider, so
             // the honest test is the question the caller actually cares about — is the row there now? If it
             // is not, this was a real failure and it is rethrown untouched.
-            _watchlist.Remove(inserted); // an Added entity is detached by Remove, undoing the lost insert
+            // THIS LINE IS THE CLEAN-UP, and it is load-bearing. A failed SaveChanges does NOT roll the
+            // change tracker back: our losing parent row and its child markets are still sitting there
+            // Added, and the next commit would replay them straight into the same unique index. Removing an
+            // Added parent DETACHES it, and the detach CASCADES to its Added children — so this one call is
+            // what leaves a clean tracker for the retry below. Reorder it after the re-read and the second
+            // commit resurrects the losing insert.
+            _watchlist.Remove(inserted);
 
             rows = await _watchlist.GetAllForUserAsync(request.UserId, cancellationToken);
             var winner = rows.FirstOrDefault(r => r.CropId == request.CropId);
@@ -115,11 +145,14 @@ public class AddWatchlistCropCommandHandler
                 + "answering idempotently.",
                 request.UserId, request.CropId);
 
-            // The failed commit rolled our child inserts back with it, so re-apply them over the row as it
-            // now stands — the WINNER's row, which may already carry markets the other request inserted.
+            // Our child inserts went out with the detach, so re-apply them over the row as it now stands —
+            // the WINNER's row, which may already carry markets the other request inserted.
             // INSERT-ONLY: a full replace here would delete the winner's markets, i.e. one tap of a button
             // silently undoing the other. Nothing is deleted and nothing is updated on this path, so the
-            // second commit cannot collide with the unique index either.
+            // second commit cannot collide with the unique index either. This is also the ONE place the
+            // entity's silent truncation at the cap is the right answer: the caller's crop is already
+            // there, and failing the whole request over a market count they only reached through a race
+            // would be worse than honouring the first MaxMarketsPerCrop.
             await AttachMarketsAsync(winner, requestedMarkets, now, cancellationToken);
             await _unitOfWork.CommitAsync();
 

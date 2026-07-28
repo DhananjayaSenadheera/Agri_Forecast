@@ -194,7 +194,23 @@ public class UserCropWatchlistTests
 
         changes.Removed.Select(m => m.MarketId).Should().Equal(MarketId);
         changes.Added.Select(m => m.MarketId).Should().Equal(ThirdMarketId);
-        row.Markets.Select(m => m.MarketId).Should().BeEquivalentTo(new[] { OtherMarketId, ThirdMarketId });
+        row.Markets.Select(m => m.MarketId).Should().Equal(new[] { OtherMarketId, ThirdMarketId });
+    }
+
+    [Fact]
+    public void ReplaceMarkets_DoesNotReorder_AnAlreadyAttachedMarketKeepsItsPosition()
+    {
+        var row = NewEntry();
+        row.ReplaceMarkets(new[] { MarketId, OtherMarketId }, CreatedUtc);
+
+        // The caller asks for [Third, Other] — but Other is already attached and keeps its position, so
+        // the result is Other, Third and NOT the order requested. Pinned because a re-send must never
+        // delete-and-reinsert an unchanged market: that would reshuffle the list on an unrelated edit and,
+        // since the transitional dashboard prices a crop at markets[0], change which market is shown.
+        // Expressing a genuine reorder needs an explicit position field, which does not exist yet.
+        row.ReplaceMarkets(new[] { ThirdMarketId, OtherMarketId }, UpdatedUtc);
+
+        row.Markets.Select(m => m.MarketId).Should().Equal(new[] { OtherMarketId, ThirdMarketId });
     }
 
     [Fact]
@@ -324,8 +340,9 @@ public class UserCropWatchlistTests
 
         added.Select(m => m.MarketId).Should().Equal(ThirdMarketId);
         row.Markets.Should().HaveCount(WatchlistLimits.MaxMarketsPerCrop,
-            "on the idempotent add path the caller already has their crop; failing the whole request over "
-            + "a cap reached through a race would be worse than honouring the first three");
+            "truncation is the last resort of exactly ONE caller — the race-recovery path, where the "
+            + "caller's crop is already added and failing the whole request over a count they reached "
+            + "through a race would be worse. The ordinary add path refuses with too_many_markets first");
     }
 
     // EF mapping. The model is built against the SQL Server provider (never connected) so the assertions
@@ -465,7 +482,12 @@ public class UserCropWatchlistTests
             "Id" TEXT NOT NULL CONSTRAINT "PK_UserCropWatchMarkets" PRIMARY KEY,
             "UserCropWatchlistId" TEXT NOT NULL,
             "MarketId" TEXT NOT NULL,
-            "CreatedAtUtc" TEXT NOT NULL
+            "CreatedAtUtc" TEXT NOT NULL,
+            -- The FK is NOT decoration. Without it SQLite happily accepts a child row pointing at a parent
+            -- that was never committed, so the concurrent-add test could not tell a correctly cleaned-up
+            -- losing insert from an orphan left behind by one — exactly the bug it exists to catch.
+            CONSTRAINT "FK_UserCropWatchMarkets_UserCropWatchlist_UserCropWatchlistId"
+                FOREIGN KEY ("UserCropWatchlistId") REFERENCES "UserCropWatchlist" ("Id") ON DELETE CASCADE
         );
         CREATE UNIQUE INDEX "UX_UserCropWatchMarkets_EntryMarket"
             ON "UserCropWatchMarkets" ("UserCropWatchlistId", "MarketId");
@@ -474,12 +496,25 @@ public class UserCropWatchlistTests
     private static AgriForecastDbContext NewContext(SqliteConnection connection)
         => new(new DbContextOptionsBuilder<AgriForecastDbContext>().UseSqlite(connection).Options);
 
+    // SQLite enforces foreign keys per connection. Microsoft.Data.Sqlite turns them on by default today,
+    // so this is belt-and-braces rather than the thing that makes the FK bite (measured: removing this
+    // call alone changes nothing; removing the FK declaration fails
+    // TheHarnessEnforcesForeignKeys_SoAnOrphanChildRowCannotBeWritten). It is stated explicitly so the
+    // harness does not silently depend on a provider default that could change.
+    private static async Task EnableForeignKeysAsync(SqliteConnection connection)
+    {
+        await using var pragma = connection.CreateCommand();
+        pragma.CommandText = "PRAGMA foreign_keys = ON;";
+        await pragma.ExecuteNonQueryAsync();
+    }
+
     // Only the two tables are created. EnsureCreated is avoided for the same reason the audit tests avoid
     // it: the full model's ISJSON check constraint and SYSUTCDATETIME() defaults are not SQLite.
     private static async Task<(SqliteConnection conn, AgriForecastDbContext ctx)> BuildSqliteAsync()
     {
         var connection = new SqliteConnection("DataSource=:memory:");
         await connection.OpenAsync();
+        await EnableForeignKeysAsync(connection);
 
         var ctx = NewContext(connection);
 
@@ -549,6 +584,31 @@ public class UserCropWatchlistTests
 
         var act = async () => await uow.CommitAsync();
         await act.Should().ThrowAsync<DbUpdateException>();
+    }
+
+    [Fact]
+    public async Task TheHarnessEnforcesForeignKeys_SoAnOrphanChildRowCannotBeWritten()
+    {
+        // Guards the guard. SQLite enforces foreign keys only when PRAGMA foreign_keys is ON, per
+        // connection — and a harness where it is quietly OFF accepts a market row pointing at a watchlist
+        // entry that was never committed, which is precisely the failure the concurrent-add test below is
+        // supposed to be able to see. This test fails if either the PRAGMA or the FK declaration is lost.
+        var (conn, ctx) = await BuildSqliteAsync();
+        await using var _c = conn;
+        await using var _x = ctx;
+
+        var repo = new UserCropWatchlistRepository(ctx);
+        IUnitofWorkRepository uow = new UnitOfWorkRepository(ctx);
+
+        await repo.AddMarketsAsync(new[]
+        {
+            UserCropWatchMarket.Create(Guid.NewGuid(), MarketId, CreatedUtc) // no such parent
+        });
+
+        var act = async () => await uow.CommitAsync();
+
+        await act.Should().ThrowAsync<DbUpdateException>(
+            "a watched market with no watched crop is un-scoped personal data with nothing to own it");
     }
 
     [Fact]
@@ -732,6 +792,10 @@ public class UserCropWatchlistTests
     {
         var connection = new SqliteConnection("DataSource=:memory:");
         await connection.OpenAsync();
+        // Foreign keys ON so a child row left pointing at the LOSER's rolled-back parent is rejected by
+        // the database. Without it the losing insert's markets could be written as orphans and this test
+        // would pass while the recovery path leaked rows.
+        await EnableForeignKeysAsync(connection);
         await using var _c = connection;
 
         await using var winnerCtx = NewContext(connection);
@@ -789,5 +853,59 @@ public class UserCropWatchlistTests
         markets.Should().BeEquivalentTo(new[] { MarketId, OtherMarketId },
             "the recovery path re-applies the loser's markets INSERT-ONLY on top of the winner's — a full "
             + "replace there would have deleted the winner's market");
+
+        var orphans = await verifyCtx.UserCropWatchMarkets.AsNoTracking()
+            .Where(m => m.UserCropWatchlistId != stored.Single().Id)
+            .CountAsync();
+
+        orphans.Should().Be(0,
+            "the losing parent and its children were detached together; a child left pointing at the "
+            + "rolled-back parent would now be rejected by the foreign key, which is why the test schema "
+            + "declares one");
+    }
+
+    [Fact]
+    public async Task Add_LosingARace_AgainstAWinnerAlreadyAtTheMarketCap_TruncatesRatherThanFailing()
+    {
+        // The ONE place silent truncation is the right answer. The loser's own pre-check saw an empty
+        // watchlist, so it could not know the winner would arrive with a full market list; refusing here
+        // would fail a request whose crop is, by then, already on the caller's watchlist.
+        var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        await EnableForeignKeysAsync(connection);
+        await using var _c = connection;
+
+        await using var winnerCtx = NewContext(connection);
+        await using var loserCtx = NewContext(connection);
+        await winnerCtx.Database.ExecuteSqlRawAsync(CreateWatchlistTableSql);
+
+        var winner = AddHandler(winnerCtx, new UserCropWatchlistRepository(winnerCtx));
+        var loser = AddHandler(
+            loserCtx, new StaleFirstReadRepository(new UserCropWatchlistRepository(loserCtx)));
+
+        await winner.Handle(
+            new AddWatchlistCropCommand
+            {
+                UserId = UserId,
+                CropId = CropId,
+                MarketIds = new List<Guid> { MarketId, OtherMarketId, ThirdMarketId }
+            },
+            default);
+
+        var second = await loser.Handle(
+            new AddWatchlistCropCommand
+            {
+                UserId = UserId,
+                CropId = CropId,
+                MarketIds = new List<Guid> { FourthMarketId }
+            },
+            default);
+
+        second.IsSuccess.Should().BeTrue(
+            "the caller's crop is on their watchlist; a 422 here would report failure for a state they "
+            + "did reach");
+        second.Data.Item.Markets.Should().HaveCount(WatchlistLimits.MaxMarketsPerCrop);
+        second.Data.Item.Markets.Select(m => m.MarketId).Should().NotContain(FourthMarketId,
+            "the cap still holds — the extra market is dropped, not squeezed in");
     }
 }

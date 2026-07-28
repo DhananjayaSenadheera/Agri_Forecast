@@ -483,6 +483,72 @@ public class PortfolioHandlerTests
     }
 
     [Fact]
+    public async Task Add_ToACropAlreadyAtTheMarketCap_Is422_NotASilentlyDroppedMarket()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla, Keppetipola, Pettah });
+
+        var result = await AddHandler(store).Handle(
+            new AddWatchlistCropCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Meegoda }
+            },
+            default);
+
+        result.IsSuccess.Should().BeFalse(
+            "the request carries only ONE market, so counting the request alone would pass it — the cap "
+            + "must be measured against what the crop would END UP following");
+        result.Error.Should().Be(PortfolioErrors.TooManyMarkets);
+        store.Watchlist.Rows.Single().Markets.Select(m => m.MarketId)
+            .Should().Equal(new[] { Dambulla, Keppetipola, Pettah });
+        store.Watchlist.CommitCount.Should().Be(0,
+            "a 200 that silently dropped the market would leave the farmer believing it was added");
+    }
+
+    [Fact]
+    public async Task Add_ToACropWithRoomForExactlyOneMore_Succeeds()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla, Keppetipola });
+
+        var result = await AddHandler(store).Handle(
+            new AddWatchlistCropCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Pettah }
+            },
+            default);
+
+        result.IsSuccess.Should().BeTrue("landing exactly on the cap is allowed; only exceeding it is not");
+        result.Data.Item.Markets.Should().HaveCount(WatchlistLimits.MaxMarketsPerCrop);
+    }
+
+    [Fact]
+    public async Task Add_ReSendingMarketsTheCropAlreadyFollows_StaysWithinTheCap()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla, Keppetipola, Pettah });
+
+        var result = await AddHandler(store).Handle(
+            new AddWatchlistCropCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Dambulla, Pettah }
+            },
+            default);
+
+        result.IsSuccess.Should().BeTrue(
+            "the union of existing and requested is still three markets — a double-tap of markets the "
+            + "crop already follows asks for nothing new");
+        result.Data.AlreadyPresent.Should().BeTrue();
+        result.Data.Item.Markets.Should().HaveCount(WatchlistLimits.MaxMarketsPerCrop);
+    }
+
+    [Fact]
     public async Task Add_DoesNotTouchAnotherUsersRows()
     {
         var store = NewStore();
@@ -520,8 +586,11 @@ public class PortfolioHandlerTests
 
         result.IsSuccess.Should().BeTrue();
         result.Data.MarketsChanged.Should().BeTrue();
+        // ORDER-SENSITIVE on purpose. Keppetipola was already attached, so it keeps its original position;
+        // only Pettah is new and it is appended. A replace does NOT reorder, and the order matters because
+        // the transitional dashboard prices a crop at markets[0].
         result.Data.Item.Markets.Select(m => m.MarketId)
-            .Should().BeEquivalentTo(new[] { Keppetipola, Pettah });
+            .Should().Equal(new[] { Keppetipola, Pettah });
         store.Watchlist.RemovedMarkets.Select(m => m.MarketId).Should().Equal(new[] { Dambulla },
             "a full replace deletes exactly what is no longer wanted");
         store.Watchlist.CommitCount.Should().Be(1, "both halves of the update are one transaction");

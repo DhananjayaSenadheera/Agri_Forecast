@@ -102,9 +102,17 @@ public class UserCropWatchlist
 
     /// <summary>
     /// FULL REPLACE of this crop's watched markets (an empty list clears them). Duplicates in the input are
-    /// collapsed, order is preserved, and markets already present keep their original CreatedAtUtc so the
-    /// display order does not shuffle when an unrelated market is added.
+    /// collapsed.
     /// </summary>
+    /// <remarks>
+    /// THIS DOES NOT REORDER. A market already attached KEEPS its original CreatedAtUtc, and therefore its
+    /// position in the oldest-chosen display order; only the newly added markets are appended, in the order
+    /// the caller listed them. So replacing [A, B] with [C, B] yields B, C — not C, B. That is deliberate:
+    /// re-sending an unchanged market must not delete and re-insert it, which would make an unrelated edit
+    /// reshuffle the list and (because the transitional dashboard prices a crop at markets[0]) change which
+    /// market the farmer is shown. There is currently NO way to express "move B after C"; if reordering
+    /// ever becomes a product requirement it needs an explicit position, not a re-send.
+    /// </remarks>
     /// <returns>The child rows to insert and the child rows to delete — the caller persists both.</returns>
     /// <exception cref="ArgumentException">
     /// More than <see cref="WatchlistLimits.MaxMarketsPerCrop"/> distinct markets. This is defence in
