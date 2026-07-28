@@ -8,51 +8,57 @@ using MediatR;
 namespace AgriForecast.Application.Requests.Portfolio.Queries.GetDashboard;
 
 /// <summary>
-/// Builds the farmer's portfolio dashboard: their watched crops, each decorated with the latest observed
-/// price + trend at their home market and the newest frozen forecast snapshot.
+/// Builds the farmer's portfolio dashboard: their watched crops, each carrying one price block per market
+/// that crop is watched at, plus the newest frozen forecast snapshot for the crop.
 /// </summary>
 /// <remarks>
-/// Three rules shape everything below.
+/// Four rules shape everything below.
 /// <para>
-/// 1. EVERY WATCHED CROP APPEARS. Both decorations are fail-soft: a crop with no price and no prediction
-/// still comes back, with both legs null and a reason code each. Dropping it would make the farmer's own
-/// list silently disagree with what they added.
+/// 1. EVERY WATCHED CROP APPEARS, AND SO DOES EVERY ONE OF ITS MARKETS. Both legs are fail-soft: a crop
+/// with no price anywhere and no prediction still comes back, with each missing leg null and a reason code
+/// beside it. Dropping a crop, or quietly omitting a market that has no data, would make the farmer's own
+/// list disagree with what they chose.
 /// </para>
 /// <para>
-/// 2. THE LATEST PRICE IS UNCONSTRAINED, AND ANCHORED PER CROP. Whatever the freshest usable observation
-/// for a crop at that market is, that is what ships — there is no staleness cutoff and no wall-clock
-/// arithmetic, so the response is identical whenever it is called and a crop is never made to look
-/// priceless (or pushed to the fallback market) because it exists. The trend window below applies ONLY to
-/// whether a PREVIOUS observation is close enough to compare against, and it is measured from each crop's
-/// own latest date, never from a sibling crop's. The observed date ships with every price so the farmer
-/// can see for themselves how current it is.
+/// 2. A WATCHED MARKET IS NEVER SUBSTITUTED. Each block shows THAT market's own data or an honest null with
+/// <c>no_recent_price</c>. The farmer picked that market because it is where they can actually sell;
+/// showing another market's number under its name would be a lie about their options. The economic centre
+/// appears for exactly one reason — as the single default block of a crop that has chosen NO markets,
+/// flagged <c>isDefaultMarket</c> so the UI can name it as a default rather than as their choice.
 /// </para>
 /// <para>
-/// 3. THE PREDICTION IS READ, NEVER RECOMPUTED. The snapshot's frozen columns pass through verbatim —
-/// a Low-confidence fallback stays Low. No forecasting maths happens in C#.
+/// 3. THE PRICE IS ANCHORED PER (CROP, MARKET), AND UNCONSTRAINED. Whatever the freshest usable observation
+/// for that crop at that market is, that is what ships — no staleness cutoff and no wall-clock arithmetic,
+/// so the response is identical whenever it is called. A crop's price at one market is independent of its
+/// price at another AND of every sibling crop: a market that last quoted it in June still reports June's
+/// price while a second market reports today's. The 30-day window below gates ONLY whether a PREVIOUS
+/// observation is close enough to compare against, and it is measured from that (crop, market)'s own
+/// latest date. The observed date ships with every price so the farmer can judge it for themselves.
 /// </para>
 /// <para>
-/// TRANSITIONAL (step 2 of the per-market redesign). The one-home-market-per-farmer rule is gone: each
-/// watched crop now carries its OWN market list. This handler was adapted minimally rather than redesigned
-/// — a crop's price is served from its FIRST watched market (the stable oldest-chosen order the read store
-/// guarantees), with the economic-centre fallback unchanged for crops that market cannot serve, and the
-/// top-level <c>homeMarket</c> degrades to the economic-centre default (<c>isDefault: true</c>) so the
-/// existing response shape and the FE that reads it keep working. STEP 3 REPLACES THIS with per-market
-/// blocks per crop; do not build <c>markets[]</c> into this response in the meantime.
+/// 4. THE PREDICTION IS READ, NEVER RECOMPUTED, AND IS PER CROP. The snapshot's frozen columns pass through
+/// verbatim — a Low-confidence fallback stays Low. It sits on the crop, not on a market block, because the
+/// model serves ONE national, Dambulla-anchored price; a copy under each market would imply per-market
+/// forecasts that do not exist. No forecasting maths happens in C#.
+/// </para>
+/// <para>
+/// READS ARE BATCHED BY MARKET, never per (crop, market): the crops sharing a market are anchored and
+/// fetched together, so the cost is two store calls per DISTINCT market plus the watchlist, the snapshots
+/// and one economic-centre lookup. With the 10-crop and 3-market caps that is bounded and small.
 /// </para>
 /// </remarks>
 public class GetPortfolioDashboardQueryHandler
     : IRequestHandler<GetPortfolioDashboardQuery, Result<PortfolioDashboard_GetDto>>
 {
     /// <summary>
-    /// How far back from A CROP'S OWN freshest observation the trend comparison may look.
+    /// How far back from A (CROP, MARKET)'S OWN freshest observation the trend comparison may look.
     /// <para>
-    /// This NEVER gates the latest price — a crop last quoted a year ago still reports that price. The
-    /// trend is "versus the immediately previous observation", so this is only the horizon for FINDING that
-    /// previous point: 30 days is comfortably wider than any normal publishing gap (weekends, holidays, a
-    /// quiet week at a smaller market) while keeping the read to a few hundred rows per crop. A crop whose
-    /// previous observation is older than this reports its price with a null direction rather than a trend
-    /// measured against a stale month-old quote.
+    /// This NEVER gates the latest price — a crop last quoted at that market a year ago still reports that
+    /// price. The trend is "versus the immediately previous observation", so this is only the horizon for
+    /// FINDING that previous point: 30 days is comfortably wider than any normal publishing gap (weekends,
+    /// holidays, a quiet week at a smaller market) while keeping the read to a few hundred rows. A previous
+    /// observation older than this yields a price with a null direction rather than a trend measured
+    /// against a stale month-old quote.
     /// </para>
     /// </summary>
     public const int TrendWindowDays = 30;
@@ -66,82 +72,44 @@ public class GetPortfolioDashboardQueryHandler
     {
         var watchlist = await _store.GetWatchlistAsync(request.UserId, cancellationToken);
 
-        // The economic centre is both the default market and the price fallback, so it is resolved even
-        // for an empty watchlist: the empty-state screen still names the market it would show.
-        var economicCentre = await _store.GetEconomicCentreMarketAsync(cancellationToken);
-
-        // TRANSITIONAL: with markets now per crop there is no single "home market" to report, so the
-        // top-level block degrades to the economic-centre default. isDefault is therefore always true
-        // here — it stays in the response only so the current FE keeps rendering; step 3 replaces the
-        // whole block with per-crop, per-market data.
-        var dto = new PortfolioDashboard_GetDto
-        {
-            HomeMarket = economicCentre is null
-                ? null
-                : new PortfolioHomeMarket_GetDto
-                {
-                    MarketId = economicCentre.Id,
-                    Name = economicCentre.Name,
-                    IsEconomicCenter = economicCentre.IsEconomicCenter,
-                    IsDefault = true
-                }
-        };
-
+        var dto = new PortfolioDashboard_GetDto();
         if (watchlist.Count == 0)
             return Result<PortfolioDashboard_GetDto>.Success(dto);
 
-        var cropIds = watchlist.Select(w => w.CropId).Distinct().ToArray();
+        // Resolved only for the crops that chose nothing. A watchlist where every crop named a market never
+        // needs it, but the lookup is one cheap read and asking for it up front keeps the block-building
+        // below branch-free.
+        var economicCentre = await _store.GetEconomicCentreMarketAsync(cancellationToken);
 
-        // Each crop is served from its OWN first watched market (oldest-chosen; the read store guarantees
-        // that order), or from the economic centre when it watches none. Crops are grouped by that market
-        // so one market still costs one pair of store calls, not one per crop.
-        var primaryMarketByCrop = watchlist.ToDictionary(
+        // Which markets each crop is shown for, in the farmer's own first-added-first order. A crop with no
+        // chosen markets gets exactly one default block; if the database somehow has no economic centre it
+        // gets none, and its card is honestly market-less rather than fabricated.
+        var marketsByCrop = watchlist.ToDictionary(
             w => w.CropId,
-            w => w.Markets.Count > 0 ? w.Markets[0].MarketId : economicCentre?.Id);
+            w => w.Markets.Count > 0
+                ? w.Markets.Select(m => new CropMarket(m.MarketId, m.Name, m.ShortCode, IsDefault: false)).ToList()
+                : economicCentre is null
+                    ? new List<CropMarket>()
+                    : new List<CropMarket>
+                    {
+                        new(economicCentre.Id, economicCentre.Name, economicCentre.ShortCode, IsDefault: true)
+                    });
 
-        var pricesByCrop = new Dictionary<Guid, PriceLeg>();
+        // One pair of store calls per DISTINCT market, covering every crop that watches it.
+        var legs = new Dictionary<(Guid CropId, Guid MarketId), PriceLeg>();
 
-        foreach (var group in primaryMarketByCrop
-                     .Where(kvp => kvp.Value.HasValue)
-                     .GroupBy(kvp => kvp.Value!.Value))
+        foreach (var group in marketsByCrop
+                     .SelectMany(kvp => kvp.Value.Select(m => (CropId: kvp.Key, Market: m)))
+                     .GroupBy(x => x.Market.MarketId))
         {
-            var market = group.Key == economicCentre?.Id
-                ? economicCentre
-                : await _store.GetMarketAsync(group.Key, cancellationToken);
+            var cropIds = group.Select(x => x.CropId).Distinct().ToArray();
 
-            // A watched market that no longer resolves cannot happen (the FK is Restrict); those crops
-            // simply fall through to the economic-centre pass below rather than failing the request.
-            if (market is null)
-                continue;
-
-            var legs = await BuildPriceLegsAsync(
-                group.Select(kvp => kvp.Key).ToArray(), market, isFallback: false, cancellationToken);
-
-            foreach (var kvp in legs)
-                pricesByCrop[kvp.Key] = kvp.Value;
+            foreach (var leg in await BuildPriceLegsAsync(cropIds, group.Key, cancellationToken))
+                legs[(leg.Key, group.Key)] = leg.Value;
         }
 
-        // Then, only for the crops their own market could not serve, the economic-centre fallback. A crop
-        // whose primary market IS the economic centre is skipped: there is nothing further to fall back
-        // to, and it must not be labelled isFallbackMarket for a price its own market really does have.
-        if (economicCentre is not null)
-        {
-            var missing = cropIds
-                .Where(id => !pricesByCrop.ContainsKey(id)
-                             && primaryMarketByCrop.GetValueOrDefault(id) != economicCentre.Id)
-                .ToArray();
-
-            if (missing.Length > 0)
-            {
-                var fallbackLegs = await BuildPriceLegsAsync(
-                    missing, economicCentre, isFallback: true, cancellationToken);
-
-                foreach (var kvp in fallbackLegs)
-                    pricesByCrop[kvp.Key] = kvp.Value;
-            }
-        }
-
-        var snapshots = (await _store.GetLatestSnapshotsAsync(cropIds, cancellationToken))
+        var cropIdsAll = watchlist.Select(w => w.CropId).Distinct().ToArray();
+        var snapshots = (await _store.GetLatestSnapshotsAsync(cropIdsAll, cancellationToken))
             .ToDictionary(s => s.CropId);
 
         dto.Items = watchlist
@@ -151,13 +119,12 @@ public class GetPortfolioDashboardQueryHandler
                 {
                     CropId = w.CropId,
                     CropName = w.CropName,
-                    CropCode = w.CropCode
+                    CropCode = w.CropCode,
+                    PlantedDate = PortfolioTime.Fmt(w.PlantedDate),
+                    Markets = marketsByCrop[w.CropId]
+                        .Select(m => ToMarketDto(m, legs.GetValueOrDefault((w.CropId, m.MarketId))))
+                        .ToList()
                 };
-
-                if (pricesByCrop.TryGetValue(w.CropId, out var leg))
-                    item.Price = ToPriceDto(leg);
-                else
-                    item.PriceUnavailableReason = PortfolioUnavailableReasons.NoRecentPrice;
 
                 if (snapshots.TryGetValue(w.CropId, out var snapshot))
                     item.Prediction = ToPredictionDto(snapshot);
@@ -175,19 +142,15 @@ public class GetPortfolioDashboardQueryHandler
     // freshest usable date at this market), then a window fetch cut from each crop's own anchor.
     //
     // The two concerns are deliberately separate. The anchor set decides WHICH crops this market can serve
-    // at all — a crop with any usable observation here is served here, however old it is, so a stale crop
-    // is never handed to the economic-centre fallback and never labelled isFallbackMarket for a price its
-    // own market really does have. The window decides only whether a PREVIOUS point is eligible for the
-    // trend.
+    // at all — a crop with any usable observation here is served here, however old it is. The window
+    // decides only whether a PREVIOUS point is eligible for the trend. Crops absent from the result are the
+    // ones this market has never usefully quoted, and their block ships a null price with a reason.
     private async Task<Dictionary<Guid, PriceLeg>> BuildPriceLegsAsync(
-        IReadOnlyCollection<Guid> cropIds,
-        PortfolioMarketRow market,
-        bool isFallback,
-        CancellationToken ct)
+        IReadOnlyCollection<Guid> cropIds, Guid marketId, CancellationToken ct)
     {
         var legs = new Dictionary<Guid, PriceLeg>();
 
-        var anchors = await _store.GetLatestObservedDatesAsync(cropIds, market.Id, ct);
+        var anchors = await _store.GetLatestObservedDatesAsync(cropIds, marketId, ct);
         if (anchors.Count == 0)
             return legs; // this market has no usable observation for any of these crops
 
@@ -195,7 +158,7 @@ public class GetPortfolioDashboardQueryHandler
             .Select(a => new CropObservationWindow(a.CropId, EarliestComparable(a.LatestDate)))
             .ToArray();
 
-        var rows = await _store.GetObservationsAsync(windows, market.Id, ct);
+        var rows = await _store.GetObservationsAsync(windows, marketId, ct);
 
         // A single (crop, market, date) can carry several rows — multiple sources, or a re-published
         // bulletin — so the day's unit prices are averaged, exactly as the market overview does.
@@ -221,11 +184,11 @@ public class GetPortfolioDashboardQueryHandler
             var series = cropGroup.OrderBy(d => d.Date).ToList();
             var latest = series[^1];
 
-            // The immediately previous observation, if it is close enough to THIS crop's own latest. Not a
-            // fixed lag: the trend is "versus last time this crop was quoted here", which is what the
-            // farmer actually compares to. The eligibility test is re-stated here rather than left to the
-            // store's window so the rule lives where it is read — and so it stays measured against the
-            // latest USABLE row, which can be older than the anchor if the anchor day carried no price.
+            // The immediately previous observation, if it is close enough to THIS (crop, market)'s own
+            // latest. Not a fixed lag: the trend is "versus last time this crop was quoted HERE", which is
+            // what the farmer actually compares to. The eligibility test is re-stated here rather than left
+            // to the store's window so the rule lives where it is read — and so it stays measured against
+            // the latest USABLE row, which can be older than the anchor if the anchor day carried no price.
             var previous = series.Count >= 2 && series[^2].Date >= EarliestComparable(latest.Date)
                 ? series[^2]
                 : null;
@@ -246,9 +209,6 @@ public class GetPortfolioDashboardQueryHandler
             legs[latest.CropId] = new PriceLeg(
                 latest.Price,
                 latest.Date,
-                market.Id,
-                market.Name,
-                isFallback,
                 direction,
                 changePct,
                 // Reported only when it actually backed the direction, so the two can never disagree.
@@ -264,13 +224,22 @@ public class GetPortfolioDashboardQueryHandler
     private static DateOnly EarliestComparable(DateOnly latest)
         => latest.AddDays(-(TrendWindowDays - 1));
 
+    private static PortfolioDashboardMarket_GetDto ToMarketDto(CropMarket market, PriceLeg? leg) => new()
+    {
+        MarketId = market.MarketId,
+        Name = market.Name,
+        ShortCode = market.ShortCode,
+        IsDefaultMarket = market.IsDefault,
+        Price = leg is null ? null : ToPriceDto(leg),
+        // The market is listed either way; only the price is missing, and it says so instead of borrowing
+        // a number from somewhere else.
+        PriceUnavailableReason = leg is null ? PortfolioUnavailableReasons.NoRecentPrice : null
+    };
+
     private static PortfolioPrice_GetDto ToPriceDto(PriceLeg leg) => new()
     {
         Price = leg.Price,
         ObservedDate = PortfolioTime.Fmt(leg.ObservedDate),
-        MarketId = leg.MarketId,
-        MarketName = leg.MarketName,
-        IsFallbackMarket = leg.IsFallbackMarket,
         Direction = leg.Direction,
         ChangePct = leg.ChangePct,
         PreviousPrice = leg.PreviousPrice,
@@ -289,12 +258,12 @@ public class GetPortfolioDashboardQueryHandler
         HarvestDate = PortfolioTime.Fmt(s.HarvestDate)
     };
 
+    // One market a crop is shown for, before its price is attached.
+    private sealed record CropMarket(Guid MarketId, string Name, string ShortCode, bool IsDefault);
+
     private sealed record PriceLeg(
         decimal Price,
         DateOnly ObservedDate,
-        Guid MarketId,
-        string MarketName,
-        bool IsFallbackMarket,
         string? Direction,
         decimal? ChangePct,
         decimal? PreviousPrice,

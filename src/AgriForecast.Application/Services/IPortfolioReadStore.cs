@@ -1,8 +1,8 @@
 namespace AgriForecast.Application.Services;
 
 // Read-only projections behind the farmer portfolio (GET /api/portfolio/watchlist and /dashboard). Thin DB
-// seam so the dashboard's price precedence, trend and fallback logic are unit-testable without a database;
-// pure reads (AsNoTracking).
+// seam so the dashboard's price precedence, per-market anchoring and trend logic are unit-testable without
+// a database; pure reads (AsNoTracking).
 //
 // OWNER SCOPING IS PART OF THE SIGNATURE. GetWatchlistAsync takes the caller's user id and there is no
 // overload that returns rows for anyone else, so a handler cannot leak another farmer's crops even by
@@ -43,9 +43,10 @@ public interface IPortfolioReadStore
     Task<PortfolioMarketRow?> GetMarketAsync(Guid marketId, CancellationToken ct = default);
 
     // The Dedicated Economic Centre — the national price anchor (Dambulla, the only Markets row with
-    // IsEconomicCenter = 1). Used both as the default home market for a farmer who has not chosen one and
-    // as the fallback when the chosen market has no data for a crop. Null only if no market carries the
-    // flag, which the seed and the AddIsEconomicCenterToMarket backfill guarantee it does.
+    // IsEconomicCenter = 1). The dashboard uses it for ONE thing: the single default block a crop with no
+    // chosen markets gets. It is never a fallback for a market the farmer DID choose. Null only if no
+    // market carries the flag, which the seed and the AddIsEconomicCenterToMarket backfill guarantee it
+    // does.
     Task<PortfolioMarketRow?> GetEconomicCentreMarketAsync(CancellationToken ct = default);
 
     // Existence check for the validators, so a bad crop id is a structured 400 rather than a raw FK error.
@@ -99,5 +100,7 @@ public sealed record PortfolioSnapshotRow(
     string? ModelVersion);
 
 // A market's display identity. IsEconomicCenter uses the column's own (American) spelling, which is
-// already the wire spelling on GET /api/markets/get/all.
-public sealed record PortfolioMarketRow(Guid Id, string Name, bool IsEconomicCenter);
+// already the wire spelling on GET /api/markets/get/all. ShortCode is the display-only chip label, empty
+// when unassigned — the dashboard's default-market block renders it, so it is projected here rather than
+// fetched separately.
+public sealed record PortfolioMarketRow(Guid Id, string Name, string ShortCode, bool IsEconomicCenter);

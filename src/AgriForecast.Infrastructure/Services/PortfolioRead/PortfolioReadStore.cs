@@ -144,20 +144,20 @@ public class PortfolioReadStore : IPortfolioReadStore
     {
         return await _db.Markets.AsNoTracking()
             .Where(m => m.Id == marketId)
-            .Select(m => new PortfolioMarketRow(m.Id, m.Name, m.IsEconomicCenter))
+            .Select(m => new PortfolioMarketRow(m.Id, m.Name, m.ShortCode, m.IsEconomicCenter))
             .FirstOrDefaultAsync(ct);
     }
 
     public async Task<PortfolioMarketRow?> GetEconomicCentreMarketAsync(CancellationToken ct = default)
     {
         // Deliberately NOT filtered on IsActive: the economic centre is the structural national price
-        // anchor, so deactivating it in the admin UI must not silently strip the dashboard of its default
-        // home market and its price fallback. Ordered by MarketCode so the answer is deterministic if a
+        // anchor, so deactivating it in the admin UI must not silently strip a crop with no chosen market
+        // of the only block it would have. Ordered by MarketCode so the answer is deterministic if a
         // second market is ever flagged; today exactly one row (Dambulla, MKT00000001) carries the flag.
         return await _db.Markets.AsNoTracking()
             .Where(m => m.IsEconomicCenter)
             .OrderBy(m => m.MarketCode)
-            .Select(m => new PortfolioMarketRow(m.Id, m.Name, m.IsEconomicCenter))
+            .Select(m => new PortfolioMarketRow(m.Id, m.Name, m.ShortCode, m.IsEconomicCenter))
             .FirstOrDefaultAsync(ct);
     }
 
