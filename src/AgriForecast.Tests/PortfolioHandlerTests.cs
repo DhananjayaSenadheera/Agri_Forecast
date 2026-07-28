@@ -1,7 +1,9 @@
+using System.Text.Json;
 using AgriForecast.Application.Requests.Portfolio.Commands.AddWatchlistCrop;
 using AgriForecast.Application.Requests.Portfolio.Commands.RemoveWatchlistCrop;
 using AgriForecast.Application.Requests.Portfolio.Commands.UpdateWatchlistEntry;
 using AgriForecast.Application.Requests.Portfolio.Common;
+using AgriForecast.Application.Requests.Portfolio.DTOs;
 using AgriForecast.Application.Requests.Portfolio.Queries.GetDashboard;
 using AgriForecast.Application.Requests.Portfolio.Queries.GetWatchlist;
 using AgriForecast.Application.Requests.Portfolio.Validators;
@@ -100,8 +102,9 @@ public class PortfolioHandlerTests
         public FakeWatchlist Watchlist = new();
 
         public readonly Dictionary<Guid, (string Name, string? Code)> Crops = new();
+        // PortfolioMarketRow carries the short code, so there is ONE source for a market's display
+        // fields — a second dictionary would let a fixture's name and chip drift apart.
         public readonly Dictionary<Guid, PortfolioMarketRow> Markets = new();
-        public readonly Dictionary<Guid, string> MarketShortCodes = new();
         public Guid? EconomicCentreId;
 
         // (marketId, cropId) -> observations. Keyed exactly as the real store queries them.
@@ -110,12 +113,16 @@ public class PortfolioHandlerTests
 
         public readonly List<Guid> CapturedWatchlistUserIds = new();
 
+        // Which markets the price reads were issued for, in order. The dashboard must group crops by
+        // market: one anchor call and one window call per DISTINCT market, never per (crop, market).
+        public readonly List<Guid> AnchorCallMarkets = new();
+        public readonly List<Guid> ObservationCallMarkets = new();
+
         public void AddCrop(Guid id, string name, string? code = null) => Crops[id] = (name, code);
 
         public void AddMarket(Guid id, string name, bool isEconomicCentre = false, string shortCode = "MKT")
         {
-            Markets[id] = new PortfolioMarketRow(id, name, isEconomicCentre);
-            MarketShortCodes[id] = shortCode;
+            Markets[id] = new PortfolioMarketRow(id, name, shortCode, isEconomicCentre);
             if (isEconomicCentre) EconomicCentreId = id;
         }
 
@@ -143,7 +150,7 @@ public class PortfolioHandlerTests
                         .Select(m => new WatchlistMarketRow(
                             m.MarketId,
                             Markets.TryGetValue(m.MarketId, out var mk) ? mk.Name : "?",
-                            MarketShortCodes.TryGetValue(m.MarketId, out var sc) ? sc : string.Empty))
+                            Markets.TryGetValue(m.MarketId, out var sc) ? sc.ShortCode : string.Empty))
                         .ToList(),
                     r.CreatedAtUtc))
                 .OrderBy(r => r.CropName)
@@ -153,29 +160,41 @@ public class PortfolioHandlerTests
             return Task.FromResult<IReadOnlyList<WatchlistRow>>(rows);
         }
 
+        // Mirrors PortfolioReadStore.UsableRows EXACTLY, including its price predicate: a unit-confirmed
+        // row carrying no quote in any column is not an observation as far as these queries are concerned.
+        // A fake that returned quote-less rows would hide the anchor bug this mirrors the fix for.
         private IEnumerable<PortfolioObservationRow> Usable(
             IReadOnlyCollection<Guid> cropIds, Guid marketId)
-            => Observations.Where(o => o.MarketId == marketId && cropIds.Contains(o.Row.CropId))
-                .Select(o => o.Row);
+            => Observations
+                .Where(o => o.MarketId == marketId && cropIds.Contains(o.Row.CropId))
+                .Select(o => o.Row)
+                .Where(r => r.MinPrice > 0m || r.MaxPrice > 0m
+                            || r.WholesalePrice > 0m || r.RetailPrice > 0m);
 
         // Per-crop MAX, exactly like the real store's GROUP BY — a crop with data is listed with its OWN
         // freshest date, never with the set's.
         public Task<IReadOnlyList<CropLatestObservation>> GetLatestObservedDatesAsync(
             IReadOnlyCollection<Guid> cropIds, Guid marketId, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<CropLatestObservation>>(
+        {
+            AnchorCallMarkets.Add(marketId);
+            return Task.FromResult<IReadOnlyList<CropLatestObservation>>(
                 Usable(cropIds, marketId)
                     .GroupBy(r => r.CropId)
                     .Select(g => new CropLatestObservation(g.Key, g.Max(r => r.Date)))
                     .ToList());
+        }
 
         // Each crop is filtered by its OWN window, mirroring the real store's per-window queries.
         public Task<IReadOnlyList<PortfolioObservationRow>> GetObservationsAsync(
             IReadOnlyCollection<CropObservationWindow> windows, Guid marketId,
             CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<PortfolioObservationRow>>(
+        {
+            ObservationCallMarkets.Add(marketId);
+            return Task.FromResult<IReadOnlyList<PortfolioObservationRow>>(
                 windows.SelectMany(w =>
                         Usable(new[] { w.CropId }, marketId).Where(r => r.Date >= w.FromInclusive))
                     .ToList());
+        }
 
         public Task<IReadOnlyList<PortfolioSnapshotRow>> GetLatestSnapshotsAsync(
             IReadOnlyCollection<Guid> cropIds, CancellationToken ct = default)
@@ -937,27 +956,35 @@ public class PortfolioHandlerTests
         result.Error.Should().Be(PortfolioErrors.WatchlistEntryNotFound);
     }
 
-    // GET /dashboard — the transitional market block (step 3 replaces it with per-market data).
+    // GET /dashboard — the per-market blocks.
+
+    private static PortfolioDashboardItem_GetDto Item(PortfolioDashboard_GetDto dto, Guid cropId)
+        => dto.Items.Single(i => i.CropId == cropId);
+
+    private static PortfolioDashboardMarket_GetDto Block(
+        PortfolioDashboard_GetDto dto, Guid cropId, Guid marketId)
+        => Item(dto, cropId).Markets.Single(m => m.MarketId == marketId);
 
     [Fact]
-    public async Task Dashboard_TopLevelMarket_DegradesToTheEconomicCentreDefault()
+    public async Task Dashboard_HasNoTopLevelHomeMarket_AtAll()
     {
+        // Structural, not "is it null": the concept is retired, and a field that is always null is a field
+        // some future UI will read as meaningful. The serialized body must not carry the key either.
+        typeof(PortfolioDashboard_GetDto).GetProperties().Select(p => p.Name)
+            .Should().NotContain("HomeMarket");
+
         var store = NewStore();
         Seed(store, UserA, Carrot, new[] { Keppetipola });
 
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
-        var home = result.Data.HomeMarket!;
-        home.MarketId.Should().Be(Dambulla);
-        home.IsEconomicCenter.Should().BeTrue();
-        home.IsDefault.Should().BeTrue(
-            "with markets per crop there is no single home market to report; the block stays only so the "
-            + "current FE keeps rendering, and step 3 replaces it");
+        var json = JsonSerializer.Serialize(result.Data, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        json.Should().NotContain("homeMarket");
     }
 
     [Fact]
-    public async Task Dashboard_EmptyWatchlist_StillNamesTheDefaultMarket()
+    public async Task Dashboard_EmptyWatchlist_IsAnEmptyItemList()
     {
         var store = NewStore();
 
@@ -965,9 +992,7 @@ public class PortfolioHandlerTests
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
         result.IsSuccess.Should().BeTrue();
-        result.Data.Items.Should().BeEmpty();
-        result.Data.HomeMarket!.MarketId.Should().Be(Dambulla,
-            "the empty state still tells the farmer which market prices would be shown for");
+        result.Data.Items.Should().BeEmpty("an empty watchlist is a valid state, not an error");
     }
 
     // GET /dashboard — isolation.
@@ -987,10 +1012,86 @@ public class PortfolioHandlerTests
         store.CapturedWatchlistUserIds.Should().AllBeEquivalentTo(UserA);
     }
 
-    // GET /dashboard — price leg.
+    // GET /dashboard — which markets a crop gets a block for.
 
     [Fact]
-    public async Task Dashboard_ServesThePriceFromTheCropsFirstWatchedMarket()
+    public async Task Dashboard_GivesEveryWatchedMarketItsOwnBlock_InTheFarmersOwnOrder()
+    {
+        var store = NewStore();
+        // Chosen in an order that does NOT match the market GUIDs' sort order, so a projection that lost
+        // the tick-apart stamping would reorder these and change which tab the UI opens on.
+        Seed(store, UserA, Carrot, new[] { Pettah, Dambulla, Keppetipola });
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        var markets = Item(result.Data, Carrot).Markets;
+        markets.Select(m => m.MarketId).Should().Equal(new[] { Pettah, Dambulla, Keppetipola },
+            "markets[0] is the tab the farmer sees first, so the wire order is their first-added order");
+        markets.Select(m => m.Name).Should().Equal(new[]
+        {
+            "Pettah (HARTI wholesale)",
+            "Dambulla Dedicated Economic Centre",
+            "Keppetipola Dedicated Economic Centre"
+        });
+        markets.Select(m => m.ShortCode).Should().Equal(new[] { "PET", "DEC", "KEP" });
+        markets.Should().OnlyContain(m => !m.IsDefaultMarket,
+            "every one of these is the farmer's own choice, not a default standing in");
+    }
+
+    [Fact]
+    public async Task Dashboard_ACropWithNoMarkets_GetsExactlyOneEconomicCentreBlock_FlaggedAsTheDefault()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot);
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 26), min: 300m, max: 320m);
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        var markets = Item(result.Data, Carrot).Markets;
+        markets.Should().ContainSingle();
+        markets[0].MarketId.Should().Be(Dambulla);
+        markets[0].ShortCode.Should().Be("DEC");
+        markets[0].IsDefaultMarket.Should().BeTrue(
+            "the farmer never picked a market, so this is the national anchor standing in — a default, "
+            + "not a failure and not a substitution");
+        markets[0].Price!.Price.Should().Be(310m,
+            "the card must not be price-empty while the default market has data");
+    }
+
+    [Fact]
+    public async Task Dashboard_ACropWatchingTheEconomicCentreItself_IsANormalBlock_NotADefault()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla });
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        Block(result.Data, Carrot, Dambulla).IsDefaultMarket.Should().BeFalse(
+            "choosing Dambulla is a choice; flagging it as a default would tell the farmer the app picked "
+            + "it for them");
+    }
+
+    [Fact]
+    public async Task Dashboard_WithNoEconomicCentreAtAll_LeavesAMarketlessCropHonestlyEmpty()
+    {
+        // Degenerate database (no market carries the flag). The crop still appears; nothing is invented.
+        var store = new FakeStore();
+        store.AddCrop(Carrot, "Carrot", "VEG000001");
+        Seed(store, UserA, Carrot);
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        Item(result.Data, Carrot).Markets.Should().BeEmpty();
+    }
+
+    // GET /dashboard — the price inside a block.
+
+    [Fact]
+    public async Task Dashboard_ServesEachBlockThePriceOfItsOwnMarket()
     {
         var store = NewStore();
         Seed(store, UserA, Carrot, new[] { Keppetipola, Dambulla });
@@ -1000,104 +1101,101 @@ public class PortfolioHandlerTests
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
-        var price = result.Data.Items.Single().Price!;
-        price.MarketId.Should().Be(Keppetipola,
-            "transitional rule: the FIRST watched market serves the price, and the read store's "
-            + "oldest-chosen order is what makes 'first' deterministic");
-        price.IsFallbackMarket.Should().BeFalse();
-        price.Price.Should().Be(190m, "the midpoint of the day's band, the same rule the market overview uses");
-        price.ObservedDate.Should().Be("2026-07-25");
+        var kep = Block(result.Data, Carrot, Keppetipola).Price!;
+        kep.Price.Should().Be(190m, "the midpoint of the day's band, the same rule the market overview uses");
+        kep.ObservedDate.Should().Be("2026-07-25");
+
+        var dec = Block(result.Data, Carrot, Dambulla).Price!;
+        dec.Price.Should().Be(310m);
+        dec.ObservedDate.Should().Be("2026-07-26");
     }
 
     [Fact]
-    public async Task Dashboard_EachCropUsesItsOwnMarket()
+    public async Task Dashboard_OneCropsTwoMarkets_AreAnchoredIndependently()
     {
+        // The per-(crop, market) anchor law. Keppetipola last quoted Carrot in June; Dambulla quoted it
+        // today. Neither may pull the other: the stale market keeps reporting its real June price (no
+        // staleness cutoff), and the fresh one is unaffected by the stale one.
         var store = NewStore();
-        Seed(store, UserA, Carrot, new[] { Keppetipola }, dayOffset: 0);
-        Seed(store, UserA, Tomato, new[] { Pettah }, dayOffset: 1);
-        store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 7, 25), min: 180m, max: 200m);
-        store.AddObservation(Pettah, Tomato, new DateOnly(2026, 7, 25), min: 100m, max: 120m);
+        Seed(store, UserA, Carrot, new[] { Keppetipola, Dambulla });
+        store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 6, 1), min: 180m, max: 200m);
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 27), min: 300m, max: 320m);
 
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
-        result.Data.Items.Single(i => i.CropId == Carrot).Price!.MarketId.Should().Be(Keppetipola);
-        result.Data.Items.Single(i => i.CropId == Tomato).Price!.MarketId.Should().Be(Pettah);
+        var kep = Block(result.Data, Carrot, Keppetipola);
+        kep.Price!.Price.Should().Be(190m, "a price of any age is still a price and is served");
+        kep.Price.ObservedDate.Should().Be("2026-06-01");
+        kep.PriceUnavailableReason.Should().BeNull();
+
+        var dec = Block(result.Data, Carrot, Dambulla);
+        dec.Price!.ObservedDate.Should().Be("2026-07-27",
+            "the fresh market is not dragged back by its stale sibling market");
     }
 
     [Fact]
-    public async Task Dashboard_ACropWithNoMarkets_IsServedByTheEconomicCentre_AndNotFlagged()
+    public async Task Dashboard_AWatchedMarketWithNoData_IsAnHonestNull_NeverAnotherMarketsPrice()
     {
+        // The substitution the redesign removes. Dambulla HAS a Carrot price; Keppetipola does not. The
+        // Keppetipola tab must say so rather than quietly show Dambulla's number under Keppetipola's name.
         var store = NewStore();
-        Seed(store, UserA, Carrot);
+        Seed(store, UserA, Carrot, new[] { Keppetipola, Dambulla });
         store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 26), min: 300m, max: 320m);
 
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
-        var price = result.Data.Items.Single().Price!;
-        price.MarketId.Should().Be(Dambulla);
-        price.IsFallbackMarket.Should().BeFalse(
-            "the economic centre IS the default for a crop with no chosen market — calling it a fallback "
-            + "would tell the farmer their market failed when they never picked one");
+        var kep = Block(result.Data, Carrot, Keppetipola);
+        Assert.Null(kep.Price);
+        kep.PriceUnavailableReason.Should().Be(PortfolioUnavailableReasons.NoRecentPrice,
+            "the farmer chose this market because it is where they can sell; another market's number "
+            + "under its name would be a lie about their options");
+
+        Block(result.Data, Carrot, Dambulla).Price!.Price.Should().Be(310m,
+            "the market that does have data is unaffected");
     }
 
     [Fact]
-    public async Task Dashboard_FallsBackToTheEconomicCentre_AndFlagsIt()
+    public async Task Dashboard_NoPriceAtAnyOfACropsMarkets_StillListsThemAll_AndTheCropAppears()
     {
         var store = NewStore();
-        Seed(store, UserA, Carrot, new[] { Keppetipola });
-        // Nothing at Keppetipola for this crop; Dambulla has it.
-        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 26), min: 300m, max: 320m);
-
-        var result = await DashboardHandler(store)
-            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
-
-        var price = result.Data.Items.Single().Price!;
-        price.MarketId.Should().Be(Dambulla);
-        price.MarketName.Should().Be("Dambulla Dedicated Economic Centre");
-        price.IsFallbackMarket.Should().BeTrue(
-            "showing another market's price as the farmer's own, unlabelled, would be dishonest");
-    }
-
-    [Fact]
-    public async Task Dashboard_MixedCrops_FallBackIndividually()
-    {
-        var store = NewStore();
-        Seed(store, UserA, Carrot, new[] { Keppetipola }, dayOffset: 0);
-        Seed(store, UserA, Tomato, new[] { Keppetipola }, dayOffset: 1);
-        store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 7, 25), min: 180m, max: 200m);
-        store.AddObservation(Dambulla, Tomato, new DateOnly(2026, 7, 25), min: 100m, max: 120m);
-
-        var result = await DashboardHandler(store)
-            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
-
-        result.Data.Items.Single(i => i.CropId == Carrot).Price!.IsFallbackMarket.Should().BeFalse();
-        result.Data.Items.Single(i => i.CropId == Tomato).Price!.IsFallbackMarket.Should().BeTrue();
-    }
-
-    [Fact]
-    public async Task Dashboard_NoPriceAnywhere_IsANullLegWithAReason_AndTheCropStillAppears()
-    {
-        var store = NewStore();
-        Seed(store, UserA, Carrot, new[] { Keppetipola });
+        Seed(store, UserA, Carrot, new[] { Keppetipola, Pettah });
 
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
         var item = result.Data.Items.Should().ContainSingle().Subject;
+        item.Markets.Should().HaveCount(2, "a market with nothing to show is still a market they chose");
+        item.Markets.Should().OnlyContain(
+            m => m.PriceUnavailableReason == PortfolioUnavailableReasons.NoRecentPrice);
         // Assert.Null rather than Should().BeNull(): FluentAssertions 8 binds a bare DTO reference to its
         // enum overload, so the object cast (or this) is needed for a nullable class member.
-        Assert.Null(item.Price);
-        item.PriceUnavailableReason.Should().Be(PortfolioUnavailableReasons.NoRecentPrice,
-            "a crop the farmer added always appears; a missing price is stated, never invented");
+        Assert.Null(item.Markets[0].Price);
     }
+
+    [Fact]
+    public async Task Dashboard_CarriesThePlantingDateOnTheCrop()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla }, plantedDate: Planted);
+        Seed(store, UserA, Tomato, new[] { Dambulla }, dayOffset: 1);
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        Item(result.Data, Carrot).PlantedDate.Should().Be("2026-05-01");
+        Item(result.Data, Tomato).PlantedDate.Should().BeNull(
+            "not recorded is a legitimate state, not missing data");
+    }
+
+    // GET /dashboard — the trend leg, per (crop, market).
 
     [Theory]
     [InlineData(180, 200, 200, 220, "up")]
     [InlineData(200, 220, 180, 200, "down")]
     [InlineData(180, 200, 180, 200, "steady")]
-    public async Task Dashboard_TrendComparesAgainstTheImmediatelyPreviousObservation(
+    public async Task Dashboard_TrendComparesAgainstTheImmediatelyPreviousObservationAtThatMarket(
         decimal prevMin, decimal prevMax, decimal latestMin, decimal latestMax, string expected)
     {
         var store = NewStore();
@@ -1108,11 +1206,30 @@ public class PortfolioHandlerTests
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
-        var price = result.Data.Items.Single().Price!;
+        var price = Block(result.Data, Carrot, Dambulla).Price!;
         price.Direction.Should().Be(expected);
         price.PreviousObservedDate.Should().Be("2026-07-24");
         price.PreviousPrice.Should().Be((prevMin + prevMax) / 2m);
         price.ChangePct.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Dashboard_TrendIsPerMarket_NotPooledAcrossACropsMarkets()
+    {
+        // Two markets, opposite movements for the same crop. Pooling the observations would produce one
+        // direction for both blocks — and at least one of them would be wrong.
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Keppetipola, Dambulla });
+        store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 7, 24), min: 180m, max: 200m); // 190
+        store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 7, 25), min: 200m, max: 220m); // 210 up
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 24), min: 300m, max: 320m);    // 310
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 25), min: 280m, max: 300m);    // 290 down
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        Block(result.Data, Carrot, Keppetipola).Price!.Direction.Should().Be("up");
+        Block(result.Data, Carrot, Dambulla).Price!.Direction.Should().Be("down");
     }
 
     [Fact]
@@ -1125,7 +1242,7 @@ public class PortfolioHandlerTests
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
-        var price = result.Data.Items.Single().Price!;
+        var price = Block(result.Data, Carrot, Dambulla).Price!;
         price.Price.Should().Be(190m);
         price.Direction.Should().BeNull("there is nothing to compare against; 'steady' would be a claim");
         price.ChangePct.Should().BeNull();
@@ -1149,19 +1266,17 @@ public class PortfolioHandlerTests
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
-        var price = result.Data.Items.Single().Price!;
+        var price = Block(result.Data, Carrot, Dambulla).Price!;
         price.Price.Should().Be(190m, "the latest price is still served");
         price.Direction.Should().BeNull(
             "a month-old quote is not what the farmer means by 'versus last time'");
     }
 
     [Fact]
-    public async Task Dashboard_AStaleCropKeepsItsOwnPrice_WhenAFresherCropIsAlsoWatched()
+    public async Task Dashboard_AStaleCropKeepsItsOwnPrice_WhenAFresherCropSharesTheMarket()
     {
-        // The bug this pins: anchoring the price window on the MAX date across ALL watched crops made a
-        // crop's staleness cutoff depend on its siblings. Carrot (last quoted 1 June at its own market)
-        // showed its price when watched alone and vanished — or worse, came back flagged as an
-        // economic-centre fallback price — as soon as daily-quoted Tomato was added.
+        // The sibling-crop independence law, now per market. Anchoring on the MAX date across the crops
+        // sharing a market would make Carrot's June price vanish the moment daily-quoted Tomato was added.
         var store = NewStore();
         Seed(store, UserA, Carrot, new[] { Keppetipola }, dayOffset: 0);
         Seed(store, UserA, Tomato, new[] { Keppetipola }, dayOffset: 1);
@@ -1169,24 +1284,17 @@ public class PortfolioHandlerTests
         store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 6, 1), min: 180m, max: 200m);
         store.AddObservation(Keppetipola, Tomato, new DateOnly(2026, 7, 26), min: 100m, max: 120m);
         store.AddObservation(Keppetipola, Tomato, new DateOnly(2026, 7, 27), min: 120m, max: 140m);
-        // The economic centre has a fresh Carrot price. It must NOT be reached for: the crop's own market
-        // has a real Carrot price, and labelling Dambulla's number as the farmer's own would be dishonest.
-        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 27), min: 300m, max: 320m);
 
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
-        var carrot = result.Data.Items.Single(i => i.CropId == Carrot);
-        var price = carrot.Price!;
-        price.Price.Should().Be(190m, "the crop's own latest price is served however old it is");
-        price.ObservedDate.Should().Be("2026-06-01");
-        price.MarketId.Should().Be(Keppetipola);
-        price.IsFallbackMarket.Should().BeFalse(
-            "the crop's market does have this price — falling back would misreport whose price it is");
-        price.Direction.Should().BeNull("there is no second Carrot observation to compare against");
+        var carrot = Block(result.Data, Carrot, Keppetipola);
+        carrot.Price!.Price.Should().Be(190m, "the crop's own latest price is served however old it is");
+        carrot.Price.ObservedDate.Should().Be("2026-06-01");
+        carrot.Price.Direction.Should().BeNull("there is no second Carrot observation to compare against");
         carrot.PriceUnavailableReason.Should().BeNull();
 
-        var tomato = result.Data.Items.Single(i => i.CropId == Tomato).Price!;
+        var tomato = Block(result.Data, Tomato, Keppetipola).Price!;
         tomato.ObservedDate.Should().Be("2026-07-27");
         tomato.Direction.Should().Be("up", "the fresher crop is unaffected by the staler one");
     }
@@ -1203,10 +1311,11 @@ public class PortfolioHandlerTests
         store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 6, 1), min: 180m, max: 200m);
         store.AddObservation(Dambulla, Tomato, new DateOnly(2026, 7, 27), min: 100m, max: 120m);
 
-        var result = await DashboardHandler(store)
-            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+        var price = Block(
+            (await DashboardHandler(store).Handle(
+                new GetPortfolioDashboardQuery { UserId = UserA }, default)).Data,
+            Carrot, Dambulla).Price!;
 
-        var price = result.Data.Items.Single(i => i.CropId == Carrot).Price!;
         price.Direction.Should().Be("up",
             "the 30-day trend window is cut from Carrot's own latest date, not from Tomato's");
         price.PreviousObservedDate.Should().Be("2026-05-30");
@@ -1214,7 +1323,7 @@ public class PortfolioHandlerTests
     }
 
     [Fact]
-    public async Task Dashboard_AveragesSeveralRowsForTheSameCropAndDay()
+    public async Task Dashboard_AveragesSeveralRowsForTheSameCropMarketAndDay()
     {
         var store = NewStore();
         Seed(store, UserA, Carrot, new[] { Dambulla });
@@ -1225,7 +1334,58 @@ public class PortfolioHandlerTests
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
-        result.Data.Items.Single().Price!.Price.Should().Be(200m);
+        Block(result.Data, Carrot, Dambulla).Price!.Price.Should().Be(200m);
+    }
+
+    [Fact]
+    public async Task Dashboard_AQuotelessRowNeverWinsTheAnchor_TheOlderRealPriceStillServes()
+    {
+        // A commodity listed but not traded that day: unit-confirmed, real, and carrying no price in any
+        // column. If such a row could win the anchor, the trend window would be cut from a day with no
+        // price, the genuine older price could fall outside it, and the block would report
+        // no_recent_price for a market that demonstrably HAS a price. The store's price predicate and
+        // ObservedUnitPrice.From's null case are the same rule so that cannot happen.
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla });
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 5, 30), min: 180m, max: 200m);
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 6, 1), min: 200m, max: 220m);
+        // The freshest row at this market, quoting nothing — and MORE than TrendWindowDays after the last
+        // real price, which is what makes the bug visible: anchored here, the window (cut back 30 days
+        // from 27 July) excludes both real prices and the block would report no_recent_price for a market
+        // whose price is sitting right there.
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 27));
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        var block = Block(result.Data, Carrot, Dambulla);
+        block.PriceUnavailableReason.Should().BeNull(
+            "the market has a price; only its newest ROW has none");
+        block.Price!.Price.Should().Be(210m);
+        block.Price.ObservedDate.Should().Be("2026-06-01",
+            "the anchor lands on the newest PRICED day, not on the newest row");
+        block.Price.Direction.Should().Be("up",
+            "and the trend window is cut from that priced anchor, so the earlier real price is still "
+            + "inside it");
+        block.Price.PreviousObservedDate.Should().Be("2026-05-30");
+    }
+
+    [Fact]
+    public async Task Dashboard_AMarketWithOnlyQuotelessRows_ReportsNoPrice()
+    {
+        // The other half of the same rule: rows that carry no quote are not prices, so a market holding
+        // only those is honestly empty rather than serving a zero.
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Keppetipola });
+        store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 7, 25));
+        store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 7, 26));
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        var block = Block(result.Data, Carrot, Keppetipola);
+        Assert.Null(block.Price);
+        block.PriceUnavailableReason.Should().Be(PortfolioUnavailableReasons.NoRecentPrice);
     }
 
     [Fact]
@@ -1238,9 +1398,52 @@ public class PortfolioHandlerTests
         var result = await DashboardHandler(store)
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
-        result.Data.Items.Single().Price!.Price.Should().Be(175m,
+        Block(result.Data, Carrot, Dambulla).Price!.Price.Should().Be(175m,
             "the shared ObservedUnitPrice precedence, not a portfolio-only rule");
     }
+
+    // GET /dashboard — read batching.
+
+    [Fact]
+    public async Task Dashboard_BatchesThePriceReadsByMarket_NotByCropTimesMarket()
+    {
+        // Three crops across two markets = 6 (crop, market) blocks, but only 2 distinct markets. A
+        // per-block read would be 6 anchor calls; the caps (10 crops x 3 markets) exist precisely so this
+        // stays bounded, and grouping is what keeps it that way.
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla, Keppetipola }, dayOffset: 0);
+        Seed(store, UserA, Tomato, new[] { Dambulla, Keppetipola }, dayOffset: 1);
+        Seed(store, UserA, Onion, new[] { Dambulla, Keppetipola }, dayOffset: 2);
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 25), min: 180m, max: 200m);
+        store.AddObservation(Keppetipola, Tomato, new DateOnly(2026, 7, 25), min: 100m, max: 120m);
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        result.Data.Items.Should().HaveCount(3);
+        store.AnchorCallMarkets.Should().HaveCount(2);
+        store.AnchorCallMarkets.Should().OnlyHaveUniqueItems("one anchor read per DISTINCT market");
+        store.ObservationCallMarkets.Should().OnlyHaveUniqueItems("and one window read per distinct market");
+        store.ObservationCallMarkets.Should().HaveCountLessThanOrEqualTo(2);
+    }
+
+    [Fact]
+    public async Task Dashboard_ACropSharingAMarketWithAnother_IsReadInTheSamePass()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla }, dayOffset: 0);
+        Seed(store, UserA, Tomato, new[] { Dambulla }, dayOffset: 1);
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 25), min: 180m, max: 200m);
+        store.AddObservation(Dambulla, Tomato, new DateOnly(2026, 7, 25), min: 100m, max: 120m);
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        store.AnchorCallMarkets.Should().ContainSingle();
+        Block(result.Data, Carrot, Dambulla).Price!.Price.Should().Be(190m);
+        Block(result.Data, Tomato, Dambulla).Price!.Price.Should().Be(110m);
+    }
+
 
     // GET /dashboard — prediction leg.
 
@@ -1302,7 +1505,9 @@ public class PortfolioHandlerTests
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
         var item = result.Data.Items.Single();
-        Assert.NotNull(item.Price); // the price leg is independent of the prediction leg
+        // The price leg is independent of the prediction leg: one market block with a real price, and a
+        // null prediction beside it.
+        Assert.NotNull(item.Markets.Single().Price);
         Assert.Null(item.Prediction);
         item.PredictionUnavailableReason.Should().Be(PortfolioUnavailableReasons.NoSnapshot);
     }

@@ -153,10 +153,12 @@ public class PortfolioController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // GET /api/portfolio/dashboard — one item per watched crop: latest observed price + trend at the home
-    // market (economic-centre fallback, flagged) plus the newest frozen forecast snapshot.
-    // 200 with an empty items list for an empty watchlist. Both decorations are fail-soft: a missing leg is
-    // null with a reason code, never a fabricated number and never a failed request.
+    // GET /api/portfolio/dashboard — one item per watched crop, carrying one price block per market that
+    // crop is watched at (a crop with no chosen market gets a single economic-centre block flagged
+    // isDefaultMarket) plus the crop's newest frozen forecast snapshot.
+    // 200 with an empty items list for an empty watchlist. Every leg is fail-soft: a missing price or
+    // prediction is null with a reason code, never a fabricated number and never a failed request. A
+    // watched market with no data reports its own emptiness — it is never served another market's price.
     [HttpGet("dashboard")]
     public async Task<IActionResult> GetDashboard()
     {

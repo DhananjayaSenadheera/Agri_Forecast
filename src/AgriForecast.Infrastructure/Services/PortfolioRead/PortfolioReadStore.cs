@@ -21,9 +21,9 @@ public class PortfolioReadStore : IPortfolioReadStore
     {
         // The watched markets are a correlated collection subquery joined to Markets for the display
         // fields. Ordered oldest-chosen first (CreatedAtUtc, then MarketId as a deterministic tiebreak for
-        // two markets added in the same request), because the dashboard's transitional price rule reads
-        // "the FIRST watched market" — an unordered projection would make which market serves a crop
-        // depend on the query plan.
+        // two markets added in the same request): this IS the wire order of the dashboard's market blocks,
+        // and markets[0] is the tab the farmer opens on. An unordered projection would let the query plan
+        // decide which market a farmer sees first.
         return await _db.UserCropWatchlists.AsNoTracking()
             .Where(w => w.UserId == userId)
             .Join(
@@ -144,20 +144,20 @@ public class PortfolioReadStore : IPortfolioReadStore
     {
         return await _db.Markets.AsNoTracking()
             .Where(m => m.Id == marketId)
-            .Select(m => new PortfolioMarketRow(m.Id, m.Name, m.IsEconomicCenter))
+            .Select(m => new PortfolioMarketRow(m.Id, m.Name, m.ShortCode, m.IsEconomicCenter))
             .FirstOrDefaultAsync(ct);
     }
 
     public async Task<PortfolioMarketRow?> GetEconomicCentreMarketAsync(CancellationToken ct = default)
     {
         // Deliberately NOT filtered on IsActive: the economic centre is the structural national price
-        // anchor, so deactivating it in the admin UI must not silently strip the dashboard of its default
-        // home market and its price fallback. Ordered by MarketCode so the answer is deterministic if a
+        // anchor, so deactivating it in the admin UI must not silently strip a crop with no chosen market
+        // of the only block it would have. Ordered by MarketCode so the answer is deterministic if a
         // second market is ever flagged; today exactly one row (Dambulla, MKT00000001) carries the flag.
         return await _db.Markets.AsNoTracking()
             .Where(m => m.IsEconomicCenter)
             .OrderBy(m => m.MarketCode)
-            .Select(m => new PortfolioMarketRow(m.Id, m.Name, m.IsEconomicCenter))
+            .Select(m => new PortfolioMarketRow(m.Id, m.Name, m.ShortCode, m.IsEconomicCenter))
             .FirstOrDefaultAsync(ct);
     }
 
@@ -165,8 +165,21 @@ public class PortfolioReadStore : IPortfolioReadStore
         => await _db.Crops.AsNoTracking().AnyAsync(c => c.Id == cropId, ct);
 
     // The single fail-closed predicate shared by the two price queries in this store.
+    //
     // IsUnitConfirmed = 1 is the unified hold flag: it excludes both unit-unproven rows and rows the
     // Python data-quality machinery has quarantined as outliers.
+    //
+    // THE PRICE PREDICATE IS THE EXACT NEGATION OF ObservedUnitPrice.From RETURNING NULL, and it has to
+    // be. A row can be unit-confirmed and carry no quote at all (a commodity listed but not traded that
+    // day); the handler skips such rows because From gives it nothing to show. If the store still counted
+    // them, one of them could be the LATEST row at a market and would win the anchor — the trend window
+    // would then be cut from a day with no price, the real (older) price could fall outside it, and the
+    // block would report no_recent_price for a market that demonstrably has a price. Store and handler
+    // must agree on "has a price" or the anchor and the data disagree.
+    //
+    // Deliberately NOT the market-overview spelling (Min > 0 && Max > 0): the dashboard serves
+    // wholesale-only and retail-only rows through From's precedence, so requiring a full band here would
+    // silently drop prices the handler is perfectly able to render.
     private IQueryable<Domain.Entities.PriceObservation> UsableRows(
         IReadOnlyCollection<Guid> cropIds, Guid marketId)
     {
@@ -176,6 +189,8 @@ public class PortfolioReadStore : IPortfolioReadStore
             po.IsUnitConfirmed
             && po.MarketId == marketId
             && po.CropId != null
-            && ids.Contains(po.CropId.Value));
+            && ids.Contains(po.CropId.Value)
+            && (po.MinPrice > 0m || po.MaxPrice > 0m
+                || po.WholesalePrice > 0m || po.RetailPrice > 0m));
     }
 }
