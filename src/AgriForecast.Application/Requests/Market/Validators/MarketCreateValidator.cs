@@ -26,6 +26,7 @@ public class MarketCreateValidator : AbstractValidator<MarketCreateCommand>
         // supplied must be a compact letters-and-digits abbreviation: it is rendered beside the market
         // name in narrow UI chips, and the column is nvarchar(8).
         RuleFor(c => c.CreateDto.ShortCode)
+            .MinimumLength(2).WithMessage("Short code must be at least 2 characters.")
             .MaximumLength(8).WithMessage("Short code must not exceed 8 characters.")
             .Matches("^[A-Za-z0-9]+$").WithMessage("Short code must contain letters and digits only.")
             .When(c => !string.IsNullOrWhiteSpace(c.CreateDto.ShortCode));

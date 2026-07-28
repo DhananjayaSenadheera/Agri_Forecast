@@ -1,3 +1,4 @@
+using System.Reflection;
 using AgriForecast.Domain.Entities;
 using AgriForecast.Domain.Enums;
 using AgriForecast.Infrastructure.Database;
@@ -5,6 +6,8 @@ using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Migrations.Operations;
 
 namespace AgriForecast.Tests;
 
@@ -125,6 +128,102 @@ public class MarketShortCodeTests
 
         ((string)dambulla["ShortCode"]!).Should().Be("DEC");
         ((string)dambulla["Name"]!).Should().Be("Dambulla Dedicated Economic Centre");
+    }
+
+    // Seed <-> migration parity. HasData is what a fresh database gets; a DEPLOYED database only ever sees
+    // what a migration wrote. Editing a code in HasData without adding a migration leaves every test green
+    // while production keeps the old value — this is the test that refuses that.
+
+    /// <summary>
+    /// Replays every migration in the Infrastructure assembly, in migration-id order, and returns the
+    /// Markets.ShortCode values a deployed database would hold. Only operations that touch the ShortCode
+    /// column count, so a later migration that renames a code simply overwrites the earlier value and this
+    /// stays true — the test fails only while a HasData edit has no migration behind it.
+    /// </summary>
+    private static IReadOnlyDictionary<Guid, string> ShortCodesWrittenByMigrations()
+    {
+        var state = new Dictionary<Guid, string>();
+
+        var migrations = typeof(AgriForecastDbContext).Assembly.GetTypes()
+            .Where(t => typeof(Migration).IsAssignableFrom(t) && !t.IsAbstract)
+            .Select(t => new { Type = t, Id = t.GetCustomAttribute<MigrationAttribute>()?.Id })
+            .Where(m => m.Id is not null)
+            .OrderBy(m => m.Id, StringComparer.Ordinal);
+
+        foreach (var migration in migrations)
+        {
+            var operations = ((Migration)Activator.CreateInstance(migration.Type)!).UpOperations;
+
+            foreach (var operation in operations)
+            {
+                switch (operation)
+                {
+                    // The seeded rows already exist, so HasData changes arrive as UpdateData keyed by Id.
+                    case UpdateDataOperation update
+                        when update.Table == "Markets"
+                            && update.KeyColumns.SequenceEqual(new[] { "Id" })
+                            && update.Columns.Contains("ShortCode"):
+                        ApplyRows(
+                            state,
+                            idSource: update.KeyValues, idIndex: 0,
+                            valueSource: update.Values,
+                            codeIndex: Array.IndexOf(update.Columns, "ShortCode"));
+                        break;
+
+                    // A future seeded market arrives as InsertData carrying the column outright.
+                    case InsertDataOperation insert
+                        when insert.Table == "Markets"
+                            && insert.Columns.Contains("Id")
+                            && insert.Columns.Contains("ShortCode"):
+                        ApplyRows(
+                            state,
+                            idSource: insert.Values, idIndex: Array.IndexOf(insert.Columns, "Id"),
+                            valueSource: insert.Values,
+                            codeIndex: Array.IndexOf(insert.Columns, "ShortCode"));
+                        break;
+                }
+            }
+        }
+
+        return state;
+
+        static void ApplyRows(
+            Dictionary<Guid, string> state,
+            object?[,] idSource, int idIndex, object?[,] valueSource, int codeIndex)
+        {
+            for (var row = 0; row < valueSource.GetLength(0); row++)
+                state[(Guid)idSource[row, idIndex]!] = (string)valueSource[row, codeIndex]!;
+        }
+    }
+
+    [Fact]
+    public void Seed_ShortCodes_AreAllCarriedByAMigration()
+    {
+        var deployed = ShortCodesWrittenByMigrations();
+
+        foreach (var row in SeededMarkets())
+        {
+            var id = (Guid)row["Id"]!;
+            var name = (string)row["Name"]!;
+            var seeded = (string)row["ShortCode"]!;
+
+            deployed.Should().ContainKey(id,
+                $"{name}'s short code only reaches an existing database through a migration — add one");
+            deployed[id].Should().Be(seeded,
+                $"{name} is seeded as '{seeded}' but the migrations write "
+                + $"'{(deployed.TryGetValue(id, out var v) ? v : "<nothing>")}': a renamed code needs a new "
+                + "migration to carry it, or fresh and deployed databases silently disagree");
+        }
+    }
+
+    [Fact]
+    public void Migrations_DoNotWriteShortCodesForMarketsTheSeedDoesNotKnow()
+    {
+        // The other direction: a migration that codes a row the seed has since dropped would leave a value
+        // in deployed databases that no test or seed accounts for.
+        var seededIds = SeededMarkets().Select(r => (Guid)r["Id"]!).ToHashSet();
+
+        ShortCodesWrittenByMigrations().Keys.Should().OnlyContain(id => seededIds.Contains(id));
     }
 
     [Fact]

@@ -204,6 +204,8 @@ public class MarketCreateTests
     }
 
     [Theory]
+    // A single character is not a recognisable abbreviation of anything.
+    [InlineData("K")]
     // Longer than the nvarchar(8) column.
     [InlineData("KEPPETIPOLA")]
     // Punctuation and spaces would not render as a code chip.
