@@ -187,8 +187,9 @@ public class GetPortfolioDashboardQueryHandler
             // The immediately previous observation, if it is close enough to THIS (crop, market)'s own
             // latest. Not a fixed lag: the trend is "versus last time this crop was quoted HERE", which is
             // what the farmer actually compares to. The eligibility test is re-stated here rather than left
-            // to the store's window so the rule lives where it is read — and so it stays measured against
-            // the latest USABLE row, which can be older than the anchor if the anchor day carried no price.
+            // to the store's window so the rule lives where it is read; it measures from the latest PRICED
+            // day, which is also the anchor — the store only counts rows that carry a price, so a
+            // quote-less day can neither win the anchor nor shift this window.
             var previous = series.Count >= 2 && series[^2].Date >= EarliestComparable(latest.Date)
                 ? series[^2]
                 : null;

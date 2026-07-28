@@ -14,8 +14,14 @@ public static class PortfolioUnavailableReasons
     /// <summary>
     /// This market has never published a usable price for this crop. Scoped to ONE market block: the
     /// farmer chose that market, so its tab reports its own emptiness rather than borrowing another
-    /// market's number. "Usable" is the fail-closed filter (unit-confirmed, not quarantined) the price
-    /// endpoints already apply, so a held or unit-unproven row counts as no price.
+    /// market's number.
+    /// <para>
+    /// "Usable" is two things, and both are applied in the STORE so the query and the handler agree on
+    /// which rows exist: the fail-closed hold filter (unit-confirmed, not quarantined), and carrying an
+    /// actual quote in at least one price column. A commodity that was listed but not traded that day is
+    /// a real row with no price, and it counts as no price here — it must not be able to stand in front of
+    /// an older row that does have one.
+    /// </para>
     /// <para>
     /// It is not a staleness signal: a price of any age is still a price and is served. This means the
     /// market has nothing at all for this crop.

@@ -102,8 +102,9 @@ public class PortfolioHandlerTests
         public FakeWatchlist Watchlist = new();
 
         public readonly Dictionary<Guid, (string Name, string? Code)> Crops = new();
+        // PortfolioMarketRow carries the short code, so there is ONE source for a market's display
+        // fields — a second dictionary would let a fixture's name and chip drift apart.
         public readonly Dictionary<Guid, PortfolioMarketRow> Markets = new();
-        public readonly Dictionary<Guid, string> MarketShortCodes = new();
         public Guid? EconomicCentreId;
 
         // (marketId, cropId) -> observations. Keyed exactly as the real store queries them.
@@ -122,7 +123,6 @@ public class PortfolioHandlerTests
         public void AddMarket(Guid id, string name, bool isEconomicCentre = false, string shortCode = "MKT")
         {
             Markets[id] = new PortfolioMarketRow(id, name, shortCode, isEconomicCentre);
-            MarketShortCodes[id] = shortCode;
             if (isEconomicCentre) EconomicCentreId = id;
         }
 
@@ -150,7 +150,7 @@ public class PortfolioHandlerTests
                         .Select(m => new WatchlistMarketRow(
                             m.MarketId,
                             Markets.TryGetValue(m.MarketId, out var mk) ? mk.Name : "?",
-                            MarketShortCodes.TryGetValue(m.MarketId, out var sc) ? sc : string.Empty))
+                            Markets.TryGetValue(m.MarketId, out var sc) ? sc.ShortCode : string.Empty))
                         .ToList(),
                     r.CreatedAtUtc))
                 .OrderBy(r => r.CropName)
@@ -160,10 +160,16 @@ public class PortfolioHandlerTests
             return Task.FromResult<IReadOnlyList<WatchlistRow>>(rows);
         }
 
+        // Mirrors PortfolioReadStore.UsableRows EXACTLY, including its price predicate: a unit-confirmed
+        // row carrying no quote in any column is not an observation as far as these queries are concerned.
+        // A fake that returned quote-less rows would hide the anchor bug this mirrors the fix for.
         private IEnumerable<PortfolioObservationRow> Usable(
             IReadOnlyCollection<Guid> cropIds, Guid marketId)
-            => Observations.Where(o => o.MarketId == marketId && cropIds.Contains(o.Row.CropId))
-                .Select(o => o.Row);
+            => Observations
+                .Where(o => o.MarketId == marketId && cropIds.Contains(o.Row.CropId))
+                .Select(o => o.Row)
+                .Where(r => r.MinPrice > 0m || r.MaxPrice > 0m
+                            || r.WholesalePrice > 0m || r.RetailPrice > 0m);
 
         // Per-crop MAX, exactly like the real store's GROUP BY — a crop with data is listed with its OWN
         // freshest date, never with the set's.
@@ -1329,6 +1335,57 @@ public class PortfolioHandlerTests
             .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
 
         Block(result.Data, Carrot, Dambulla).Price!.Price.Should().Be(200m);
+    }
+
+    [Fact]
+    public async Task Dashboard_AQuotelessRowNeverWinsTheAnchor_TheOlderRealPriceStillServes()
+    {
+        // A commodity listed but not traded that day: unit-confirmed, real, and carrying no price in any
+        // column. If such a row could win the anchor, the trend window would be cut from a day with no
+        // price, the genuine older price could fall outside it, and the block would report
+        // no_recent_price for a market that demonstrably HAS a price. The store's price predicate and
+        // ObservedUnitPrice.From's null case are the same rule so that cannot happen.
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla });
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 5, 30), min: 180m, max: 200m);
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 6, 1), min: 200m, max: 220m);
+        // The freshest row at this market, quoting nothing — and MORE than TrendWindowDays after the last
+        // real price, which is what makes the bug visible: anchored here, the window (cut back 30 days
+        // from 27 July) excludes both real prices and the block would report no_recent_price for a market
+        // whose price is sitting right there.
+        store.AddObservation(Dambulla, Carrot, new DateOnly(2026, 7, 27));
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        var block = Block(result.Data, Carrot, Dambulla);
+        block.PriceUnavailableReason.Should().BeNull(
+            "the market has a price; only its newest ROW has none");
+        block.Price!.Price.Should().Be(210m);
+        block.Price.ObservedDate.Should().Be("2026-06-01",
+            "the anchor lands on the newest PRICED day, not on the newest row");
+        block.Price.Direction.Should().Be("up",
+            "and the trend window is cut from that priced anchor, so the earlier real price is still "
+            + "inside it");
+        block.Price.PreviousObservedDate.Should().Be("2026-05-30");
+    }
+
+    [Fact]
+    public async Task Dashboard_AMarketWithOnlyQuotelessRows_ReportsNoPrice()
+    {
+        // The other half of the same rule: rows that carry no quote are not prices, so a market holding
+        // only those is honestly empty rather than serving a zero.
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Keppetipola });
+        store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 7, 25));
+        store.AddObservation(Keppetipola, Carrot, new DateOnly(2026, 7, 26));
+
+        var result = await DashboardHandler(store)
+            .Handle(new GetPortfolioDashboardQuery { UserId = UserA }, default);
+
+        var block = Block(result.Data, Carrot, Keppetipola);
+        Assert.Null(block.Price);
+        block.PriceUnavailableReason.Should().Be(PortfolioUnavailableReasons.NoRecentPrice);
     }
 
     [Fact]
