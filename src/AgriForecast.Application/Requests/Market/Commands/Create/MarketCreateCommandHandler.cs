@@ -42,6 +42,20 @@ public class MarketCreateCommandHandler : IRequestHandler<MarketCreateCommand, R
             return Result<bool>.Failure("Market details cannot be null.");
         }
 
+        // Reject a duplicate display code here rather than letting the unique index throw: the DB
+        // violation would surface as an opaque 500, this returns the structured error the admin can act on.
+        var shortCode = MarketEntity.NormalizeShortCode(dto.ShortCode);
+        if (shortCode.Length > 0)
+        {
+            var clash = await _marketRepository.GetOneAsyncInclude(m => m.ShortCode == shortCode);
+            if (clash is not null)
+            {
+                _logger.LogInformation(
+                    "Failed to create market: short code {ShortCode} is already in use.", shortCode);
+                return Result<bool>.Failure($"Short code '{shortCode}' is already used by another market.");
+            }
+        }
+
         var marketCode = await _codeSettings.GetMktCode();
         if (string.IsNullOrEmpty(marketCode))
         {

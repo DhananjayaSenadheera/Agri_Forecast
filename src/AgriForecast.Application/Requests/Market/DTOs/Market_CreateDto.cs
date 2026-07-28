@@ -16,4 +16,8 @@ public class Market_CreateDto
 
     // Defaults false. Set true to register a Dedicated Economic Centre.
     public bool IsEconomicCenter { get; set; }
+
+    // Optional short display code (e.g. "KEP"). Upper-cased on the way in and unique among assigned
+    // codes; omitting it registers the market without a display code rather than inventing one.
+    public string? ShortCode { get; set; }
 }

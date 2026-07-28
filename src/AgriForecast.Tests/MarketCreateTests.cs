@@ -33,14 +33,16 @@ public class MarketCreateTests
         string name = "Nuwara Eliya DEC",
         string? district = "Nuwara Eliya",
         MarketType type = MarketType.DEC,
-        bool isEco = false) => new()
+        bool isEco = false,
+        string? shortCode = null) => new()
     {
         CreateDto = new Market_CreateDto
         {
             Name = name,
             District = district,
             MarketType = type,
-            IsEconomicCenter = isEco
+            IsEconomicCenter = isEco,
+            ShortCode = shortCode
         }
     };
 
@@ -179,5 +181,82 @@ public class MarketCreateTests
         captured[0].Name.Should().Be("Pettah");
         captured[0].District.Should().Be("Colombo");
         captured[0].MarketType.Should().Be(MarketType.Wholesale);
+    }
+
+    // Short display code.
+
+    [Fact]
+    public async Task Validator_OmittedShortCode_Passes()
+    {
+        // Optional by design: a market can be registered before anyone has chosen an abbreviation.
+        var result = await _validator.ValidateAsync(Cmd(shortCode: null));
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData("KEP")]
+    [InlineData("kep")]
+    [InlineData("NE2")]
+    public async Task Validator_ReasonableShortCode_Passes(string code)
+    {
+        var result = await _validator.ValidateAsync(Cmd(shortCode: code));
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Theory]
+    // Longer than the nvarchar(8) column.
+    [InlineData("KEPPETIPOLA")]
+    // Punctuation and spaces would not render as a code chip.
+    [InlineData("KE P")]
+    [InlineData("KEP-1")]
+    public async Task Validator_UnusableShortCode_Fails(string code)
+    {
+        var result = await _validator.ValidateAsync(Cmd(shortCode: code));
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().Contain(e => e.PropertyName == "CreateDto.ShortCode");
+    }
+
+    [Fact]
+    public async Task Handler_NormalizesShortCodeOnTheWayIn()
+    {
+        var (handler, _, _, captured) = BuildHandler();
+
+        await handler.Handle(Cmd(shortCode: " nuw "), default);
+
+        captured.Should().ContainSingle();
+        captured[0].ShortCode.Should().Be("NUW");
+    }
+
+    [Fact]
+    public async Task Handler_OmittedShortCode_RegistersWithoutOne()
+    {
+        var (handler, repo, _, captured) = BuildHandler();
+
+        var result = await handler.Handle(Cmd(shortCode: null), default);
+
+        result.IsSuccess.Should().BeTrue();
+        captured.Should().ContainSingle();
+        captured[0].ShortCode.Should().BeEmpty();
+        // No code to clash with, so the handler must not spend a lookup checking for one.
+        repo.Verify(
+            r => r.GetOneAsyncInclude(It.IsAny<System.Linq.Expressions.Expression<Func<MarketEntity, bool>>>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task Handler_DuplicateShortCode_FailsStructured_WithoutPersisting()
+    {
+        var (handler, repo, uow, _) = BuildHandler();
+        repo.Setup(r => r.GetOneAsyncInclude(
+                It.IsAny<System.Linq.Expressions.Expression<Func<MarketEntity, bool>>>()))
+            .ReturnsAsync(MarketEntity.CreateNew("Kandy", "Kandy", MarketType.Wholesale, shortCode: "KAN"));
+
+        var result = await handler.Handle(Cmd(shortCode: "kan"), default);
+
+        // A structured failure the admin can read, not the opaque 500 the unique index would produce.
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("KAN");
+        repo.Verify(r => r.AddAsync(It.IsAny<MarketEntity>()), Times.Never);
+        uow.Verify(u => u.CommitAsync(), Times.Never);
     }
 }

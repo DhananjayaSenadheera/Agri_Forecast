@@ -41,6 +41,7 @@ public class MarketReadStore : IMarketReadStore
             .Select(m => new MarketListRow(
                 m.Id,
                 m.Name,
+                m.ShortCode,
                 m.District,
                 m.MarketType,
                 m.IsEconomicCenter,

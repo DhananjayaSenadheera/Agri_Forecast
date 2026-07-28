@@ -43,8 +43,9 @@ public class MarketsQueryHandlerTests
 
     private static MarketListRow Row(
         Guid id, string name, string? district, MarketType type, bool eco,
-        bool hasStoredData = false, DateOnly? lastStoredDate = null, bool isTrainingSource = false)
-        => new(id, name, district, type, eco, hasStoredData, lastStoredDate, isTrainingSource);
+        bool hasStoredData = false, DateOnly? lastStoredDate = null, bool isTrainingSource = false,
+        string shortCode = "")
+        => new(id, name, shortCode, district, type, eco, hasStoredData, lastStoredDate, isTrainingSource);
 
     // Empty.
 
@@ -121,6 +122,29 @@ public class MarketsQueryHandlerTests
         placeholder.HasStoredData.Should().BeFalse();
         placeholder.LastStoredDate.Should().BeNull();
         placeholder.IsTrainingSource.Should().BeFalse();
+    }
+
+    // Short display code.
+
+    [Fact]
+    public async Task Maps_shortCode_through_to_the_dto()
+    {
+        var store = new FakeStore
+        {
+            Rows =
+            {
+                Row(M1, "Dambulla Dedicated Economic Centre", "Matale", MarketType.DEC, true,
+                    shortCode: "DEC"),
+                // A market with no display code assigned yet: the DTO carries "", never null, so the FE
+                // can render it without a null check.
+                Row(M2, "Freshly Registered Market", "Colombo", MarketType.Wholesale, false),
+            }
+        };
+
+        var result = await Build(store).Handle(new GetMarketsQuery(), default);
+
+        result.Data.Single(m => m.Id == M1).ShortCode.Should().Be("DEC");
+        result.Data.Single(m => m.Id == M2).ShortCode.Should().NotBeNull().And.BeEmpty();
     }
 
     [Fact]

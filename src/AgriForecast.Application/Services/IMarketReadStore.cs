@@ -21,6 +21,8 @@ public interface IMarketReadStore
 public sealed record MarketListRow(
     Guid Id,
     string Name,
+    // Short display code (e.g. "DEC"); empty when unassigned. Display-only, never a key.
+    string ShortCode,
     string? District,
     MarketType MarketType,
     bool IsEconomicCenter,
