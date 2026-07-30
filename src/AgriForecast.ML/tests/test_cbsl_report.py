@@ -187,9 +187,14 @@ def _session_by_date(responses_by_yyyymmdd: dict):
     return session
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def _public_dns(monkeypatch):
-    """Resolve every host to a public IP so the private-IP block is not what fires."""
+    """Resolve every host to a public IP so the private-IP block is not what fires.
+
+    Module-wide autouse (harti's tests/test_downloader_cap.py pattern): any test
+    added to this file later also cannot make a real DNS call. Inert for the
+    parser/loader tests, which never reach netguard.
+    """
     from agriforecast_ml import netguard
     monkeypatch.setattr(netguard, "_resolve_ips", lambda host: ["8.8.8.8"])
 
@@ -197,7 +202,6 @@ def _public_dns(monkeypatch):
 _GOOD_PDF = b"%PDF-1.4 cbsl daily price report" * 50
 
 
-@pytest.mark.usefixtures("_public_dns")
 class TestDownloadNetworkGuards:
     def test_normal_small_pdf_is_cached_and_returned(self, tmp_path):
         session = _session_by_date({"20260721": _mock_pdf_response(
@@ -287,6 +291,18 @@ class TestDownloadNetworkGuards:
 
         assert len(out) == 1
         assert (tmp_path / "cbsl_2026-07-21.pdf").stat().st_size == downloader._MAX_PDF_BYTES
+
+    def test_declared_length_exactly_at_the_cap_is_allowed(self, tmp_path):
+        """Pins the ALLOW side of the Content-Length pre-check: only a header
+        strictly GREATER than the cap may reject, so a report advertising
+        exactly the cap is still downloaded."""
+        session = _session_by_date({"20260721": _mock_pdf_response(
+            _GOOD_PDF, content_length=str(downloader._MAX_PDF_BYTES))})
+
+        out = downloader.download_pdfs(tmp_path, [date(2026, 7, 21)], session=session)
+
+        assert out == [("2026-07-21", tmp_path / "cbsl_2026-07-21.pdf")]
+        assert (tmp_path / "cbsl_2026-07-21.pdf").read_bytes() == _GOOD_PDF
 
     def test_404_is_still_a_normal_gap_not_a_failure(self, tmp_path, caplog):
         weekend = _mock_pdf_response(status=404)
