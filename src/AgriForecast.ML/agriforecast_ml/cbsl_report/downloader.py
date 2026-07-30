@@ -14,6 +14,10 @@ logged and skipped (the next pass retries it — the upsert is idempotent).
 Cache convention mirrors harti/downloader.py: ``cbsl_{YYYY-MM-DD}.pdf`` in the
 cache dir; an already-cached date is never re-downloaded (the report for a
 given date is immutable once published).
+
+Every fetch goes through netguard.guarded_get (host allowlist + private-IP block
+re-checked on the initial URL AND on every redirect hop) and is streamed under a
+25 MB cap, the same choke point harti/ and cbsl_macro/ use.
 """
 from __future__ import annotations
 
@@ -21,6 +25,10 @@ import logging
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Iterable
+
+import requests
+
+from ..netguard import DisallowedUrlError, guarded_get
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +41,54 @@ URL_TEMPLATE = (
 # and the capture-only scope has no historical backfill. A caller that genuinely wants one
 # passes an explicit wide range and raises this cap deliberately.
 DEFAULT_MAX_DATES_PER_PASS = 62
+
+_DOWNLOAD_TIMEOUT = 60              # seconds, per-request
+_MAX_PDF_BYTES = 25 * 1024 * 1024   # 25 MB — same cap as HARTI and cbsl_macro
+_STREAM_CHUNK_BYTES = 64 * 1024     # 64 KB read chunks
+
+
+class PdfTooLargeError(Exception):
+    """Raised when a downloaded PDF exceeds the configured size cap."""
+
+
+def _fetch_capped(session: requests.Session, url: str) -> tuple[int, bytes]:
+    """Fetch ``url`` through the SSRF guard, streaming the body under the cap.
+
+    Returns (status_code, content). Non-200 responses return EMPTY content and
+    their body is never read, so the 404-is-a-normal-gap branch in
+    download_pdfs() stays as cheap and as non-error as it was before.
+
+    Same size-cap contract as ``harti.downloader._download_capped``: the
+    Content-Length header is a cheap pre-check and the streamed byte count is
+    the real guard, because the header can be absent, wrong or hostile.
+    Duplicated rather than imported to keep the source subpackages independently
+    deletable (the reason cbsl_macro duplicates it too). ``raise_for_status`` is
+    deliberately NOT called here — this caller classifies status codes itself.
+    """
+    with guarded_get(session, url, timeout=_DOWNLOAD_TIMEOUT, stream=True) as resp:
+        if resp.status_code != 200:
+            return resp.status_code, b""
+
+        declared = resp.headers.get("Content-Length")
+        if declared is not None:
+            try:
+                if int(declared) > _MAX_PDF_BYTES:
+                    raise PdfTooLargeError(
+                        f"Content-Length {declared} exceeds cap {_MAX_PDF_BYTES}"
+                    )
+            except ValueError:
+                pass  # malformed header — rely on the streamed-byte guard below
+
+        buffer = bytearray()
+        for chunk in resp.iter_content(chunk_size=_STREAM_CHUNK_BYTES):
+            if not chunk:
+                continue
+            buffer.extend(chunk)
+            if len(buffer) > _MAX_PDF_BYTES:
+                raise PdfTooLargeError(
+                    f"Streamed body exceeded cap {_MAX_PDF_BYTES} bytes"
+                )
+        return 200, bytes(buffer)
 
 
 def candidate_dates(since: date | None, until: date) -> list[date]:
@@ -68,8 +124,6 @@ def download_pdfs(
     report published) are silently absent from the result; non-404 failures
     are WARN-logged and absent (retried naturally next pass).
     """
-    import requests
-
     sess = session or requests.Session()
     dates = list(dates)
     if len(dates) > max_dates:
@@ -91,20 +145,30 @@ def download_pdfs(
             continue
         url = pdf_url(d)
         try:
-            resp = sess.get(url, timeout=60)
+            status, content = _fetch_capped(sess, url)
+        except DisallowedUrlError as exc:
+            # The URL itself, or a redirect hop, left the host allowlist / hit the
+            # private-IP block. Skip this date only — one bad hop must not end the pass.
+            log.warning("CBSL downloader: URL blocked by SSRF guard for %s (%s) — %s",
+                        date_str, url, exc)
+            continue
+        except PdfTooLargeError as exc:
+            log.warning("CBSL downloader: oversized response for %s (%s) — %s — skipping",
+                        date_str, url, exc)
+            continue
         except Exception:
             log.warning("CBSL downloader: fetch failed for %s (%s) — will retry next pass",
                         date_str, url, exc_info=True)
             continue
-        if resp.status_code == 404:
+        if status == 404:
             # Normal calendar gap: no report is published on weekends/holidays.
             log.info("CBSL downloader: no report published for %s (404) — normal gap", date_str)
             continue
-        if resp.status_code != 200:
+        if status != 200:
             log.warning("CBSL downloader: HTTP %d for %s (%s) — will retry next pass",
-                        resp.status_code, date_str, url)
+                        status, date_str, url)
             continue
-        path.write_bytes(resp.content)
+        path.write_bytes(content)
         out.append((date_str, path))
-        log.info("CBSL downloader: fetched %s (%d bytes)", date_str, len(resp.content))
+        log.info("CBSL downloader: fetched %s (%d bytes)", date_str, len(content))
     return out

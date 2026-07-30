@@ -143,6 +143,206 @@ class TestCandidateDates:
         assert out == []
 
 
+# 3b. Downloader network guards: the SSRF choke point + the 25 MB size cap.
+#     This fetch used to be the one outbound call in the repo that bypassed
+#     netguard (plain sess.get, auto-followed redirects, unbounded body into
+#     memory and disk) — and it runs nightly in the pod that holds the DB
+#     credentials. Network-free: session and responses are mocked.
+
+def _mock_pdf_response(body: bytes = b"", *, status: int = 200, content_length=None,
+                       redirect_to: str | None = None):
+    """MagicMock standing in for the streamed requests.Response guarded_get returns."""
+    resp = MagicMock()
+    resp.__enter__ = MagicMock(return_value=resp)
+    resp.__exit__ = MagicMock(return_value=False)
+    resp.close = MagicMock()
+    resp.is_redirect = redirect_to is not None
+    resp.is_permanent_redirect = False
+    resp.status_code = 302 if redirect_to else status
+
+    headers = {}
+    if redirect_to:
+        headers["Location"] = redirect_to
+    if content_length is not None:
+        headers["Content-Length"] = content_length
+    resp.headers = headers
+
+    chunk = downloader._STREAM_CHUNK_BYTES
+    chunks = [body[i:i + chunk] for i in range(0, len(body), chunk)] or [b""]
+    resp.iter_content = MagicMock(return_value=iter(chunks))
+    return resp
+
+
+def _session_by_date(responses_by_yyyymmdd: dict):
+    """Session whose .get() picks a response by the YYYYMMDD token in the URL."""
+    session = MagicMock()
+
+    def _get(url, headers=None, timeout=None, stream=None, allow_redirects=None):
+        for token, resp in responses_by_yyyymmdd.items():
+            if token in url:
+                return resp
+        raise AssertionError(f"Unexpected URL in test: {url}")
+
+    session.get = MagicMock(side_effect=_get)
+    return session
+
+
+@pytest.fixture
+def _public_dns(monkeypatch):
+    """Resolve every host to a public IP so the private-IP block is not what fires."""
+    from agriforecast_ml import netguard
+    monkeypatch.setattr(netguard, "_resolve_ips", lambda host: ["8.8.8.8"])
+
+
+_GOOD_PDF = b"%PDF-1.4 cbsl daily price report" * 50
+
+
+@pytest.mark.usefixtures("_public_dns")
+class TestDownloadNetworkGuards:
+    def test_normal_small_pdf_is_cached_and_returned(self, tmp_path):
+        session = _session_by_date({"20260721": _mock_pdf_response(
+            _GOOD_PDF, content_length=str(len(_GOOD_PDF)))})
+
+        out = downloader.download_pdfs(tmp_path, [date(2026, 7, 21)], session=session)
+
+        assert out == [("2026-07-21", tmp_path / "cbsl_2026-07-21.pdf")]
+        assert (tmp_path / "cbsl_2026-07-21.pdf").read_bytes() == _GOOD_PDF
+
+    def test_fetch_goes_through_the_guard_streaming_with_redirects_disabled(self, tmp_path):
+        session = _session_by_date({"20260721": _mock_pdf_response(_GOOD_PDF)})
+
+        downloader.download_pdfs(tmp_path, [date(2026, 7, 21)], session=session)
+
+        _, kwargs = session.get.call_args
+        assert kwargs.get("allow_redirects") is False, (
+            "must fetch via guarded_get, which follows redirects manually and "
+            "re-validates every hop"
+        )
+        assert kwargs.get("stream") is True, "body must be streamed under the cap, not buffered whole"
+
+    def test_redirect_to_disallowed_host_is_refused_and_date_skipped(self, tmp_path):
+        # Day 1 redirects off the allowlist; day 2 is a normal report.
+        session = _session_by_date({
+            "20260721": _mock_pdf_response(redirect_to="https://evil.example.com/steal"),
+            "20260722": _mock_pdf_response(_GOOD_PDF),
+        })
+
+        out = downloader.download_pdfs(
+            tmp_path, [date(2026, 7, 21), date(2026, 7, 22)], session=session)
+
+        assert not (tmp_path / "cbsl_2026-07-21.pdf").exists(), (
+            "a redirect off the host allowlist must never be written to the cache")
+        assert out == [("2026-07-22", tmp_path / "cbsl_2026-07-22.pdf")], (
+            "the pass must continue past a blocked redirect")
+
+    def test_blocked_redirect_never_fetches_the_offlist_host(self, tmp_path, caplog):
+        session = _session_by_date({
+            "20260721": _mock_pdf_response(redirect_to="https://evil.example.com/steal"),
+        })
+
+        with caplog.at_level("WARNING"):
+            downloader.download_pdfs(tmp_path, [date(2026, 7, 21)], session=session)
+
+        fetched = [c.args[0] for c in session.get.call_args_list]
+        assert all("evil.example.com" not in u for u in fetched), (
+            "the disallowed redirect target must be validated BEFORE it is requested")
+        # The 3xx must be recognised and rejected as a guard failure, not shrugged
+        # off as a generic non-200 (which is what the pre-guard code did).
+        assert any("blocked by SSRF guard" in r.getMessage() for r in caplog.records), (
+            "an off-allowlist redirect target must be logged as an SSRF block")
+
+    def test_oversized_declared_length_is_refused_and_date_skipped(self, tmp_path):
+        huge = _mock_pdf_response(_GOOD_PDF,
+                                  content_length=str(downloader._MAX_PDF_BYTES + 1))
+        session = _session_by_date({"20260721": huge, "20260722": _mock_pdf_response(_GOOD_PDF)})
+
+        out = downloader.download_pdfs(
+            tmp_path, [date(2026, 7, 21), date(2026, 7, 22)], session=session)
+
+        assert not huge.iter_content.called, (
+            "body must not be read once Content-Length already exceeds the cap")
+        assert not (tmp_path / "cbsl_2026-07-21.pdf").exists()
+        assert out == [("2026-07-22", tmp_path / "cbsl_2026-07-22.pdf")]
+
+    def test_oversized_stream_with_lying_header_is_refused_and_date_skipped(self, tmp_path):
+        # Header claims a tiny body; the actual stream blows past the cap.
+        body = b"x" * (downloader._MAX_PDF_BYTES + 1)
+        session = _session_by_date({
+            "20260721": _mock_pdf_response(body, content_length="1000"),
+            "20260722": _mock_pdf_response(_GOOD_PDF),
+        })
+
+        out = downloader.download_pdfs(
+            tmp_path, [date(2026, 7, 21), date(2026, 7, 22)], session=session)
+
+        assert not (tmp_path / "cbsl_2026-07-21.pdf").exists(), (
+            "no partial file may be written for a body that exceeded the cap")
+        assert out == [("2026-07-22", tmp_path / "cbsl_2026-07-22.pdf")]
+
+    def test_body_exactly_at_the_cap_is_allowed(self, tmp_path):
+        body = b"y" * downloader._MAX_PDF_BYTES
+        session = _session_by_date({"20260721": _mock_pdf_response(body)})
+
+        out = downloader.download_pdfs(tmp_path, [date(2026, 7, 21)], session=session)
+
+        assert len(out) == 1
+        assert (tmp_path / "cbsl_2026-07-21.pdf").stat().st_size == downloader._MAX_PDF_BYTES
+
+    def test_404_is_still_a_normal_gap_not_a_failure(self, tmp_path, caplog):
+        weekend = _mock_pdf_response(status=404)
+        session = _session_by_date({"20260719": weekend,
+                                    "20260721": _mock_pdf_response(_GOOD_PDF)})
+
+        with caplog.at_level("INFO"):
+            out = downloader.download_pdfs(
+                tmp_path, [date(2026, 7, 19), date(2026, 7, 21)], session=session)
+
+        assert out == [("2026-07-21", tmp_path / "cbsl_2026-07-21.pdf")]
+        assert not (tmp_path / "cbsl_2026-07-19.pdf").exists()
+        assert not weekend.iter_content.called, "a 404 body must never be read"
+        assert any("normal gap" in r.getMessage() for r in caplog.records
+                   if r.levelname == "INFO")
+        assert not [r for r in caplog.records
+                    if r.levelname in ("WARNING", "ERROR") and "2026-07-19" in r.getMessage()], (
+            "a 404 must stay a normal calendar gap, never a logged failure")
+
+    def test_other_non_200_still_warns_and_skips(self, tmp_path, caplog):
+        broken = _mock_pdf_response(status=503)
+        session = _session_by_date({"20260721": broken})
+
+        with caplog.at_level("WARNING"):
+            out = downloader.download_pdfs(tmp_path, [date(2026, 7, 21)], session=session)
+
+        assert out == []
+        assert not broken.iter_content.called
+        assert any("HTTP 503" in r.getMessage() for r in caplog.records)
+
+    def test_offlist_initial_url_is_blocked_without_touching_the_network(
+            self, tmp_path, monkeypatch):
+        # Drop cbsl.gov.lk from the allowlist: the guard must refuse before any socket.
+        monkeypatch.setenv("AGRI_INGEST_ALLOWED_HOSTS", "only-other.example")
+        session = MagicMock()
+        session.get = MagicMock(side_effect=AssertionError("network must not be reached"))
+
+        out = downloader.download_pdfs(tmp_path, [date(2026, 7, 21)], session=session)
+
+        assert out == []
+        session.get.assert_not_called()
+
+    def test_no_exception_escapes_download_pdfs(self, tmp_path):
+        """The overall guarantee: guard/cap failures are per-date skips, never
+        an exception out of the pass."""
+        session = _session_by_date({
+            "20260721": _mock_pdf_response(redirect_to="https://evil.example.com/x"),
+            "20260722": _mock_pdf_response(b"z" * (downloader._MAX_PDF_BYTES + 1)),
+        })
+
+        out = downloader.download_pdfs(
+            tmp_path, [date(2026, 7, 21), date(2026, 7, 22)], session=session)
+
+        assert out == []
+
+
 # 4. Loader (hermetic): column split + placeholder-market skip
 
 def _row(market_name: str, label: str = "Beans", price: float = 250.0) -> parser.ParsedCbslPrice:
