@@ -3,6 +3,8 @@ using AgriForecast.Application.Requests.Portfolio.Common;
 using AgriForecast.Application.Requests.Portfolio.DTOs;
 using AgriForecast.Application.Services;
 using AgriForecast.Domain.Constants;
+using AgriForecast.Domain.Entities;
+using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
 using MediatR;
 using Microsoft.Extensions.Logging;
@@ -16,23 +18,34 @@ namespace AgriForecast.Application.Requests.Portfolio.Commands.UpdateWatchlistEn
 //
 // The row must belong to the CALLER. If it does not exist, or exists under another user, the answer is the
 // same 404 — a 403 would confirm that the row exists for somebody else.
+//
+// CLEARING A RECORDED PLANTING DATE IS A REPORTABLE EVENT, not just a null write: it needs a reason, and the
+// reason is persisted in the SAME COMMIT as the clear (see PlantedDateRemoval). Every other spelling of the
+// request — setting a date, clearing an already-empty one, touching only the markets — must NOT carry a
+// reason, because a reason with nothing to explain would be silently discarded.
 public class UpdateWatchlistEntryCommandHandler
     : IRequestHandler<UpdateWatchlistEntryCommand, Result<WatchlistEntryUpdate_ResultDto>>
 {
     private readonly IUserCropWatchlistRepository _watchlist;
     private readonly IPortfolioReadStore _store;
+    private readonly IPlantedDateRemovalRepository _removals;
     private readonly IUnitofWorkRepository _unitOfWork;
+    private readonly IUserActivityAudit _activityAudit;
     private readonly ILogger<UpdateWatchlistEntryCommandHandler> _logger;
 
     public UpdateWatchlistEntryCommandHandler(
         IUserCropWatchlistRepository watchlist,
         IPortfolioReadStore store,
+        IPlantedDateRemovalRepository removals,
         IUnitofWorkRepository unitOfWork,
+        IUserActivityAudit activityAudit,
         ILogger<UpdateWatchlistEntryCommandHandler> logger)
     {
         _watchlist = watchlist;
         _store = store;
+        _removals = removals;
         _unitOfWork = unitOfWork;
+        _activityAudit = activityAudit;
         _logger = logger;
     }
 
@@ -75,6 +88,75 @@ public class UpdateWatchlistEntryCommandHandler
             return Result<WatchlistEntryUpdate_ResultDto>.Failure(PortfolioErrors.InvalidPlantedDate);
         }
 
+        // "Is this request removing a planting date the farmer actually told us about?" — the ONE predicate
+        // the whole reason contract hangs off. All three clauses matter: the key must be present, its value
+        // must be null, and there must be a stored date to lose. Clearing an already-null date changes
+        // nothing, so it is not a removal and needs no reason.
+        var removedDate = entry.PlantedDate;
+        var clearingRecordedDate = request.PlantedDateSpecified
+                                   && request.PlantedDate is null
+                                   && removedDate.HasValue;
+
+        var reasonGiven = !string.IsNullOrWhiteSpace(request.ClearReason);
+        var noteGiven = !string.IsNullOrWhiteSpace(request.ClearReasonNote);
+
+        if (clearingRecordedDate && !reasonGiven)
+        {
+            _logger.LogInformation(
+                "Watchlist update rejected for user {UserId}: clearing the planting date of crop {CropId} "
+                + "requires a reason.",
+                request.UserId, request.CropId);
+            return Result<WatchlistEntryUpdate_ResultDto>.Failure(PortfolioErrors.ClearReasonRequired);
+        }
+
+        if (reasonGiven && !clearingRecordedDate)
+        {
+            // Rejected rather than ignored: a caller that sends a reason believes one was recorded, and a
+            // field that vanishes on the server is a contract lie regardless of how harmless it looks.
+            _logger.LogInformation(
+                "Watchlist update rejected for user {UserId}: a clear reason was supplied but the request "
+                + "does not clear a recorded planting date for crop {CropId}.",
+                request.UserId, request.CropId);
+            return Result<WatchlistEntryUpdate_ResultDto>.Failure(PortfolioErrors.ClearReasonNotApplicable);
+        }
+
+        // Case-SENSITIVE parse: a differently-cased value is a client guessing at the contract, not a typo
+        // worth absorbing. Only reached when a reason was actually given.
+        PlantedDateRemovalReason? reason = null;
+        if (reasonGiven)
+        {
+            reason = PlantedDateRemovalReasons.TryParse(request.ClearReason);
+            if (reason is null)
+            {
+                _logger.LogInformation(
+                    "Watchlist update rejected for user {UserId}: unknown clear reason for crop {CropId}.",
+                    request.UserId, request.CropId);
+                return Result<WatchlistEntryUpdate_ResultDto>.Failure(PortfolioErrors.InvalidClearReason);
+            }
+        }
+
+        if (noteGiven && !reasonGiven)
+        {
+            _logger.LogInformation(
+                "Watchlist update rejected for user {UserId}: a clear-reason note was supplied without a "
+                + "reason for crop {CropId}.",
+                request.UserId, request.CropId);
+            return Result<WatchlistEntryUpdate_ResultDto>.Failure(
+                PortfolioErrors.ClearReasonNoteWithoutReason);
+        }
+
+        // Measured on the TRIMMED note, which is what would be stored, and rejected rather than truncated:
+        // shortening a farmer's own words behind their back is worse than asking them to shorten them.
+        var note = request.ClearReasonNote?.Trim();
+        if (note is not null && note.Length > PlantedDateRemoval.NoteMaxLength)
+        {
+            _logger.LogInformation(
+                "Watchlist update rejected for user {UserId}: clear-reason note is {Length} characters, "
+                + "cap is {Cap}.",
+                request.UserId, note.Length, PlantedDateRemoval.NoteMaxLength);
+            return Result<WatchlistEntryUpdate_ResultDto>.Failure(PortfolioErrors.ClearReasonNoteTooLong);
+        }
+
         var marketsChanged = false;
         if (replacing)
         {
@@ -95,11 +177,33 @@ public class UpdateWatchlistEntryCommandHandler
         var plantedDateChanged = request.PlantedDateSpecified
                                  && entry.SetPlantedDate(request.PlantedDate, now);
 
-        // One commit for both halves: a half-applied update is never observable.
+        // The removal row is queued BEFORE the commit, so the cleared date and the reason for clearing it
+        // land in ONE transaction. This is not an audit line that may be lost: a date that disappeared with
+        // no recorded reason is precisely the state this feature exists to make impossible.
+        if (clearingRecordedDate)
+        {
+            await _removals.AddAsync(
+                PlantedDateRemoval.Record(
+                    request.UserId, request.CropId, removedDate!.Value, reason!.Value, note, now),
+                cancellationToken);
+        }
+
+        // One commit for every part: a half-applied update is never observable.
         await _unitOfWork.CommitAsync();
 
         var saved = (await _store.GetWatchlistAsync(request.UserId, cancellationToken))
             .FirstOrDefault(r => r.CropId == request.CropId);
+
+        // Audited AFTER the commit and fail-open, like every other Record* call. It is written even when the
+        // read-back below fails, because the removal DID commit and an admin trail that skips committed work
+        // is worse than one missing a crop code (the reason word is still there).
+        if (clearingRecordedDate)
+        {
+            await _activityAudit.RecordPlantedDateRemovedAsync(
+                request.UserId,
+                PlantedDateRemovalReasons.RenderAuditDetails(saved?.CropCode, reason!.Value),
+                cancellationToken);
+        }
 
         if (saved is null)
         {
@@ -112,8 +216,10 @@ public class UpdateWatchlistEntryCommandHandler
 
         _logger.LogInformation(
             "Watchlist update: user {UserId}, crop {CropId}, markets {MarketCount} "
-            + "(changed={MarketsChanged}), plantedDateChanged={PlantedDateChanged}.",
-            request.UserId, request.CropId, saved.Markets.Count, marketsChanged, plantedDateChanged);
+            + "(changed={MarketsChanged}), plantedDateChanged={PlantedDateChanged}, "
+            + "plantedDateRemoved={PlantedDateRemoved}.",
+            request.UserId, request.CropId, saved.Markets.Count, marketsChanged, plantedDateChanged,
+            clearingRecordedDate);
 
         return Result<WatchlistEntryUpdate_ResultDto>.Success(new WatchlistEntryUpdate_ResultDto
         {

@@ -247,6 +247,30 @@ public class PortfolioControllerTests
         Assert.IsType<UnprocessableEntityObjectResult>(response);
     }
 
+    [Theory]
+    [InlineData("clear_reason_required")]
+    [InlineData("clear_reason_not_applicable")]
+    [InlineData("invalid_clear_reason")]
+    [InlineData("clear_reason_note_without_reason")]
+    [InlineData("clear_reason_note_too_long")]
+    public async Task Update_ClearReasonCode_Maps400_WithTheMachineReadableBody(string code)
+    {
+        var mediator = MediatorReturning<UpdateWatchlistEntryCommand, Result<WatchlistEntryUpdate_ResultDto>>(
+            Result<WatchlistEntryUpdate_ResultDto>.Failure(code));
+
+        var response = await ControllerFor(mediator.Object, HttpContextFor(Caller))
+            .UpdateWatchlistEntry(RouteCrop, new UpdateWatchlistEntryCommand());
+
+        var badRequest = Assert.IsType<BadRequestObjectResult>(response);
+        badRequest.StatusCode.Should().Be(StatusCodes.Status400BadRequest,
+            "the payload really is wrong — a reason is missing, contradictory, misspelled or over-long");
+
+        // The CODE body, not the prose validation shape: the UI has to react to each of these differently,
+        // and switching on a code beats parsing a sentence.
+        var body = badRequest.Value!.GetType().GetProperty("error")!.GetValue(badRequest.Value) as string;
+        body.Should().Be(code);
+    }
+
     [Fact]
     public void NotFoundCodes_AreMatchedExactly_NotLoosely()
     {

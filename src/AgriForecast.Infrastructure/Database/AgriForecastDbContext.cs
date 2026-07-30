@@ -35,6 +35,7 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     // cannot share its name with the entity type. Same shape as UserActivityLog above.
     public DbSet<UserCropWatchlist> UserCropWatchlists { get; set; }
     public DbSet<UserCropWatchMarket> UserCropWatchMarkets { get; set; }
+    public DbSet<PlantedDateRemoval> PlantedDateRemovals { get; set; }
     public DbSet<UserActivityEvent> UserActivityLog { get; set; }
     public DbSet<SystemError> SystemErrors { get; set; }
 
@@ -667,6 +668,47 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             // market twice" is a data error, so the database refuses it outright.
             e.HasIndex(x => new { x.UserCropWatchlistId, x.MarketId }, "UX_UserCropWatchMarkets_EntryMarket")
                 .IsUnique();
+        });
+
+        // PLANTING-DATE REMOVAL rows — one per time a farmer cleared a recorded planting date, written INSIDE
+        // the same transaction as the clear itself. Append-only and personal data, like the watchlist row it
+        // refers to. Reason is enum-as-int and those values are persisted; Note is the farmer's own short
+        // free text and is the ONE free-text column here (never copied into UserActivityLog.Details).
+        modelBuilder.Entity<PlantedDateRemoval>(e =>
+        {
+            e.ToTable("PlantedDateRemovals");
+
+            // CASCADE from Users, matching UserCropWatchlist: the record of a farmer's own plantings does not
+            // outlive the account, and an orphan row would be personal data with nobody to scope it to.
+            e.HasOne<User>()
+                .WithMany()
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // RESTRICT on Crops, again matching the watchlist: reference data a record refers to cannot be
+            // deleted out from under it, and the delete fails loudly rather than shredding the history.
+            e.HasOne<Crop>()
+                .WithMany()
+                .HasForeignKey(x => x.CropId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // DATE, not datetime2 — the cleared value was a planting DAY, and a hidden 00:00:00 would make it
+            // timezone-dependent exactly as it would on UserCropWatchlist.PlantedDate.
+            e.Property(x => x.RemovedPlantedDate).HasColumnType("date").IsRequired();
+
+            e.Property(x => x.Reason).HasConversion<int>().IsRequired();
+            e.Property(x => x.Note).HasMaxLength(PlantedDateRemoval.NoteMaxLength);
+
+            // No SYSUTCDATETIME() default: the factory always stamps OccurredUtc and only .NET writes this
+            // table, so a DB default would only hide a caller that forgot the clock.
+            e.Property(x => x.OccurredUtc).IsRequired();
+
+            // The read path this table exists to serve one day: one farmer's removals for one crop, newest
+            // first. Nothing queries it yet — the index is here because the column order is decided by that
+            // query, not by the insert.
+            e.HasIndex(x => new { x.UserId, x.CropId, x.OccurredUtc },
+                    "IX_PlantedDateRemovals_UserCropOccurredUtc")
+                .IsDescending(false, false, true);
         });
 
         // User ACTIVITY rows — one per account or content event, written by IUserActivityAudit. EventType is

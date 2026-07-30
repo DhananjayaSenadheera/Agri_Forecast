@@ -65,4 +65,34 @@ public class UpdateWatchlistEntryCommand : IRequest<Result<WatchlistEntryUpdate_
     /// </summary>
     [JsonIgnore]
     public bool PlantedDateSpecified { get; private set; }
+
+    /// <summary>
+    /// Why the farmer is CLEARING their planting date: one of
+    /// <see cref="Common.PlantedDateRemovalReasons.KnownReasons"/> (<c>harvested</c>, <c>cropFailed</c>,
+    /// <c>enteredByMistake</c>, <c>other</c>), matched CASE-SENSITIVELY.
+    /// </summary>
+    /// <remarks>
+    /// REQUIRED exactly when this request clears a date the entry actually has (<c>plantedDate</c> present
+    /// and null, and the stored date is not already null), and REFUSED in every other case — sending a
+    /// reason with a request that sets a date, or that clears an already-empty date, is
+    /// <c>clear_reason_not_applicable</c> rather than a field quietly thrown away. Accepting a reason nobody
+    /// records is the same lie as clearing a date nobody explains.
+    /// <para>
+    /// Not a <see cref="Domain.Enums.PlantedDateRemovalReason"/>-typed property on purpose: an unknown value must be our
+    /// own <c>invalid_clear_reason</c> code, not a System.Text.Json deserialization failure that never
+    /// reaches the handler.
+    /// </para>
+    /// </remarks>
+    public string? ClearReason { get; set; }
+
+    /// <summary>
+    /// The farmer's optional note about the removal, at most
+    /// <see cref="Domain.Entities.PlantedDateRemoval.NoteMaxLength"/> characters. Only meaningful alongside
+    /// <see cref="ClearReason"/>; on its own it is <c>clear_reason_note_without_reason</c>.
+    /// </summary>
+    /// <remarks>
+    /// This is the only farmer free text on this endpoint. It is stored on the PlantedDateRemovals row and
+    /// NEVER copied into the admin activity log.
+    /// </remarks>
+    public string? ClearReasonNote { get; set; }
 }

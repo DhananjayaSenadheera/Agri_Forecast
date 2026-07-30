@@ -15,6 +15,10 @@ namespace AgriForecast.Application.Requests.Portfolio.Validators;
 //  - The market cap and the planting-date range. Both are well-formed requests the product refuses, so
 //    they are 422 wire codes from the handler (too_many_markets / invalid_planted_date), not 400s. The
 //    date range in particular needs a clock, which belongs in a handler and not in a validator.
+//  - clearReason / clearReasonNote. Whether a reason is required, forbidden, or misspelled depends on the
+//    STORED planting date, which only the handler has loaded — and the answers are pinned wire codes
+//    (clear_reason_required and friends) that the UI switches on, not prose. Same precedent as the date
+//    range: one place decides, and it is the place that already holds the row.
 public class UpdateWatchlistEntryCommandValidator : AbstractValidator<UpdateWatchlistEntryCommand>
 {
     public UpdateWatchlistEntryCommandValidator(IPortfolioReadStore store)
