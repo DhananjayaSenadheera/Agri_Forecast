@@ -74,6 +74,15 @@ public class PlantedDateRemoval
         if (cropId == Guid.Empty)
             throw new ArgumentException("CropId is required.", nameof(cropId));
 
+        // 0001-01-01 is what an unset DateOnly looks like, and the whole reason this column exists is to keep
+        // the ONE surviving trace of the planting that was cleared. A row claiming a crop went in in year 1
+        // records nothing, so it is refused rather than stored. Unreachable in production — UserCropWatchlist
+        // already refuses any PlantedDate before WatchlistLimits.EarliestPlantedDate, so no stored date can
+        // be the default — which is exactly why it belongs here as a guard and not as a wire error code.
+        if (removedPlantedDate == default)
+            throw new ArgumentException(
+                "RemovedPlantedDate is required.", nameof(removedPlantedDate));
+
         if (!Enum.IsDefined(reason))
             throw new ArgumentException(
                 "Reason must be a defined PlantedDateRemovalReason.", nameof(reason));

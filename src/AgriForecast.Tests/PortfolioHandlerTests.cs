@@ -1059,6 +1059,35 @@ public class PortfolioHandlerTests
     }
 
     [Fact]
+    public async Task Update_ANoteAtTheCap_WrappedInWhitespace_IsMeasuredAfterTrimming_NotBefore()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, plantedDate: Planted);
+        var note = new string('n', PlantedDateRemoval.NoteMaxLength);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = null,
+                ClearReason = PlantedDateRemovalReasons.Other,
+                ClearReasonNote = "   " + note + "   "
+            },
+            default);
+
+        // The cap is measured on the note that would actually be STORED, i.e. the trimmed one. Measuring the
+        // raw string instead would reject this request for characters the farmer never typed and that never
+        // reach the column — and a UI that pads its textarea value would look like a server bug.
+        result.IsSuccess.Should().BeTrue(
+            "leading and trailing whitespace is not part of the note, so a 300-character note stays legal "
+            + "however it was padded on the wire");
+        store.Removals.Added.Single().Row.Note.Should().Be(note,
+            "stored whole at exactly the cap, with the padding gone");
+        store.Removals.Added.Single().Row.Note.Should().HaveLength(PlantedDateRemoval.NoteMaxLength);
+    }
+
+    [Fact]
     public async Task Update_ClearingAnAlreadyEmptyDate_WithoutAReason_IsStillTheSameNoOp()
     {
         var store = NewStore();

@@ -115,6 +115,18 @@ public class PlantedDateRemovalTests
     }
 
     [Fact]
+    public void Record_RefusesADefaultRemovedPlantedDate()
+    {
+        // An unset DateOnly is 0001-01-01. This column is the only surviving trace of the planting that was
+        // cleared, so a row that says "year 1" records nothing at all — and "harvested" with no plausible
+        // planting date is a half-truth of exactly the kind this table exists to prevent.
+        var act = () => PlantedDateRemoval.Record(
+            Farmer, Crop, default, PlantedDateRemovalReason.Harvested, null, Occurred);
+
+        act.Should().Throw<ArgumentException>().WithParameterName("removedPlantedDate");
+    }
+
+    [Fact]
     public void Record_RefusesAnUndefinedReason()
     {
         // A cast int is how a reason would arrive from a future wire value nobody mapped. A row whose reason
