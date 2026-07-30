@@ -10,9 +10,11 @@ using AgriForecast.Application.Requests.Portfolio.Validators;
 using AgriForecast.Application.Services;
 using AgriForecast.Domain.Constants;
 using AgriForecast.Domain.Entities;
+using AgriForecast.Domain.Enums;
 using AgriForecast.Domain.Interfaces;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 
 namespace AgriForecast.Tests;
 
@@ -95,11 +97,50 @@ public class PortfolioHandlerTests
         public void Dispose() { }
     }
 
+    // Fake PlantedDateRemovals writer. It records the COMMIT COUNT AS IT WAS WHEN THE ROW WAS ADDED, which
+    // is the only way a unit test can prove the "same commit" rule: a row added while the count is still 0
+    // is inside the handler's single transaction, and a row added after would be a second write nobody
+    // rolls back.
+    private sealed class FakeRemovals : IPlantedDateRemovalRepository
+    {
+        private readonly Func<int> _commitCount;
+
+        public readonly List<(PlantedDateRemoval Row, int CommitCountAtAdd)> Added = new();
+
+        public FakeRemovals(Func<int> commitCount) => _commitCount = commitCount;
+
+        public Task AddAsync(PlantedDateRemoval removal, CancellationToken ct = default)
+        {
+            Added.Add((removal, _commitCount()));
+            return Task.CompletedTask;
+        }
+    }
+
     // Fake read store. The watchlist projection is derived from the SAME row list the repository holds, so
     // a write made by a handler is visible to the read-back without a second fixture to keep in step.
     private sealed class FakeStore : IPortfolioReadStore
     {
         public FakeWatchlist Watchlist = new();
+
+        public readonly FakeRemovals Removals;
+
+        // The audit spy. Like FakeRemovals it captures the commit count at call time, because "the audit
+        // runs AFTER the commit" is an ordering claim and an unordered mock cannot make it.
+        public readonly Mock<IUserActivityAudit> AuditMock = new();
+
+        public readonly List<(Guid Actor, string? Details, int CommitCountAtCall)> AuditedRemovals = new();
+
+        public FakeStore()
+        {
+            Removals = new FakeRemovals(() => Watchlist.CommitCount);
+
+            AuditMock
+                .Setup(a => a.RecordPlantedDateRemovedAsync(
+                    It.IsAny<Guid>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+                .Callback((Guid actor, string? details, CancellationToken _) =>
+                    AuditedRemovals.Add((actor, details, Watchlist.CommitCount)))
+                .Returns(Task.CompletedTask);
+        }
 
         public readonly Dictionary<Guid, (string Name, string? Code)> Crops = new();
         // PortfolioMarketRow carries the short code, so there is ONE source for a market's display
@@ -252,7 +293,8 @@ public class PortfolioHandlerTests
         new(s.Watchlist, s, s.Watchlist, NullLogger<AddWatchlistCropCommandHandler>.Instance);
 
     private static UpdateWatchlistEntryCommandHandler UpdateHandler(FakeStore s) =>
-        new(s.Watchlist, s, s.Watchlist, NullLogger<UpdateWatchlistEntryCommandHandler>.Instance);
+        new(s.Watchlist, s, s.Removals, s.Watchlist, s.AuditMock.Object,
+            NullLogger<UpdateWatchlistEntryCommandHandler>.Instance);
 
     private static RemoveWatchlistCropCommandHandler RemoveHandler(FakeStore s) =>
         new(s.Watchlist, s.Watchlist, NullLogger<RemoveWatchlistCropCommandHandler>.Instance);
@@ -707,13 +749,410 @@ public class PortfolioHandlerTests
         set.Data.Item.PlantedDate.Should().Be("2026-05-01");
         set.Data.PlantedDateChanged.Should().BeTrue();
 
+        // Clearing a date the entry HAS now carries a reason; see the reason-contract tests below.
         var cleared = await UpdateHandler(store).Handle(
-            new UpdateWatchlistEntryCommand { UserId = UserA, CropId = Carrot, PlantedDate = null },
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = null,
+                ClearReason = PlantedDateRemovalReasons.Harvested
+            },
             default);
 
         cleared.Data.Item.PlantedDate.Should().BeNull(
             "an explicit null clears the date — the farmer un-telling us is a real request");
         cleared.Data.PlantedDateChanged.Should().BeTrue();
+    }
+
+    // PUT /watchlist/{cropId} — the removal-reason contract. Clearing a RECORDED planting date is a
+    // reportable event: it needs a reason, the reason is persisted in the same commit as the clear, and every
+    // other spelling of the request must refuse a reason rather than swallow one.
+
+    [Fact]
+    public async Task Update_ClearingARecordedDate_WithoutAReason_Is400_AndChangesNothing()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, plantedDate: Planted);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand { UserId = UserA, CropId = Carrot, PlantedDate = null },
+            default);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Be(PortfolioErrors.ClearReasonRequired);
+        PortfolioErrors.IsBadRequestCode(result.Error).Should().BeTrue(
+            "a payload missing a required field is a 400, and the UI switches on the code to re-prompt");
+        store.Watchlist.Rows.Single().PlantedDate.Should().Be(Planted,
+            "everything is validated before anything is mutated — the date survives a rejected clear");
+        store.Watchlist.CommitCount.Should().Be(0);
+        store.Removals.Added.Should().BeEmpty();
+        store.AuditedRemovals.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Update_ClearingARecordedDate_WithAReason_WritesTheRemovalRowInTheSameCommit()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, plantedDate: Planted);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = null,
+                ClearReason = PlantedDateRemovalReasons.CropFailed
+            },
+            default);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Data.Item.PlantedDate.Should().BeNull();
+        result.Data.PlantedDateChanged.Should().BeTrue();
+
+        var (row, commitCountAtAdd) = store.Removals.Added.Should().ContainSingle().Subject;
+        row.UserId.Should().Be(UserA);
+        row.CropId.Should().Be(Carrot);
+        row.RemovedPlantedDate.Should().Be(Planted,
+            "the row records the date that was LOST — once the column is null it is the only trace left");
+        row.Reason.Should().Be(PlantedDateRemovalReason.CropFailed);
+        row.Note.Should().BeNull("no note was sent, and a blank note is null, never an empty string");
+        row.OccurredUtc.Should().NotBe(default);
+
+        commitCountAtAdd.Should().Be(0,
+            "the removal row is queued BEFORE the commit: a cleared date must never be observable without "
+            + "the reason it was cleared, which only one transaction can guarantee");
+        store.Watchlist.CommitCount.Should().Be(1, "still ONE commit for the whole update");
+    }
+
+    [Fact]
+    public async Task Update_TheRemovalNote_IsStoredOnTheRow_ButNeverInTheAuditDetails()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, plantedDate: Planted);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = null,
+                ClearReason = PlantedDateRemovalReasons.Other,
+                ClearReasonNote = "  elephants got into the plot  "
+            },
+            default);
+
+        result.IsSuccess.Should().BeTrue();
+        store.Removals.Added.Single().Row.Note.Should().Be("elephants got into the plot",
+            "trimmed, and stored HERE — this is the only home the farmer's own words have");
+
+        var audited = store.AuditedRemovals.Should().ContainSingle().Subject;
+        audited.Details.Should().Be("VEG000001 · Other",
+            "audit Details is code-authored text: the crop code the admin already sees plus the reason word");
+        audited.Details.Should().NotContain("elephants",
+            "the farmer's free text is never copied into the admin activity log");
+    }
+
+    [Fact]
+    public async Task Update_TheRemovalAudit_RunsAfterTheCommit_AndNamesTheFarmerAsActor()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, plantedDate: Planted);
+
+        await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = null,
+                ClearReason = PlantedDateRemovalReasons.Harvested
+            },
+            default);
+
+        var audited = store.AuditedRemovals.Should().ContainSingle().Subject;
+        audited.Actor.Should().Be(UserA, "the actor is the farmer — this is the first non-admin event");
+        audited.Details.Should().Be("VEG000001 · Harvested");
+        audited.CommitCountAtCall.Should().Be(1,
+            "audited AFTER the commit, like every other Record* call: the log records what happened, it "
+            + "does not gate it");
+    }
+
+    [Fact]
+    public async Task Update_AReasonWhenSettingADate_Is400_AndChangesNothing()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = Planted,
+                ClearReason = PlantedDateRemovalReasons.Harvested
+            },
+            default);
+
+        result.Error.Should().Be(PortfolioErrors.ClearReasonNotApplicable,
+            "a reason for a removal that is not happening would be accepted and then vanish — that is a "
+            + "contract lie, not a harmless extra field");
+        store.Watchlist.Rows.Single().PlantedDate.Should().BeNull();
+        store.Watchlist.CommitCount.Should().Be(0);
+        store.Removals.Added.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Update_AReasonWhenClearingAnAlreadyEmptyDate_Is400()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = null,
+                ClearReason = PlantedDateRemovalReasons.Harvested
+            },
+            default);
+
+        result.Error.Should().Be(PortfolioErrors.ClearReasonNotApplicable,
+            "nothing was removed, so nothing may be recorded as removed");
+        store.Removals.Added.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Update_AReasonOnAMarketsOnlyUpdate_Is400()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla }, plantedDate: Planted);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Keppetipola },
+                ClearReason = PlantedDateRemovalReasons.Harvested
+            },
+            default);
+
+        result.Error.Should().Be(PortfolioErrors.ClearReasonNotApplicable,
+            "omitting plantedDate means 'leave the date alone', so there is no removal to explain");
+        store.Watchlist.Rows.Single().Markets.Select(m => m.MarketId).Should().Equal(new[] { Dambulla },
+            "and the markets are untouched, because everything is validated before anything is mutated");
+        store.Watchlist.CommitCount.Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData("Harvested")]      // right word, wrong case
+    [InlineData("cropfailed")]     // right word, wrong case
+    [InlineData("CROP_FAILED")]    // snake_case guess
+    [InlineData("abandoned")]      // not a member at all
+    public async Task Update_AnUnknownReason_Is400_AndTheMatchIsCaseSensitive(string reason)
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, plantedDate: Planted);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA, CropId = Carrot, PlantedDate = null, ClearReason = reason
+            },
+            default);
+
+        result.Error.Should().Be(PortfolioErrors.InvalidClearReason,
+            "the four spellings are the contract; guessing at casing is how a client and a server stop "
+            + "agreeing on what a value means");
+        store.Watchlist.Rows.Single().PlantedDate.Should().Be(Planted);
+        store.Removals.Added.Should().BeEmpty();
+        store.Watchlist.CommitCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Update_ANoteWithoutAReason_Is400()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla });
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Keppetipola },
+                ClearReasonNote = "sold the plot"
+            },
+            default);
+
+        result.Error.Should().Be(PortfolioErrors.ClearReasonNoteWithoutReason,
+            "the note annotates a reason; alone it would be stored against nothing");
+        store.Watchlist.CommitCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Update_ClearingWithANoteButNoReason_AsksForTheReasonFirst()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, plantedDate: Planted);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = null,
+                ClearReasonNote = "harvested a bit early"
+            },
+            default);
+
+        // Both rules are broken; the actionable one wins. A caller told "your note has no reason" would
+        // delete the note, when what they owe is the reason.
+        result.Error.Should().Be(PortfolioErrors.ClearReasonRequired);
+    }
+
+    [Fact]
+    public async Task Update_AnOverlongNote_Is400_AndIsNeverTruncated()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, plantedDate: Planted);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = null,
+                ClearReason = PlantedDateRemovalReasons.Other,
+                ClearReasonNote = new string('n', PlantedDateRemoval.NoteMaxLength + 1)
+            },
+            default);
+
+        result.Error.Should().Be(PortfolioErrors.ClearReasonNoteTooLong,
+            "silently shortening a farmer's own words is worse than asking them to shorten them");
+        store.Removals.Added.Should().BeEmpty();
+        store.Watchlist.Rows.Single().PlantedDate.Should().Be(Planted);
+        store.Watchlist.CommitCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Update_ANoteExactlyAtTheCap_IsAccepted_AndStoredWhole()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, plantedDate: Planted);
+        var note = new string('n', PlantedDateRemoval.NoteMaxLength);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = null,
+                ClearReason = PlantedDateRemovalReasons.Other,
+                ClearReasonNote = note
+            },
+            default);
+
+        result.IsSuccess.Should().BeTrue("the cap is inclusive — 300 characters is a legal note");
+        store.Removals.Added.Single().Row.Note.Should().Be(note);
+    }
+
+    [Fact]
+    public async Task Update_ANoteAtTheCap_WrappedInWhitespace_IsMeasuredAfterTrimming_NotBefore()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, plantedDate: Planted);
+        var note = new string('n', PlantedDateRemoval.NoteMaxLength);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                PlantedDate = null,
+                ClearReason = PlantedDateRemovalReasons.Other,
+                ClearReasonNote = "   " + note + "   "
+            },
+            default);
+
+        // The cap is measured on the note that would actually be STORED, i.e. the trimmed one. Measuring the
+        // raw string instead would reject this request for characters the farmer never typed and that never
+        // reach the column — and a UI that pads its textarea value would look like a server bug.
+        result.IsSuccess.Should().BeTrue(
+            "leading and trailing whitespace is not part of the note, so a 300-character note stays legal "
+            + "however it was padded on the wire");
+        store.Removals.Added.Single().Row.Note.Should().Be(note,
+            "stored whole at exactly the cap, with the padding gone");
+        store.Removals.Added.Single().Row.Note.Should().HaveLength(PlantedDateRemoval.NoteMaxLength);
+    }
+
+    [Fact]
+    public async Task Update_ClearingAnAlreadyEmptyDate_WithoutAReason_IsStillTheSameNoOp()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla });
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand { UserId = UserA, CropId = Carrot, PlantedDate = null },
+            default);
+
+        result.IsSuccess.Should().BeTrue(
+            "there is no date to lose, so there is nothing to explain — this request is unchanged by the "
+            + "reason contract");
+        result.Data.PlantedDateChanged.Should().BeFalse();
+        result.Data.Item.PlantedDate.Should().BeNull();
+        store.Removals.Added.Should().BeEmpty();
+        store.AuditedRemovals.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Update_ClearingADateAndReplacingMarkets_IsOneCommitWithOneRemovalRow()
+    {
+        var store = NewStore();
+        Seed(store, UserA, Carrot, new[] { Dambulla }, plantedDate: Planted);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Carrot,
+                MarketIds = new List<Guid> { Keppetipola },
+                PlantedDate = null,
+                ClearReason = PlantedDateRemovalReasons.Harvested
+            },
+            default);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Data.MarketsChanged.Should().BeTrue();
+        result.Data.PlantedDateChanged.Should().BeTrue();
+        store.Removals.Added.Should().ContainSingle().Which.CommitCountAtAdd.Should().Be(0);
+        store.Watchlist.CommitCount.Should().Be(1,
+            "markets, date and removal row are all one transaction — a half-applied update is never "
+            + "observable");
+    }
+
+    [Fact]
+    public async Task Update_ARejectedRowOwnership_NeverRecordsARemoval()
+    {
+        var store = NewStore();
+        Seed(store, UserB, Tomato, plantedDate: Planted);
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateWatchlistEntryCommand
+            {
+                UserId = UserA,
+                CropId = Tomato,
+                PlantedDate = null,
+                ClearReason = PlantedDateRemovalReasons.Harvested
+            },
+            default);
+
+        result.Error.Should().Be(PortfolioErrors.WatchlistEntryNotFound);
+        store.Watchlist.Rows.Single().PlantedDate.Should().Be(Planted,
+            "another farmer's planting date is not clearable, with or without a reason");
+        store.Removals.Added.Should().BeEmpty();
+        store.AuditedRemovals.Should().BeEmpty();
     }
 
     [Fact]
@@ -1719,6 +2158,43 @@ public class PortfolioHandlerTests
         });
         PortfolioErrors.IsNotFound("watchlist_full").Should().BeFalse(
             "the two families map to different status codes and must not overlap");
+    }
+
+    [Fact]
+    public void ClearReasonWireCodes_AreFrozen_AndAre400sNot422s()
+    {
+        PortfolioErrors.ClearReasonRequired.Should().Be("clear_reason_required");
+        PortfolioErrors.ClearReasonNotApplicable.Should().Be("clear_reason_not_applicable");
+        PortfolioErrors.InvalidClearReason.Should().Be("invalid_clear_reason");
+        PortfolioErrors.ClearReasonNoteWithoutReason.Should().Be("clear_reason_note_without_reason");
+        PortfolioErrors.ClearReasonNoteTooLong.Should().Be("clear_reason_note_too_long");
+
+        PortfolioErrors.BadRequestCodes.Should().BeEquivalentTo(new[]
+        {
+            "clear_reason_required", "clear_reason_not_applicable", "invalid_clear_reason",
+            "clear_reason_note_without_reason", "clear_reason_note_too_long"
+        });
+
+        // The three families are disjoint: one code, one status. An overlap would make the status depend on
+        // the order the controller happens to test them in.
+        foreach (var code in PortfolioErrors.BadRequestCodes)
+        {
+            PortfolioErrors.IsUnprocessable(code).Should().BeFalse(
+                "the payload is malformed, not a well-formed request the product refuses");
+            PortfolioErrors.IsNotFound(code).Should().BeFalse();
+        }
+    }
+
+    [Fact]
+    public void ClearReasonWireValues_AreTheFrozenCamelCaseStrings()
+    {
+        PlantedDateRemovalReasons.Harvested.Should().Be("harvested");
+        PlantedDateRemovalReasons.CropFailed.Should().Be("cropFailed");
+        PlantedDateRemovalReasons.EnteredByMistake.Should().Be("enteredByMistake");
+        PlantedDateRemovalReasons.Other.Should().Be("other");
+
+        PlantedDateRemovalReasons.KnownReasons.Should().Equal(
+            "harvested", "cropFailed", "enteredByMistake", "other");
     }
 
     [Fact]

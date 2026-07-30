@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using AgriForecast.API.Controllers;
 using AgriForecast.Application.Requests.Portfolio.Commands.UpdateWatchlistEntry;
+using AgriForecast.Application.Requests.Portfolio.Common;
 using FluentAssertions;
 
 namespace AgriForecast.Tests;
@@ -90,6 +91,40 @@ public class PortfolioWireContractTests
             .Which.Should().Be(Guid.Parse("b2a20001-0000-0000-0000-000000000002"));
         command.PlantedDateSpecified.Should().BeTrue();
         command.PlantedDate.Should().Be(new DateOnly(2026, 5, 1));
+    }
+
+    [Fact]
+    public void TheClearReasonFields_BindFromCamelCaseKeys()
+    {
+        var command = Bind(
+            """{"plantedDate":null,"clearReason":"cropFailed","clearReasonNote":"washed out"}""");
+
+        command.PlantedDateSpecified.Should().BeTrue();
+        command.ClearReason.Should().Be("cropFailed");
+        command.ClearReasonNote.Should().Be("washed out");
+    }
+
+    [Fact]
+    public void AClearReasonIsAbsentWhenTheKeyIs()
+    {
+        var command = Bind("""{"plantedDate":null}""");
+
+        command.ClearReason.Should().BeNull(
+            "a missing reason must reach the handler as null so it can answer clear_reason_required");
+        command.ClearReasonNote.Should().BeNull();
+    }
+
+    [Fact]
+    public void TheClearReasonValueSurvivesBindingVerbatim_EvenWhenMisCased()
+    {
+        // ASP.NET's binder is case-insensitive about KEY names, and there is nothing it can do about VALUES.
+        // "CROPFAILED" therefore arrives intact and is rejected by the handler as invalid_clear_reason —
+        // which is the point: if binding ever normalised the value, a mis-cased client would silently "work"
+        // here and break against any stricter reader.
+        var command = Bind("""{"plantedDate":null,"ClearReason":"CROPFAILED"}""");
+
+        command.ClearReason.Should().Be("CROPFAILED");
+        PlantedDateRemovalReasons.TryParse(command.ClearReason).Should().BeNull();
     }
 
     // The mechanism itself, so the reason the tests above pass cannot be quietly removed.

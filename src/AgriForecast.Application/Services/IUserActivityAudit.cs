@@ -68,4 +68,16 @@ public interface IUserActivityAudit
     // cancellation between sources and never witnesses the pass end.
     Task RecordIngestionServiceStopRequestedAsync(
         Guid actingAdminId, Guid batchId, CancellationToken ct = default);
+
+    // A FARMER cleared the planting date of a watched crop. The only method here whose actor is not an admin.
+    //
+    // details is pre-rendered by the caller (PlantedDateRemovalReasons.RenderAuditDetails) as
+    // "<CropCode> · <Reason word>", unlike the content methods, which render from an action + identifier.
+    // The reason enum is an Application concern and rendering it in one place keeps the farmer's free-text
+    // note out of the signature entirely: the note is NEVER audited, it lives only on the PlantedDateRemovals
+    // row written inside the same transaction as the clear. Called AFTER the commit and fail-open, like
+    // everything else here — but note the asymmetry: the REMOVAL row is transactional and load-bearing,
+    // whereas this log line is not.
+    Task RecordPlantedDateRemovedAsync(
+        Guid actorUserId, string? details, CancellationToken ct = default);
 }

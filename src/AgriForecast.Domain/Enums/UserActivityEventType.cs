@@ -15,6 +15,10 @@ namespace AgriForecast.Domain.Enums;
 // carry the acting admin as ActorUserId, no TargetUserId, and the pass's batchId in Details, so an
 // operator can join a control action to the IngestionRuns rows it produced. StopRequested is named for
 // what is actually knowable: the API signals cancellation, it does not witness the pass end.
+//
+// 12 is the first FARMER-authored event: the actor is the farmer themselves, not an admin. It carries the
+// crop code and the reason word in Details and, like every other event, no free text the user typed — the
+// farmer's own note about the removal lives only on the PlantedDateRemovals row.
 public enum UserActivityEventType
 {
     LoginSucceeded = 0,
@@ -28,5 +32,6 @@ public enum UserActivityEventType
     CropChanged = 8,
     MarketChanged = 9,
     IngestionServiceStarted = 10,
-    IngestionServiceStopRequested = 11
+    IngestionServiceStopRequested = 11,
+    PlantedDateRemoved = 12
 }

@@ -36,6 +36,12 @@ namespace AgriForecast.API.Controllers;
 /// because telling the UI "bad request" for a limit the farmer hit would send a developer hunting a
 /// serialization bug that does not exist.
 /// </para>
+/// <para>
+/// One 400 family carries the code body instead of the prose one: the <c>clear_reason_*</c> codes on PUT
+/// (see <see cref="Application.Requests.Portfolio.Common.PortfolioErrors.BadRequestCodes"/>). The status is
+/// 400 because the payload really is wrong, but the UI must tell "you owe me a reason" apart from "that note
+/// is too long", so it needs a code and not a sentence.
+/// </para>
 /// </remarks>
 [ApiController]
 [Route("api/portfolio")]
@@ -98,12 +104,19 @@ public class PortfolioController(IMediator mediator) : ControllerBase
         return BadRequest(ToErrorResponse(result.Error));
     }
 
-    // PUT /api/portfolio/watchlist/{cropId} { marketIds?, plantedDate? } — update ONE watched crop.
+    // PUT /api/portfolio/watchlist/{cropId} { marketIds?, plantedDate?, clearReason?, clearReasonNote? } —
+    // update ONE watched crop.
     // 200 { item, marketsChanged, plantedDateChanged } — item is the full entry in GET's shape.
     // 404 { "error": "watchlist_entry_not_found" } — the caller does not watch that crop.
     // 422 { "error": "too_many_markets" | "invalid_planted_date" }.
+    // 400 { "error": "clear_reason_required" | "clear_reason_not_applicable" | "invalid_clear_reason"
+    //                | "clear_reason_note_without_reason" | "clear_reason_note_too_long" } — the reason
+    //     contract for clearing a recorded planting date. Same code body as the 404/422 above, because the
+    //     UI has to react to each of these differently.
     // marketIds present = FULL REPLACE ([] clears); omitted = unchanged. plantedDate null = clear,
-    // omitted = unchanged. Per crop only — this never touches the caller's other crops.
+    // omitted = unchanged. Clearing a date the entry HAS requires clearReason (harvested | cropFailed |
+    // enteredByMistake | other, case-sensitive) and refuses one otherwise.
+    // Per crop only — this never touches the caller's other crops.
     [HttpPut("watchlist/{cropId}")]
     public async Task<IActionResult> UpdateWatchlistEntry(
         Guid cropId, [FromBody] UpdateWatchlistEntryCommand command)
@@ -125,6 +138,11 @@ public class PortfolioController(IMediator mediator) : ControllerBase
 
         if (PortfolioErrors.IsUnprocessable(result.Error))
             return UnprocessableEntity(ToCodeResponse(result.Error));
+
+        // A malformed payload, but a PINNED one: the clear-reason codes are 400s that the UI switches on, so
+        // they get the machine-readable body rather than the prose validation shape.
+        if (PortfolioErrors.IsBadRequestCode(result.Error))
+            return BadRequest(ToCodeResponse(result.Error));
 
         return BadRequest(ToErrorResponse(result.Error));
     }

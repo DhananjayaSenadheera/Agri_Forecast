@@ -247,6 +247,30 @@ public class PortfolioControllerTests
         Assert.IsType<UnprocessableEntityObjectResult>(response);
     }
 
+    [Theory]
+    [InlineData("clear_reason_required")]
+    [InlineData("clear_reason_not_applicable")]
+    [InlineData("invalid_clear_reason")]
+    [InlineData("clear_reason_note_without_reason")]
+    [InlineData("clear_reason_note_too_long")]
+    public async Task Update_ClearReasonCode_Maps400_WithTheMachineReadableBody(string code)
+    {
+        var mediator = MediatorReturning<UpdateWatchlistEntryCommand, Result<WatchlistEntryUpdate_ResultDto>>(
+            Result<WatchlistEntryUpdate_ResultDto>.Failure(code));
+
+        var response = await ControllerFor(mediator.Object, HttpContextFor(Caller))
+            .UpdateWatchlistEntry(RouteCrop, new UpdateWatchlistEntryCommand());
+
+        var badRequest = Assert.IsType<BadRequestObjectResult>(response);
+        badRequest.StatusCode.Should().Be(StatusCodes.Status400BadRequest,
+            "the payload really is wrong — a reason is missing, contradictory, misspelled or over-long");
+
+        // The CODE body, not the prose validation shape: the UI has to react to each of these differently,
+        // and switching on a code beats parsing a sentence.
+        var body = badRequest.Value!.GetType().GetProperty("error")!.GetValue(badRequest.Value) as string;
+        body.Should().Be(code);
+    }
+
     [Fact]
     public void NotFoundCodes_AreMatchedExactly_NotLoosely()
     {
@@ -255,5 +279,26 @@ public class PortfolioControllerTests
             "these are wire values the UI switches on, so the match is exact and case-sensitive");
         PortfolioErrors.IsNotFound(null).Should().BeFalse();
         PortfolioErrors.IsNotFound("watchlist entry not found").Should().BeFalse();
+    }
+
+    [Fact]
+    public void BadRequestCodes_AreMatchedExactly_NotLoosely()
+    {
+        // Every code that must map to a 400 WITH the machine-readable body. Listed literally rather than
+        // enumerated from BadRequestCodes: a matcher checked against its own source list would still pass if
+        // somebody widened both together.
+        PortfolioErrors.IsBadRequestCode("clear_reason_required").Should().BeTrue();
+        PortfolioErrors.IsBadRequestCode("clear_reason_not_applicable").Should().BeTrue();
+        PortfolioErrors.IsBadRequestCode("invalid_clear_reason").Should().BeTrue();
+        PortfolioErrors.IsBadRequestCode("clear_reason_note_without_reason").Should().BeTrue();
+        PortfolioErrors.IsBadRequestCode("clear_reason_note_too_long").Should().BeTrue();
+
+        // A loose or case-insensitive match would let prose failure text be served as a code body, so the UI
+        // would switch on a sentence and show the wrong recovery step.
+        PortfolioErrors.IsBadRequestCode("Clear_Reason_Required").Should().BeFalse(
+            "these are wire values the UI switches on, so the match is exact and case-sensitive");
+        PortfolioErrors.IsBadRequestCode("clear reason required").Should().BeFalse();
+        PortfolioErrors.IsBadRequestCode(null).Should().BeFalse();
+        PortfolioErrors.IsBadRequestCode("").Should().BeFalse();
     }
 }

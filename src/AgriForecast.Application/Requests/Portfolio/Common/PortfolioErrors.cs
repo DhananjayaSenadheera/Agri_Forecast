@@ -5,9 +5,10 @@ namespace AgriForecast.Application.Requests.Portfolio.Common;
 /// switches on them to choose its message, so they are lowercase snake_case, stable, and never localised
 /// or reworded here. Precedent: IngestionServiceControlErrors.
 /// <para>
-/// The controller maps <see cref="WatchlistEntryNotFound"/> to HTTP 404 with the body
-/// <c>{ "error": "watchlist_entry_not_found" }</c>. Everything else is a 400 in the usual
-/// <c>{ errors: [{ property, message }] }</c> shape.
+/// The controller maps <see cref="WatchlistEntryNotFound"/> to HTTP 404 and the
+/// <see cref="UnprocessableCodes"/> to 422, both with the body <c>{ "error": code }</c>. The
+/// <see cref="BadRequestCodes"/> are 400 with that SAME code body; every other failure is a 400 in the
+/// usual prose <c>{ errors: [{ property, message }] }</c> shape.
 /// </para>
 /// </summary>
 public static class PortfolioErrors
@@ -40,6 +41,43 @@ public static class PortfolioErrors
     /// </summary>
     public const string InvalidPlantedDate = "invalid_planted_date";
 
+    // Clearing a recorded planting date requires a reason. These five are 400s, not 422s: unlike the caps
+    // above, the payload itself is wrong — a reason is missing, contradicts the rest of the request, is
+    // misspelled, or carries a note the request has no reason to attach it to. The UI's response is to fix
+    // the payload (show the reason picker again), which is exactly what 400 means.
+
+    /// <summary>
+    /// The request clears a planting date the entry actually HAS, and carried no <c>clearReason</c>. A date
+    /// disappearing with no recorded reason is the one outcome this feature exists to prevent.
+    /// </summary>
+    public const string ClearReasonRequired = "clear_reason_required";
+
+    /// <summary>
+    /// A <c>clearReason</c> was sent by a request that is NOT clearing an existing date — it sets a date, or
+    /// clears one that was already null. Accepted-and-ignored would be a contract lie: the caller would
+    /// believe a reason had been recorded when no removal happened at all.
+    /// </summary>
+    public const string ClearReasonNotApplicable = "clear_reason_not_applicable";
+
+    /// <summary>
+    /// <c>clearReason</c> is not one of <see cref="PlantedDateRemovalReasons.KnownReasons"/>. Matched
+    /// case-sensitively, so <c>"cropfailed"</c> lands here rather than being guessed at.
+    /// </summary>
+    public const string InvalidClearReason = "invalid_clear_reason";
+
+    /// <summary>
+    /// A <c>clearReasonNote</c> arrived without a <c>clearReason</c>. The note annotates the reason; on its
+    /// own it would be stored against nothing, or dropped silently.
+    /// </summary>
+    public const string ClearReasonNoteWithoutReason = "clear_reason_note_without_reason";
+
+    /// <summary>
+    /// <c>clearReasonNote</c> is longer than <see cref="Domain.Entities.PlantedDateRemoval.NoteMaxLength"/>
+    /// characters. Rejected rather than truncated — silently shortening a farmer's own words is worse than
+    /// asking them to shorten them.
+    /// </summary>
+    public const string ClearReasonNoteTooLong = "clear_reason_note_too_long";
+
     /// <summary>Every code the endpoints can return as a 404.</summary>
     public static readonly IReadOnlyCollection<string> NotFoundCodes = new[]
     {
@@ -58,10 +96,29 @@ public static class PortfolioErrors
         InvalidPlantedDate
     };
 
+    /// <summary>
+    /// Every code the endpoints return as a 400 WITH THE CODE BODY rather than the prose validation shape.
+    /// These are malformed payloads, so 400 is right; they get the machine-readable body because the UI has
+    /// to act on each one differently (re-prompt for a reason, flag the note, drop a stale field) and
+    /// switching on a code beats parsing a sentence.
+    /// </summary>
+    public static readonly IReadOnlyCollection<string> BadRequestCodes = new[]
+    {
+        ClearReasonRequired,
+        ClearReasonNotApplicable,
+        InvalidClearReason,
+        ClearReasonNoteWithoutReason,
+        ClearReasonNoteTooLong
+    };
+
     /// <summary>True when the error is a pinned not-found code (exact, case-sensitive match).</summary>
     public static bool IsNotFound(string? error) => error is not null && NotFoundCodes.Contains(error);
 
     /// <summary>True when the error is a pinned unprocessable code (exact, case-sensitive match).</summary>
     public static bool IsUnprocessable(string? error)
         => error is not null && UnprocessableCodes.Contains(error);
+
+    /// <summary>True when the error is a pinned bad-request code (exact, case-sensitive match).</summary>
+    public static bool IsBadRequestCode(string? error)
+        => error is not null && BadRequestCodes.Contains(error);
 }

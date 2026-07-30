@@ -87,6 +87,9 @@ public static class InfsDependencyInjection
         services.AddScoped<IIngestionWatermarkRepository, IngestionWatermarkRepository>();
         services.AddScoped<IIngestionRunRepository, IngestionRunRepository>();
         services.AddScoped<IUserCropWatchlistRepository, UserCropWatchlistRepository>();
+        // Scoped, not singleton: it shares the request's DbContext so its insert is committed by the
+        // handler's unit of work, in the same transaction as the planting date it explains.
+        services.AddScoped<IPlantedDateRemovalRepository, PlantedDateRemovalRepository>();
         services.AddScoped<IUserRepository, UserRepository>();
         services.AddScoped<IPasswordHasher, PasswordHasher>();
         services.AddScoped<IJwtTokenGenerator, JwtTokenGenerator>();

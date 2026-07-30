@@ -77,6 +77,12 @@ public class UserActivityAudit : IUserActivityAudit
         WriteAsync(UserActivityEvent.IngestionServiceStopRequested(
             actingAdminId, RenderBatchDetails(batchId), DateTime.UtcNow), ct);
 
+    // The farmer's own event. details arrives already rendered ("<CropCode> · <Reason word>") and carries no
+    // free text the farmer typed; the note stays on the PlantedDateRemovals row.
+    public Task RecordPlantedDateRemovedAsync(
+        Guid actorUserId, string? details, CancellationToken ct = default) =>
+        WriteAsync(UserActivityEvent.PlantedDateRemoved(actorUserId, details, DateTime.UtcNow), ct);
+
     // The one place a pipeline-control Details note is rendered: "batch <guid>". Guid.ToString() is
     // lowercase, matching the casing every other batchId is written and searched in.
     public static string RenderBatchDetails(Guid batchId) => $"batch {batchId}";

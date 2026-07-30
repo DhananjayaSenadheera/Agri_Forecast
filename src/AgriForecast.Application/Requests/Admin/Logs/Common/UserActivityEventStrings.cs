@@ -26,6 +26,10 @@ public static class UserActivityEventStrings
     public const string IngestionServiceStarted = "ingestionServiceStarted";
     public const string IngestionServiceStopRequested = "ingestionServiceStopRequested";
 
+    // The first FARMER-authored event: a farmer cleared the planting date of a watched crop. Details is
+    // "<CropCode> · <Reason word>"; the farmer's optional free-text note is deliberately NOT in it.
+    public const string PlantedDateRemoved = "plantedDateRemoved";
+
     // Ordered so KnownTypes (and therefore the validator's error message) reads in enum order.
     private static readonly (UserActivityEventType Type, string Wire)[] Pairs =
     {
@@ -40,7 +44,8 @@ public static class UserActivityEventStrings
         (UserActivityEventType.CropChanged, CropChanged),
         (UserActivityEventType.MarketChanged, MarketChanged),
         (UserActivityEventType.IngestionServiceStarted, IngestionServiceStarted),
-        (UserActivityEventType.IngestionServiceStopRequested, IngestionServiceStopRequested)
+        (UserActivityEventType.IngestionServiceStopRequested, IngestionServiceStopRequested),
+        (UserActivityEventType.PlantedDateRemoved, PlantedDateRemoved)
     };
 
     private static readonly Dictionary<UserActivityEventType, string> ByType =

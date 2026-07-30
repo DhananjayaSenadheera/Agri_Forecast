@@ -309,6 +309,46 @@ public class AdminLogsHandlerTests
         item.Details.Should().Be("deleted 'VEG000071'");
     }
 
+    [Fact]
+    public async Task Activity_PlantedDateRemoved_IsFilterable_AndAppearsUnfiltered()
+    {
+        // The farmer-authored event. The trap it guards against is a type that renders in an unfiltered page
+        // but 400s as its own ?types= value, which is how a half-added event member shows up.
+        var farmer = Guid.NewGuid();
+        var store = new FakeStore();
+        store.Activity.Add((ARow(UserActivityEventType.LoginSucceeded, DateTime.UtcNow.AddMinutes(-1),
+            actor: Guid.NewGuid()), 1));
+        store.Activity.Add((ARow(UserActivityEventType.PlantedDateRemoved, DateTime.UtcNow.AddMinutes(-2),
+            actor: farmer, details: "VEG000019 · Harvested"), 2));
+
+        var unfiltered = (await ActivityHandler(store).Handle(new GetUserActivityQuery(), default)).Data;
+        unfiltered.Items.Select(i => i.EventType).Should().Contain("plantedDateRemoved");
+
+        var filtered = (await ActivityHandler(store).Handle(
+            new GetUserActivityQuery { Types = "plantedDateRemoved" }, default)).Data;
+
+        store.CapturedTypes.Should().BeEquivalentTo(new[] { UserActivityEventType.PlantedDateRemoved });
+        var item = filtered.Items.Should().ContainSingle().Subject;
+        item.EventType.Should().Be("plantedDateRemoved");
+        item.ActorUserId.Should().Be(farmer, "the actor is the farmer, not an admin");
+        item.TargetUserId.Should().BeNull();
+        item.Details.Should().Be("VEG000019 · Harvested");
+    }
+
+    [Fact]
+    public async Task ActivityValidator_AcceptsPlantedDateRemoved()
+    {
+        (await _activityValidator.ValidateAsync(new GetUserActivityQuery
+        {
+            Page = 1, PageSize = 20, Types = "plantedDateRemoved"
+        })).IsValid.Should().BeTrue();
+
+        (await _activityValidator.ValidateAsync(new GetUserActivityQuery
+        {
+            Page = 1, PageSize = 20, Type = "plantedDateRemoved"
+        })).IsValid.Should().BeTrue();
+    }
+
     // ?types= : the OR-combined multi filter.
     private static FakeStore MixedActivityStore()
     {

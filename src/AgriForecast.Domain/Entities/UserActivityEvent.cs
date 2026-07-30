@@ -127,6 +127,15 @@ public class UserActivityEvent
         Guid actorUserId, string? details, DateTime occurredUtc) =>
         ContentChanged(UserActivityEventType.IngestionServiceStopRequested, actorUserId, details, occurredUtc);
 
+    // A FARMER cleared the planting date of a watched crop. Same row shape as a content event (actor, no
+    // target, a short Details note) but the actor is the farmer, not an admin — this is the first event a
+    // non-admin authors. Details is "<CropCode> · <Reason word>", rendered by
+    // PlantedDateRemovalReasons.RenderAuditDetails; the farmer's free-text note is NEVER passed here, it
+    // lives only on the PlantedDateRemovals row that the same request wrote inside its transaction.
+    public static UserActivityEvent PlantedDateRemoved(
+        Guid actorUserId, string? details, DateTime occurredUtc) =>
+        ContentChanged(UserActivityEventType.PlantedDateRemoved, actorUserId, details, occurredUtc);
+
     // Private so a content or pipeline row can only be built through the intent-named factories above.
     // An empty actor id is stored as NULL rather than an all-zeros GUID, so an action that reached the
     // handler without a JWT-stamped admin is recorded honestly instead of looking like a real account.
