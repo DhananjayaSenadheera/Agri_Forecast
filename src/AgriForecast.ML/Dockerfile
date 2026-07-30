@@ -40,6 +40,14 @@ COPY ingest_news.py .
 COPY score_news.py .
 # ingest_cbsl_macro.py is invoked by run-monthly.sh against this image.
 COPY ingest_cbsl_macro.py .
+# ingest_cbsl_service.py is lazily imported by the /admin/ingest-cbsl
+# endpoint (serving/app.py:318). Found missing IN PRODUCTION 2026-07-30: every
+# nightly CBSL pass since the k8s cutover (07-26) failed with "ML returned 503"
+# because this COPY was absent -- the ModuleNotFoundError only surfaces at
+# request time (lazy import), never at container startup. Its own imports all
+# resolve inside agriforecast_ml/ (cbsl_report, canonical, data_quality, db),
+# which is already copied above, so this one line is the complete fix.
+COPY ingest_cbsl_service.py .
 # ingest_harti_service.py is lazily imported by the /admin/ingest-harti
 # endpoint (serving/app.py:256). SF3 (R2 Step 2 reviewer should-fix): this was
 # a PRE-EXISTING latent gap -- the script was never COPY'd here, so that
