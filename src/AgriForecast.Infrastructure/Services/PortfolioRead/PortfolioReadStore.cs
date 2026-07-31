@@ -168,10 +168,10 @@ public class PortfolioReadStore : IPortfolioReadStore
     // the isolation story for the most private table in the product, so it is written first and never
     // parameterised away into a shared helper that a future edit could call without it.
     //
-    // Crops is an inner join (a sale always has one, FK-enforced) and Markets a LEFT join (the market is
-    // optional), written as GroupJoin/DefaultIfEmpty because that is the only spelling EF translates to a
-    // real LEFT JOIN. No navigation properties are used or needed: Crop and Market have none into this
-    // table by design (PRD 3.1), so nothing can Include its way from reference data into a farmer's sales.
+    // The crop and market display fields are fetched with CORRELATED SUBQUERIES rather than joins; the
+    // reasoning is with the Project method below, which is the one place they are written. No navigation
+    // properties are used or needed: Crop and Market have none into this table by design (PRD 3.1), so
+    // nothing can Include its way from reference data into a farmer's sales.
 
     public async Task<UserSalesPage> GetSalesPageAsync(
         Guid userId, Guid? cropId, int page, int pageSize, CancellationToken ct = default)
@@ -188,6 +188,15 @@ public class PortfolioReadStore : IPortfolioReadStore
         // never disagree about what is being paged.
         var total = await filtered.CountAsync(ct);
 
+        // Defence in depth against a Skip overflow even though GetSalesQuery.EffectivePage owns the real
+        // bounds. THE ARITHMETIC IS DONE IN long AND CLAMPED: (page - 1) * pageSize is a signed int
+        // multiply, so a page number near int.MaxValue wraps to a NEGATIVE offset, which SQL Server
+        // rejects outright — a 500 for a caller who only sent a silly page number. Identical guard, and
+        // identical wording, to LogsReadStore / IngestionReadStore / ForecastAccuracyReadStore.
+        // (SQLite silently treats a negative OFFSET as 0, so this cannot be caught by the SQLite tests
+        // below; it is guarded here rather than discovered in production.)
+        var skip = (int)Math.Clamp((long)(page - 1) * pageSize, 0L, int.MaxValue);
+
         // ORDER AND PAGE THE ENTITY QUERY, THEN PROJECT — never the other way round. Sorting the projected
         // record made EF try to translate an ORDER BY over a constructor call and it refused the whole
         // query (a runtime 500 on the first GET). Ordering here is over real columns of one table, which is
@@ -196,13 +205,15 @@ public class PortfolioReadStore : IPortfolioReadStore
         // Newest sale first. CreatedAtUtc breaks ties between two sales on the SAME day (the row typed
         // second is shown first), and Id is the last resort purely so the order is TOTAL: without a
         // deterministic tiebreak, two rows sharing a date AND an instant could swap places between two page
-        // requests and be shown twice or not at all.
+        // requests and be shown twice or not at all. Both tiebreaks are exercised against a real database
+        // in UserSaleTests — asserting them against a fake that re-implements the same ORDER BY would only
+        // be asserting the fake.
         var items = await Project(
                 filtered
                     .OrderByDescending(s => s.SaleDate)
                     .ThenByDescending(s => s.CreatedAtUtc)
                     .ThenByDescending(s => s.Id)
-                    .Skip((page - 1) * pageSize)
+                    .Skip(skip)
                     .Take(pageSize))
             .ToListAsync(ct);
 
@@ -224,12 +235,17 @@ public class PortfolioReadStore : IPortfolioReadStore
     // adds no filter and no ordering of its own, and must never be handed an unscoped one.
     //
     // The crop and market display fields come from CORRELATED SUBQUERIES rather than joins, matching
-    // GetWatchlistAsync above. Two reasons, both learned the hard way against the real database:
-    //   * a join changes the shape EF composes over, which broke the paged query's ORDER BY;
-    //   * the market is OPTIONAL, and a GroupJoin needs matching key types — casting Guid to Guid? to line
-    //     them up produced an object comparison EF could not translate at all.
-    // A subquery per column is honest here: both tables are tiny reference data, both lookups are by
-    // primary key, and neither can change the row count the way a mis-written join can.
+    // GetWatchlistAsync above. A subquery per column is honest here: both tables are tiny reference data,
+    // both lookups are by primary key, and neither can change the row count the way a mis-written join
+    // can — in particular the OPTIONAL market cannot silently turn into an inner join and drop every sale
+    // that names no market.
+    //
+    // WHAT ACTUALLY BROKE, stated precisely because an earlier version of this comment overstated it: the
+    // single runtime failure was ORDERING THE PROJECTED RECORD (see GetSalesPageAsync — EF cannot
+    // translate an ORDER BY over a constructor call). The GroupJoin/DefaultIfEmpty spelling this replaced
+    // was NOT the culprit: it compiles fine under the SQL Server provider (verified with ToQueryString on
+    // the real model), and it appeared in the failing expression tree only because the tree printed the
+    // whole query. The ORDER-BY class is the one guarded by the SQLite tests in UserSaleTests.
     private IQueryable<UserSaleRow> Project(IQueryable<Domain.Entities.UserSale> scoped)
     {
         return scoped.Select(s => new UserSaleRow(

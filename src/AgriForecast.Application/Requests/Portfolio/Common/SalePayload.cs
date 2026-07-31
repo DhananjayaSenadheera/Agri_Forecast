@@ -44,13 +44,26 @@ internal sealed record SalePayload(
         string? note,
         DateTime nowUtc)
     {
+        // ROUNDED TO THE COLUMN'S SCALE BEFORE ANYTHING IS CHECKED, so the number that is validated is the
+        // number that is stored, returned and audited — all four provably identical.
+        //
+        // A farmer who types Rs 155.999 gets Rs 156.00 rather than a rejection: it is obviously a price,
+        // refusing it over a third decimal would be unkind, and the money columns are decimal(10,2) /
+        // decimal(12,2) so SOMETHING was always going to round it. Doing it here rather than leaving it to
+        // SQL Server is what stops the response (read back from the database) and the audit line (rendered
+        // from this payload) drifting apart by a cent. AwayFromZero matches SQL Server's own scale
+        // conversion, so a value that skips this path still lands on the same number.
+        var price = Round(pricePerKg);
+        var quantity = Round(quantityKg);
+
         // Missing and non-positive share a code: both mean "that is not a price", and both are fixed in the
         // same box. Above the ceiling gets its OWN code, because a mis-keyed zero is a different mistake
-        // from an empty field and the farmer fixes it differently.
-        if (!pricePerKg.HasValue || pricePerKg.Value <= 0m)
+        // from an empty field and the farmer fixes it differently. Checked on the ROUNDED value, so a price
+        // that rounds to zero is refused as the zero it would have been stored as.
+        if (!price.HasValue || price.Value <= 0m)
             return (PortfolioErrors.InvalidPrice, null);
 
-        if (pricePerKg.Value > SaleLimits.MaxPricePerKg)
+        if (price.Value > SaleLimits.MaxPricePerKg)
             return (PortfolioErrors.PriceOutOfRange, null);
 
         // Strict yyyy-MM-dd: missing, blank and mis-spelled all land here rather than half of them becoming
@@ -65,9 +78,11 @@ internal sealed record SalePayload(
         if (parsedDate.Value > PortfolioTime.LatestPlausibleLocalDate(nowUtc))
             return (PortfolioErrors.SaleDateFuture, null);
 
-        // Optional: an absent quantity is never an error. A supplied one must be a real amount.
-        if (quantityKg.HasValue
-            && (quantityKg.Value <= 0m || quantityKg.Value > SaleLimits.MaxQuantityKg))
+        // Optional: an absent quantity is never an error. A supplied one must be a real amount — again
+        // measured on the rounded value, so a quantity that rounds to zero is refused rather than stored
+        // as "0 kg".
+        if (quantity.HasValue
+            && (quantity.Value <= 0m || quantity.Value > SaleLimits.MaxQuantityKg))
             return (PortfolioErrors.InvalidQuantity, null);
 
         // MEASURED ON THE TRIMMED VALUE, which is what would be stored — so a note that is only over the cap
@@ -79,6 +94,21 @@ internal sealed record SalePayload(
             return (PortfolioErrors.NoteTooLong, null);
 
         return (null, new SalePayload(
-            marketId, parsedDate.Value, pricePerKg.Value, quantityKg, trimmedNote));
+            marketId, parsedDate.Value, price.Value, quantity, trimmedNote));
     }
+
+    /// <summary>
+    /// The scale of the money columns (<c>decimal(10,2)</c> and <c>decimal(12,2)</c>) — cents on the price,
+    /// 10 g on the quantity.
+    /// </summary>
+    public const int MoneyScale = 2;
+
+    /// <summary>
+    /// Rounds to <see cref="MoneyScale"/> decimal places, away from zero on a midpoint — the same rule SQL
+    /// Server applies when narrowing a decimal's scale, so this never disagrees with the column.
+    /// </summary>
+    public static decimal? Round(decimal? value)
+        => value.HasValue
+            ? decimal.Round(value.Value, MoneyScale, MidpointRounding.AwayFromZero)
+            : null;
 }

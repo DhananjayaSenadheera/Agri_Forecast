@@ -33,18 +33,22 @@ namespace AgriForecast.API.Controllers;
 /// watches that crop.
 /// </para>
 /// <para>
-/// THREE ERROR SHAPES, deliberately distinct. A malformed request is a 400 with the usual
+/// THREE ERROR SHAPES, deliberately distinct. An unpinned failure is a 400 with the usual
 /// <c>{ errors: [{ property, message }] }</c> body. A row the caller does not own is a 404 with
-/// <c>{ "error": "watchlist_entry_not_found" }</c>. A well-formed request the PRODUCT refuses — the 11th
-/// crop, a 4th market, an impossible planting date — is a 422 with the same <c>{ "error": code }</c> body,
-/// because telling the UI "bad request" for a limit the farmer hit would send a developer hunting a
-/// serialization bug that does not exist.
+/// <c>{ "error": "watchlist_entry_not_found" }</c> or <c>{ "error": "sale_not_found" }</c>. A well-formed
+/// request the PRODUCT refuses — the 11th crop, a 4th market, an impossible planting date — is a 422 with
+/// the same <c>{ "error": code }</c> body, because telling the UI "bad request" for a limit the farmer hit
+/// would send a developer hunting a serialization bug that does not exist.
 /// </para>
 /// <para>
-/// One 400 family carries the code body instead of the prose one: the <c>clear_reason_*</c> codes on PUT
-/// (see <see cref="Application.Requests.Portfolio.Common.PortfolioErrors.BadRequestCodes"/>). The status is
-/// 400 because the payload really is wrong, but the UI must tell "you owe me a reason" apart from "that note
-/// is too long", so it needs a code and not a sentence.
+/// TWO 400 FAMILIES carry the code body instead of the prose one, and both live in
+/// <see cref="Application.Requests.Portfolio.Common.PortfolioErrors.BadRequestCodes"/>: the
+/// <c>clear_reason_*</c> codes on PUT /watchlist/{cropId}, and the sales-log validation codes
+/// (<c>invalid_price</c>, <c>price_out_of_range</c>, <c>invalid_sale_date</c>, <c>sale_date_future</c>,
+/// <c>invalid_quantity</c>, <c>note_too_long</c>, <c>unknown_crop</c>, <c>unknown_market</c>). The status is
+/// 400 in both because the payload really is wrong, but the UI must tell "you owe me a reason" apart from
+/// "that note is too long", and "fix the price" apart from "fix the date" — so each needs a code and not a
+/// sentence.
 /// </para>
 /// </remarks>
 [ApiController]

@@ -144,10 +144,15 @@ public static class PortfolioErrors
     public const string NoteTooLong = "note_too_long";
 
     /// <summary>
-    /// <c>cropId</c> does not match an existing crop. A 400 rather than a 404, matching how POST
-    /// /api/portfolio/watchlist answers an unknown crop id — the ROW being addressed (the sale) is not what
-    /// is missing, a value inside the payload is.
+    /// <c>cropId</c> does not match an existing crop. A 400 rather than a 404, because the ROW being
+    /// addressed (the sale) is not what is missing — a value inside the payload is.
     /// </summary>
+    /// <remarks>
+    /// SAME STATUS as the watchlist's unknown-crop answer, deliberately a CODED body rather than its prose
+    /// shape. POST /api/portfolio/watchlist rejects an unknown crop from a FluentValidation rule, which can
+    /// only produce <c>{ errors: [{ property, message }] }</c>; here the UI has to tell this apart from
+    /// seven other 400s to know which field to highlight, so it gets a code it can switch on.
+    /// </remarks>
     public const string UnknownCrop = "unknown_crop";
 
     /// <summary>

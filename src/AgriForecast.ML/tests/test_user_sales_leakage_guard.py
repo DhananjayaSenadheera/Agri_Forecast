@@ -42,22 +42,31 @@ _LOADERS = (
 )
 
 
-def _all_sources() -> list[Path]:
-    """Every Python module that can reach the model's inputs: the whole package
-    plus the top-level pipeline scripts.
+# The smallest number of modules this repo can plausibly have on the model's
+# input path. A POSITIVE LOWER BOUND, because "scanned zero files and found zero
+# offenders" is the way every absence-scanning guard dies: a renamed package or a
+# changed glob would otherwise turn this file green forever.
+_MIN_SOURCES_SCANNED = 30
+
+
+def _all_sources(root: Path = ML_ROOT) -> list[Path]:
+    """Every Python module under `root` that can reach the model's inputs: the
+    whole package plus the top-level pipeline scripts.
 
     Scanning the WHOLE tree rather than a hand-listed set is deliberate -- a
     future loader added anywhere is covered without anyone remembering to extend
-    a list.
+    a list. `root` is a parameter ONLY so the teeth test below can point the very
+    same function at a synthetic tree; production callers never pass it.
     """
-    return sorted((ML_ROOT / "agriforecast_ml").rglob("*.py")) + sorted(ML_ROOT.glob("*.py"))
+    return sorted((root / "agriforecast_ml").rglob("*.py")) + sorted(root.glob("*.py"))
 
 
-def _offenders(tokens=_FORBIDDEN_TOKENS) -> list[str]:
+def _offenders(root: Path = ML_ROOT, tokens=_FORBIDDEN_TOKENS) -> list[str]:
+    """Files under `root` that name any forbidden token."""
     found = []
-    for path in _all_sources():
+    for path in _all_sources(root):
         src = path.read_text(encoding="utf-8")
-        found += [f"{path.relative_to(ML_ROOT)}: {t}" for t in tokens if t in src]
+        found += [f"{path.relative_to(root)}: {t}" for t in tokens if t in src]
     return found
 
 
@@ -79,20 +88,48 @@ class TestUserSalesIsUnreachableFromPython:
             for token in _FORBIDDEN_TOKENS:
                 assert token not in src, f"{rel} must never read {token}"
 
-    def test_the_scan_actually_covers_the_loaders(self):
-        """Non-vacuity, part 1: the sweep above must really be looking at the
-        files that matter. If _all_sources() ever stopped returning them (a
-        renamed directory, a changed glob), the guard would pass by scanning
-        nothing at all."""
-        scanned = {p.relative_to(ML_ROOT).as_posix() for p in _all_sources()}
-        for rel in _LOADERS:
-            assert rel in scanned, f"{rel} is not being scanned by the guard"
+    def test_the_scan_reaches_a_real_and_substantial_tree(self):
+        """Non-vacuity, part 1 -- the POSITIVE LOWER BOUND.
 
-    def test_the_tokens_would_actually_fire(self, tmp_path):
-        """Non-vacuity, part 2: a synthetic loader that reads the table must be
-        caught. A guard nobody has ever seen fail is a guard nobody knows works."""
-        leak = "df = pd.read_sql('SELECT CropId, PricePerKg FROM UserSales', engine)\n"
-        assert any(t in leak for t in _FORBIDDEN_TOKENS)
+        The test above asserts an ABSENCE, and an absence is also what you get
+        from scanning nothing at all. Pin both that the named loaders are in the
+        swept set and that the set is not implausibly small, so a `return []`, a
+        renamed package or a broken glob is a failure rather than a pass.
+        """
+        scanned = _all_sources()
+        assert len(scanned) >= _MIN_SOURCES_SCANNED, (
+            f"only {len(scanned)} modules scanned -- the sweep has lost the tree, "
+            "so its clean result means nothing")
+
+        relative = {p.relative_to(ML_ROOT).as_posix() for p in scanned}
+        for rel in _LOADERS:
+            assert rel in relative, f"{rel} is not being scanned by the guard"
+
+    def test_the_guard_catches_a_real_leak(self, tmp_path):
+        """Non-vacuity, part 2 -- THE TEETH, and it must run the real function.
+
+        An earlier version of this test asserted a substring against a string
+        literal and never called `_offenders` at all: `return []` at the top of
+        the scanner left all five tests green. This one points the SAME function
+        at a synthetic tree containing a synthetic loader, so it fails the moment
+        the scanner stops scanning.
+        """
+        package = tmp_path / "agriforecast_ml"
+        package.mkdir()
+        (package / "clean.py").write_text("import pandas as pd\n", encoding="utf-8")
+        (package / "leaky_loader.py").write_text(
+            "df = pd.read_sql('SELECT CropId, PricePerKg FROM UserSales', engine)\n",
+            encoding="utf-8")
+        (tmp_path / "build_features.py").write_text("# nothing to see\n", encoding="utf-8")
+
+        offenders = _offenders(root=tmp_path)
+
+        assert offenders, "the scanner did not catch a module that plainly reads the table"
+        assert any("leaky_loader.py" in o for o in offenders)
+        assert any(o.endswith("UserSales") for o in offenders)
+        assert any(o.endswith("PricePerKg") for o in offenders)
+        assert not any("clean.py" in o for o in offenders), (
+            "a scanner that flags everything is as useless as one that flags nothing")
 
     def test_the_forecast_snapshot_guard_still_lists_the_table_too(self):
         """Belt and braces: the older sweep in test_forecast_snapshots.py also

@@ -105,6 +105,10 @@ public class SalesHandlerTests
         // with none) is visible here.
         public readonly List<Guid> CapturedSalesUserIds = new();
 
+        // Simulates a post-commit read-back that comes back empty (a replica lag, a dropped connection).
+        // The row IS committed in this state — which is the whole reason the handlers must not answer 400.
+        public bool ReadBackFails;
+
         public FakeStore()
         {
             // One setup per verb, written out rather than looped: Moq parses the expression tree, so a
@@ -175,6 +179,8 @@ public class SalesHandlerTests
         public Task<UserSaleRow?> GetSaleAsync(Guid userId, Guid saleId, CancellationToken ct = default)
         {
             CapturedSalesUserIds.Add(userId);
+            if (ReadBackFails) return Task.FromResult<UserSaleRow?>(null);
+
             var row = Sales.Rows.FirstOrDefault(s => s.UserId == userId && s.Id == saleId);
             return Task.FromResult(row is null ? null : Project(row));
         }
@@ -436,6 +442,27 @@ public class SalesHandlerTests
     }
 
     [Fact]
+    public async Task Record_QuantityCeiling_IsPinnedFromBothSides()
+    {
+        // Both sides at the WIRE layer, mirroring the price ceiling. The entity test pins the same boundary
+        // on the factory, but only this proves the handler's own comparison is `>` and not `>=` — the
+        // mutation that turns the cap into "100000 is too much" and refuses a legitimate lorry-load.
+        var store = NewStore();
+        var handler = RecordHandler(store);
+
+        var atCap = await handler.Handle(
+            NewSale(UserA, Carrot, quantity: SaleLimits.MaxQuantityKg), CancellationToken.None);
+        atCap.IsSuccess.Should().BeTrue("the ceiling is INCLUSIVE");
+        atCap.Data.QuantityKg.Should().Be(SaleLimits.MaxQuantityKg);
+
+        var overCap = await handler.Handle(
+            NewSale(UserA, Carrot, quantity: SaleLimits.MaxQuantityKg + 0.01m), CancellationToken.None);
+        overCap.Error.Should().Be("invalid_quantity");
+
+        SaleLimits.MaxQuantityKg.Should().Be(100_000m, "the ceiling is the wire contract");
+    }
+
+    [Fact]
     public async Task Record_AnAbsentQuantityIsNeverAnError()
     {
         var store = NewStore();
@@ -543,6 +570,87 @@ public class SalesHandlerTests
         store.Sales.Rows.Should().BeEmpty("not one of those six attempts wrote anything");
     }
 
+    // Money with more precision than the column can hold.
+
+    [Theory]
+    // A third decimal is ROUNDED, not refused: it is obviously a price, and the columns are decimal(10,2)
+    // and decimal(12,2) so something was always going to round it. Away from zero on a midpoint, matching
+    // what SQL Server does when it narrows a decimal's scale.
+    [InlineData("155.999", "156.00")]
+    [InlineData("155.994", "155.99")]
+    [InlineData("155.995", "156.00")]
+    [InlineData("0.005", "0.01")]
+    public async Task Record_MoreThanTwoDecimals_IsRoundedIdenticallyEverywhere(
+        string typed, string expected)
+    {
+        // THE POINT IS THE WORD "IDENTICALLY". The response is read back from the store and the audit line
+        // is rendered from the validated payload, so if the rounding happened in the database instead of in
+        // SalePayload these two could disagree by a cent and nobody would notice until a farmer compared
+        // their screen with an admin's log.
+        var store = NewStore();
+        var day = PastDay();
+
+        var result = await RecordHandler(store).Handle(
+            NewSale(UserA, Carrot, day, Money(typed)), CancellationToken.None);
+
+        var rounded = Money(expected)!.Value;
+
+        result.IsSuccess.Should().BeTrue();
+        result.Data.PricePerKg.Should().Be(rounded, "the response carries the stored number");
+        store.Sales.Rows.Single().PricePerKg.Should().Be(rounded, "and so does the row itself");
+        store.Audited.Single().Details.Should().Be(
+            $"VEG000001 · Rs {expected}/kg · {day}", "and so does the admin trail");
+    }
+
+    [Fact]
+    public async Task Record_APriceThatRoundsToZero_IsRefusedAsTheZeroItWouldHaveBeen()
+    {
+        // 0.004 is not "nearly nothing", it is nothing once the column has had it. Refusing it is honest;
+        // storing Rs 0.00 and calling it a sale is not.
+        var store = NewStore();
+
+        var result = await RecordHandler(store).Handle(
+            NewSale(UserA, Carrot, price: Money("0.004")), CancellationToken.None);
+
+        result.Error.Should().Be("invalid_price");
+        store.Sales.Rows.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Record_QuantityIsRoundedToo_AndOneThatRoundsToZeroIsRefused()
+    {
+        var store = NewStore();
+        var handler = RecordHandler(store);
+
+        var rounded = await handler.Handle(
+            NewSale(UserA, Carrot, quantity: Money("42.567")), CancellationToken.None);
+        rounded.Data.QuantityKg.Should().Be(42.57m);
+
+        var vanishes = await handler.Handle(
+            NewSale(UserA, Carrot, quantity: Money("0.004")), CancellationToken.None);
+        vanishes.Error.Should().Be("invalid_quantity");
+    }
+
+    [Fact]
+    public async Task Update_RoundsTheSameWayRecordDoes()
+    {
+        var store = NewStore();
+        var sale = Seed(store, UserA, Carrot, new DateOnly(2026, 7, 10), 100m);
+        var day = PastDay();
+
+        var result = await UpdateHandler(store).Handle(
+            new UpdateSaleCommand
+            {
+                UserId = UserA, SaleId = sale.Id, SaleDate = day,
+                PricePerKg = Money("210.499"), QuantityKg = Money("7.005")
+            },
+            CancellationToken.None);
+
+        result.Data.PricePerKg.Should().Be(210.50m);
+        result.Data.QuantityKg.Should().Be(7.01m);
+        store.Audited.Single().Details.Should().Be($"VEG000001 · Rs 210.50/kg · {day}");
+    }
+
     // POST /sales — the audit line.
 
     [Fact]
@@ -590,6 +698,69 @@ public class SalesHandlerTests
 
         store.Audited.Should().ContainSingle().Which.CommitCountAtCall.Should().Be(1);
         store.Sales.Rows.Should().ContainSingle();
+    }
+
+    // The post-commit read-back failing.
+
+    [Fact]
+    public async Task Record_WhenTheCommittedRowCannotBeReadBack_ItThrows_RatherThanClaimingRejection()
+    {
+        // A 400 here would be a LIE: the row is committed, and the farmer would be told their sale was
+        // rejected and would type it in again — producing a duplicate of a sale that saved fine. Throwing
+        // lets the middleware answer 500 and write a SystemErrors row, which is honest about which side of
+        // the wire is broken.
+        var store = NewStore();
+        store.ReadBackFails = true;
+
+        var act = () => RecordHandler(store).Handle(NewSale(UserA, Carrot), CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+
+        store.Sales.Rows.Should().ContainSingle("the sale really was saved — that is the whole problem");
+        store.Sales.CommitCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Record_AFailedReadBack_StillWritesTheAuditLine()
+    {
+        // The audit runs BEFORE the read-back is inspected, on purpose: the write happened, so the admin
+        // trail must say so. It loses the crop code (which came from the read-back) and keeps the price and
+        // date, which the handler already holds.
+        var store = NewStore();
+        store.ReadBackFails = true;
+        var day = PastDay();
+
+        try
+        {
+            await RecordHandler(store).Handle(
+                NewSale(UserA, Carrot, day, 155m), CancellationToken.None);
+        }
+        catch (InvalidOperationException)
+        {
+            // Expected — asserted by the test above.
+        }
+
+        store.Audited.Should().ContainSingle().Which.Details
+            .Should().Be($"Rs 155.00/kg · {day}",
+                "a missing crop code drops the code and its separator, never leaves a leading ' · '");
+    }
+
+    [Fact]
+    public async Task Update_WhenTheCommittedRowCannotBeReadBack_ItThrowsToo()
+    {
+        var store = NewStore();
+        var sale = Seed(store, UserA, Carrot, new DateOnly(2026, 7, 10), 100m);
+        store.ReadBackFails = true;
+
+        var act = () => UpdateHandler(store).Handle(
+            new UpdateSaleCommand
+            {
+                UserId = UserA, SaleId = sale.Id, SaleDate = PastDay(), PricePerKg = 120m
+            },
+            CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        store.Sales.Rows.Single().PricePerKg.Should().Be(120m, "the edit was applied and committed");
     }
 
     // GET /sales — paging, ordering, filtering, isolation.
@@ -1092,6 +1263,35 @@ public class SalesHandlerTests
                 $"{code} is a malformed payload the UI must react to specifically");
             PortfolioErrors.IsUnprocessable(code).Should().BeFalse(
                 $"{code} is not a limit the product refuses, it is a value that is wrong");
+        }
+    }
+
+    [Fact]
+    public void TheCodedBadRequestFamily_IsExactly_TheseThirteen()
+    {
+        // THE EXACT-SET PIN, and it lives here because the sales log is what grew this family from five to
+        // thirteen. PortfolioHandlerTests only asserts that its own five are still CONTAINED, so without
+        // this a novel code could be added to BadRequestCodes and the whole suite would stay green — which
+        // is the direction that silently reclassifies a future 422 (a limit the product refuses) as a coded
+        // 400 (a malformed payload). Growing the family should cost a deliberate edit in two files.
+        //
+        // Listed as literals, not by referencing the constants, so a rename is a failure here too.
+        PortfolioErrors.BadRequestCodes.Should().BeEquivalentTo(new[]
+        {
+            // The clear-reason contract on PUT /watchlist/{cropId}.
+            "clear_reason_required", "clear_reason_not_applicable", "invalid_clear_reason",
+            "clear_reason_note_without_reason", "clear_reason_note_too_long",
+            // The sales log.
+            "invalid_price", "price_out_of_range", "invalid_sale_date", "sale_date_future",
+            "invalid_quantity", "note_too_long", "unknown_crop", "unknown_market"
+        });
+
+        // And the three families stay disjoint: one code, one status. An overlap would make the status
+        // depend on the order the controller happens to test them in.
+        foreach (var code in PortfolioErrors.BadRequestCodes)
+        {
+            PortfolioErrors.IsUnprocessable(code).Should().BeFalse();
+            PortfolioErrors.IsNotFound(code).Should().BeFalse();
         }
     }
 

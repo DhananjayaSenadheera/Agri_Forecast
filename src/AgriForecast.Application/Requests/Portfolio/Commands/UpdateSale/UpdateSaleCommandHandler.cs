@@ -101,10 +101,13 @@ public class UpdateSaleCommandHandler : IRequestHandler<UpdateSaleCommand, Resul
 
         if (saved is null)
         {
+            // Same reasoning as RecordSaleCommandHandler: the edit IS committed, so a 400 would be a lie
+            // about what happened. Thrown, so the middleware answers 500 and records a SystemErrors row.
             _logger.LogError(
                 "Sale {SaleId} was not readable after commit for user {UserId}.",
                 request.SaleId, request.UserId);
-            return Result<SaleItem_GetDto>.Failure("The sale could not be read back.");
+            throw new InvalidOperationException(
+                $"Sale {request.SaleId} was updated but could not be read back.");
         }
 
         _logger.LogInformation(

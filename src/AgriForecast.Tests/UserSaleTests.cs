@@ -660,12 +660,19 @@ public class UserSaleTests
 
     // The READ STORE, against a real (SQLite) database.
     //
-    // THESE TESTS EXIST BECAUSE OF A REAL 500. The first cut of the sales projection joined Crops and
-    // Markets and then sorted the projected record; EF Core could translate neither (a GroupJoin needs
-    // matching key types, so the optional market forced a Guid->Guid? cast into an untranslatable object
-    // comparison, and an ORDER BY over a constructor call is not a thing). Every unit test passed, because
-    // an in-memory fake store answers LINQ that no database ever sees. Only executing the real query finds
-    // it — hence a real database here, minimal though it is.
+    // THESE TESTS EXIST BECAUSE OF A REAL 500. The first cut of the sales list sorted the PROJECTED RECORD
+    // (Project(...).OrderByDescending(r => r.SaleDate)), and EF Core cannot translate an ORDER BY over a
+    // constructor call — every GET died. Every unit test passed anyway, because an in-memory fake store
+    // answers LINQ that no database ever sees. Only executing the real query finds it, hence a real
+    // database here, minimal though it is.
+    //
+    // SCOPE OF WHAT THESE GUARD, stated honestly: the ORDER-BY class above, plus the ordering, paging and
+    // owner-scoping of the results. The GroupJoin/DefaultIfEmpty spelling the projection also moved away
+    // from is NOT guarded here and does not need to be — it turns out to translate fine (verified with
+    // ToQueryString against the SQL Server model), so it was never the bug it was first blamed for. What
+    // is NOT reproducible under SQLite at all is the negative-OFFSET overflow the Skip clamp prevents:
+    // SQLite silently treats a negative OFFSET as 0 where SQL Server rejects it, so that one is guarded by
+    // the clamp itself and by ReadStore_AnAbsurdPageNumber_IsAnEmptyPage_NotAnOverflow below.
     //
     // Only the columns the projection reads are created: EF selects exactly those, so a full model would
     // add maintenance without adding coverage. EnsureCreated is avoided for the reason the watchlist tests
@@ -778,6 +785,139 @@ public class UserSaleTests
         var wrongCrop = await store.GetSalesPageAsync(Farmer, Guid.NewGuid(), 1, 20);
         wrongCrop.Items.Should().BeEmpty("an unknown crop filter matches nothing, it is not an error");
         wrongCrop.Total.Should().Be(0);
+    }
+
+    /// <summary>
+    /// True only when <paramref name="a"/> sorts after <paramref name="b"/> under BOTH .NET's Guid
+    /// ordering and ordinal text ordering.
+    /// </summary>
+    /// <remarks>
+    /// The two disagree in general — SQL Server compares uniqueidentifier by its last six bytes, while
+    /// SQLite compares the TEXT form lexicographically — so a test that assumed either one would be pinning
+    /// a provider quirk rather than the store's rule. Requiring both to agree makes every expectation below
+    /// hold whichever the database uses.
+    /// </remarks>
+    private static bool SortsAfter(Guid a, Guid b)
+        => a.CompareTo(b) > 0 && string.CompareOrdinal(a.ToString(), b.ToString()) > 0;
+
+    // Builds a pair of same-day sales whose Id order CONTRADICTS their CreatedAtUtc order: the row typed
+    // FIRST gets the higher id. Only a real CreatedAtUtc tiebreak can then put the later-typed row first —
+    // without it the query falls through to Id DESC and returns the opposite. Ids are random, so this
+    // retries; the bound is generous and failing it loudly beats spinning forever.
+    private static (UserSale TypedFirst, UserSale TypedSecond) ContradictoryPair(DateOnly day)
+    {
+        for (var attempt = 0; attempt < 500; attempt++)
+        {
+            var typedFirst = UserSale.Record(Farmer, Crop, null, day, 100m, null, null, Created);
+            var typedSecond = UserSale.Record(
+                Farmer, Crop, null, day, 200m, null, null, Created.AddMinutes(5));
+
+            if (SortsAfter(typedFirst.Id, typedSecond.Id))
+                return (typedFirst, typedSecond);
+        }
+
+        throw new InvalidOperationException("Could not generate a contradictory id pair.");
+    }
+
+    // Two sales sharing a SaleDate AND a CreatedAtUtc instant, returned already in the order Id DESC must
+    // produce. Retried until the two id orderings AGREE, so the expectation is the store's rule and not a
+    // guess about which comparison the provider uses.
+    private static (UserSale First, UserSale Second) SameInstantPair(DateOnly day)
+    {
+        for (var attempt = 0; attempt < 500; attempt++)
+        {
+            var a = UserSale.Record(Farmer, Crop, null, day, 300m, null, null, Created.AddMinutes(9));
+            var b = UserSale.Record(Farmer, Crop, null, day, 400m, null, null, Created.AddMinutes(9));
+
+            if (SortsAfter(a.Id, b.Id)) return (a, b);
+            if (SortsAfter(b.Id, a.Id)) return (b, a);
+        }
+
+        throw new InvalidOperationException("Could not generate an unambiguously ordered id pair.");
+    }
+
+    [Fact]
+    public async Task ReadStore_BreaksTiesOnCreatedAt_ThenOnId_AgainstARealDatabase()
+    {
+        // THE TIEBREAKS, ASSERTED AGAINST THE STORE'S OWN ORDER BY. The handler-level tests assert them
+        // against a fake that re-implements the same sort, which proves only that the fake sorts — delete
+        // either ThenBy from the real store and those stay green. These do not, and BOTH halves are
+        // mutation-checked: the CreatedAtUtc half only has teeth because the pair's ids deliberately point
+        // the other way (an earlier version of this test picked ids at random and survived the mutation).
+        var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        await using var _c = connection;
+
+        await using var ctx = await SalesDbWithReferenceDataAsync(connection);
+
+        var day = new DateOnly(2026, 7, 10);
+
+        // Pair 1: same SaleDate, DIFFERENT CreatedAtUtc, ids arranged to disagree with the timestamps.
+        var (typedFirst, typedSecond) = ContradictoryPair(day);
+
+        // Pair 2: same SaleDate AND the same instant — nothing but the Id tiebreak can order these, and
+        // without it the database is free to return them differently between two calls. Returned already
+        // in the order Id DESC must yield.
+        var (sameInstantFirst, sameInstantSecond) = SameInstantPair(day.AddDays(-1));
+
+        await ctx.UserSales.AddRangeAsync(
+            typedFirst, typedSecond, sameInstantFirst, sameInstantSecond);
+        await ctx.SaveChangesAsync();
+
+        var store = new Infrastructure.Services.PortfolioRead.PortfolioReadStore(ctx);
+
+        var all = await store.GetSalesPageAsync(Farmer, null, 1, 20);
+
+        // Pair 1 comes first (later SaleDate), newest-TYPED first within the day — which is the opposite of
+        // what Id DESC alone would have produced.
+        all.Items.Select(i => i.Id).Take(2).Should().Equal(
+            new[] { typedSecond.Id, typedFirst.Id },
+            "two sales on the SAME day are ordered by when they were typed, newest first — and this pair's "
+            + "ids sort the other way, so nothing but the CreatedAtUtc tiebreak can produce this");
+
+        // Pair 2's order is whatever Id DESC gives. The point is not WHICH is first but that the answer is
+        // the same every time, so the expectation comes from the rule (via SameInstantPair) rather than
+        // being hard-coded to a particular pair of random ids.
+        all.Items.Select(i => i.Id).Skip(2).Should().Equal(
+            new[] { sameInstantFirst.Id, sameInstantSecond.Id },
+            "with the date and the instant identical, only the Id tiebreak can decide — and it must");
+
+        // THE REASON THE TOTAL ORDER MATTERS: paged reads must partition the set, never overlap it or lose
+        // a row. Two fetches of two rows each must reconstruct the one-shot order exactly.
+        var pageOne = await store.GetSalesPageAsync(Farmer, null, 1, 2);
+        var pageTwo = await store.GetSalesPageAsync(Farmer, null, 2, 2);
+
+        pageOne.Items.Concat(pageTwo.Items).Select(i => i.Id)
+            .Should().Equal(all.Items.Select(i => i.Id),
+                "paging must be a partition of the total order, not a fresh guess per request");
+    }
+
+    [Fact]
+    public async Task ReadStore_AnAbsurdPageNumber_IsAnEmptyPage_NotAnOverflow()
+    {
+        // (page - 1) * pageSize is a signed int multiply: int.MaxValue with a page size of 50 wraps to a
+        // NEGATIVE offset, which SQL Server rejects outright — a 500 for a caller who sent nothing worse
+        // than a silly page number. The clamp turns it into what it obviously means: a page past the end.
+        //
+        // SQLite treats a negative OFFSET as 0, so WITHOUT the clamp this test would not fail here — it
+        // would return page one's rows instead of none, which is why the assertion is "empty", not merely
+        // "did not throw". That distinction is the teeth.
+        var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        await using var _c = connection;
+
+        await using var ctx = await SalesDbWithReferenceDataAsync(connection);
+
+        await ctx.UserSales.AddAsync(Record(Market, 155m));
+        await ctx.SaveChangesAsync();
+
+        var store = new Infrastructure.Services.PortfolioRead.PortfolioReadStore(ctx);
+
+        var page = await store.GetSalesPageAsync(Farmer, null, int.MaxValue, 50);
+
+        page.Items.Should().BeEmpty(
+            "a page past the end is empty; an unclamped overflow would have served page one's rows");
+        page.Total.Should().Be(1, "the total still describes the whole set, whatever page was asked for");
     }
 
     [Fact]

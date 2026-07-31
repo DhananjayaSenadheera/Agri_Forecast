@@ -105,9 +105,14 @@ public class RecordSaleCommandHandler : IRequestHandler<RecordSaleCommand, Resul
 
         if (saved is null)
         {
+            // THROWN, NOT RETURNED AS A FAILURE. The row IS committed: answering 400 would tell the farmer
+            // their sale was rejected when it was saved, and they would type it again. This is a server
+            // fault — the middleware turns it into a 500 with a SystemErrors row and no leaked stack — and
+            // a 500 after a successful write is at least honest about which side is broken.
             _logger.LogError(
                 "Sale {SaleId} was not readable after commit for user {UserId}.", sale.Id, request.UserId);
-            return Result<SaleItem_GetDto>.Failure("The sale could not be read back.");
+            throw new InvalidOperationException(
+                $"Sale {sale.Id} was committed but could not be read back.");
         }
 
         _logger.LogInformation(
