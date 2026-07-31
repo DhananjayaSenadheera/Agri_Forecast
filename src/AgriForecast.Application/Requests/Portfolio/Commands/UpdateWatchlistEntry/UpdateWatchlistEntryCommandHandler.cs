@@ -234,25 +234,17 @@ public class UpdateWatchlistEntryCommandHandler
     /// <see cref="WatchlistLimits.EarliestPlantedDate"/> and the caller's plausible "today".
     /// </summary>
     /// <remarks>
-    /// The upper bound is the UTC date PLUS ONE DAY, not the UTC date. Sri Lanka is UTC+5:30, so between
-    /// 18:30 and 24:00 UTC a farmer's local "today" is already the next calendar day; a strict UTC cutoff
-    /// would reject the honest answer of anyone planting during their own evening. One day of slack fixes
-    /// that without letting a genuine future date through — nobody plants next week by accident, and the
-    /// error a farmer actually makes (a mis-keyed year) is caught by either bound.
-    /// <para>
-    /// The zone is not consulted directly on purpose: TimeZoneInfo.FindSystemTimeZoneById needs a tz
-    /// database in the container, and a validation rule that throws when the image ships without tzdata
-    /// would be a worse failure than a day of tolerance.
-    /// </para>
+    /// The upper bound is <see cref="PortfolioTime.LatestPlausibleLocalDate"/> — the UTC date PLUS ONE DAY
+    /// — and it is read from there rather than computed here so that this rule and the sales log's
+    /// <c>sale_date_future</c> rule can never disagree about which day it is. The reasoning for the day of
+    /// slack (Sri Lanka is UTC+5:30, and no tzdata is assumed in the container) lives with the helper.
     /// </remarks>
     private static bool IsPlantableDate(DateOnly? plantedDate, DateTime nowUtc)
     {
         if (!plantedDate.HasValue)
             return true;
 
-        var latestAllowed = DateOnly.FromDateTime(nowUtc).AddDays(1);
-
         return plantedDate.Value >= WatchlistLimits.EarliestPlantedDate
-               && plantedDate.Value <= latestAllowed;
+               && plantedDate.Value <= PortfolioTime.LatestPlausibleLocalDate(nowUtc);
     }
 }

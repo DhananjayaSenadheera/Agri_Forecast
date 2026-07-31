@@ -83,6 +83,21 @@ public class UserActivityAudit : IUserActivityAudit
         Guid actorUserId, string? details, CancellationToken ct = default) =>
         WriteAsync(UserActivityEvent.PlantedDateRemoved(actorUserId, details, DateTime.UtcNow), ct);
 
+    // The farmer's sales log. details arrives already rendered ("<CropCode> · Rs <price>/kg · <date>") and
+    // carries no free text the farmer typed; the note stays on the UserSales row.
+
+    public Task RecordSaleRecordedAsync(
+        Guid actorUserId, string? details, CancellationToken ct = default) =>
+        WriteAsync(UserActivityEvent.SaleRecorded(actorUserId, details, DateTime.UtcNow), ct);
+
+    public Task RecordSaleUpdatedAsync(
+        Guid actorUserId, string? details, CancellationToken ct = default) =>
+        WriteAsync(UserActivityEvent.SaleUpdated(actorUserId, details, DateTime.UtcNow), ct);
+
+    public Task RecordSaleDeletedAsync(
+        Guid actorUserId, string? details, CancellationToken ct = default) =>
+        WriteAsync(UserActivityEvent.SaleDeleted(actorUserId, details, DateTime.UtcNow), ct);
+
     // The one place a pipeline-control Details note is rendered: "batch <guid>". Guid.ToString() is
     // lowercase, matching the casing every other batchId is written and searched in.
     public static string RenderBatchDetails(Guid batchId) => $"batch {batchId}";

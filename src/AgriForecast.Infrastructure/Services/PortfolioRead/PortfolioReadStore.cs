@@ -164,6 +164,108 @@ public class PortfolioReadStore : IPortfolioReadStore
     public async Task<bool> CropExistsAsync(Guid cropId, CancellationToken ct = default)
         => await _db.Crops.AsNoTracking().AnyAsync(c => c.Id == cropId, ct);
 
+    // THE SALES LOG. Every query below opens with the same UserId predicate — that filter is the whole of
+    // the isolation story for the most private table in the product, so it is written first and never
+    // parameterised away into a shared helper that a future edit could call without it.
+    //
+    // The crop and market display fields are fetched with CORRELATED SUBQUERIES rather than joins; the
+    // reasoning is with the Project method below, which is the one place they are written. No navigation
+    // properties are used or needed: Crop and Market have none into this table by design (PRD 3.1), so
+    // nothing can Include its way from reference data into a farmer's sales.
+
+    public async Task<UserSalesPage> GetSalesPageAsync(
+        Guid userId, Guid? cropId, int page, int pageSize, CancellationToken ct = default)
+    {
+        var filtered = _db.UserSales.AsNoTracking()
+            .Where(s => s.UserId == userId);
+
+        // An unknown crop id is a filter that matches nothing, not an error — see GetSalesQuery.
+        if (cropId.HasValue)
+            filtered = filtered.Where(s => s.CropId == cropId.Value);
+
+        // Counted BEFORE paging and AFTER the crop filter, so the UI's page count describes what it asked
+        // for. Counted on the same IQueryable rather than a second hand-written predicate, so the two can
+        // never disagree about what is being paged.
+        var total = await filtered.CountAsync(ct);
+
+        // Defence in depth against a Skip overflow even though GetSalesQuery.EffectivePage owns the real
+        // bounds. THE ARITHMETIC IS DONE IN long AND CLAMPED: (page - 1) * pageSize is a signed int
+        // multiply, so a page number near int.MaxValue wraps to a NEGATIVE offset, which SQL Server
+        // rejects outright — a 500 for a caller who only sent a silly page number. Identical guard, and
+        // identical wording, to LogsReadStore / IngestionReadStore / ForecastAccuracyReadStore.
+        // (SQLite silently treats a negative OFFSET as 0, so this cannot be caught by the SQLite tests
+        // below; it is guarded here rather than discovered in production.)
+        var skip = (int)Math.Clamp((long)(page - 1) * pageSize, 0L, int.MaxValue);
+
+        // ORDER AND PAGE THE ENTITY QUERY, THEN PROJECT — never the other way round. Sorting the projected
+        // record made EF try to translate an ORDER BY over a constructor call and it refused the whole
+        // query (a runtime 500 on the first GET). Ordering here is over real columns of one table, which is
+        // also what lets IX_UserSales_UserSaleDate serve the page.
+        //
+        // Newest sale first. CreatedAtUtc breaks ties between two sales on the SAME day (the row typed
+        // second is shown first), and Id is the last resort purely so the order is TOTAL: without a
+        // deterministic tiebreak, two rows sharing a date AND an instant could swap places between two page
+        // requests and be shown twice or not at all. Both tiebreaks are exercised against a real database
+        // in UserSaleTests — asserting them against a fake that re-implements the same ORDER BY would only
+        // be asserting the fake.
+        var items = await Project(
+                filtered
+                    .OrderByDescending(s => s.SaleDate)
+                    .ThenByDescending(s => s.CreatedAtUtc)
+                    .ThenByDescending(s => s.Id)
+                    .Skip(skip)
+                    .Take(pageSize))
+            .ToListAsync(ct);
+
+        return new UserSalesPage(items, total);
+    }
+
+    public async Task<UserSaleRow?> GetSaleAsync(
+        Guid userId, Guid saleId, CancellationToken ct = default)
+    {
+        // BOTH predicates, so a row belonging to somebody else comes back null exactly like one that does
+        // not exist — the caller cannot tell them apart and answers the same 404 to both.
+        return await Project(_db.UserSales.AsNoTracking()
+                .Where(s => s.UserId == userId && s.Id == saleId))
+            .FirstOrDefaultAsync(ct);
+    }
+
+    // The ONE projection both sales reads use, so the list and the read-back cannot render a row
+    // differently. Takes an ALREADY user-scoped (and, for the list, already ordered and paged) query: it
+    // adds no filter and no ordering of its own, and must never be handed an unscoped one.
+    //
+    // The crop and market display fields come from CORRELATED SUBQUERIES rather than joins, matching
+    // GetWatchlistAsync above. A subquery per column is honest here: both tables are tiny reference data,
+    // both lookups are by primary key, and neither can change the row count the way a mis-written join
+    // can — in particular the OPTIONAL market cannot silently turn into an inner join and drop every sale
+    // that names no market.
+    //
+    // WHAT ACTUALLY BROKE, stated precisely because an earlier version of this comment overstated it: the
+    // single runtime failure was ORDERING THE PROJECTED RECORD (see GetSalesPageAsync — EF cannot
+    // translate an ORDER BY over a constructor call). The GroupJoin/DefaultIfEmpty spelling this replaced
+    // was NOT the culprit: it compiles fine under the SQL Server provider (verified with ToQueryString on
+    // the real model), and it appeared in the failing expression tree only because the tree printed the
+    // whole query. The ORDER-BY class is the one guarded by the SQLite tests in UserSaleTests.
+    private IQueryable<UserSaleRow> Project(IQueryable<Domain.Entities.UserSale> scoped)
+    {
+        return scoped.Select(s => new UserSaleRow(
+            s.Id,
+            s.CropId,
+            _db.Crops.Where(c => c.Id == s.CropId).Select(c => c.Name).FirstOrDefault()!,
+            _db.Crops.Where(c => c.Id == s.CropId).Select(c => c.CropCode).FirstOrDefault(),
+            s.MarketId,
+            // Null when the sale names no market, and null again if that market has somehow gone — the FK
+            // restricts the delete, so the second case cannot happen without a manual DBA edit.
+            _db.Markets.Where(m => m.Id == s.MarketId).Select(m => m.Name).FirstOrDefault(),
+            _db.Markets.Where(m => m.Id == s.MarketId).Select(m => m.ShortCode).FirstOrDefault(),
+            s.SaleDate,
+            s.PricePerKg,
+            s.QuantityKg,
+            s.Note,
+            s.CreatedAtUtc,
+            s.UpdatedAtUtc));
+    }
+
     // The single fail-closed predicate shared by the two price queries in this store.
     //
     // IsUnitConfirmed = 1 is the unified hold flag: it excludes both unit-unproven rows and rows the

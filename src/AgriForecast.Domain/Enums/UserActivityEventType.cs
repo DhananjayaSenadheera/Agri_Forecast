@@ -19,6 +19,12 @@ namespace AgriForecast.Domain.Enums;
 // 12 is the first FARMER-authored event: the actor is the farmer themselves, not an admin. It carries the
 // crop code and the reason word in Details and, like every other event, no free text the user typed — the
 // farmer's own note about the removal lives only on the PlantedDateRemovals row.
+//
+// 13..15 are the farmer's SALES LOG, and unlike the content events above they are one member PER VERB
+// rather than one per entity: an admin reading the Logs page needs to see that a sale was deleted without
+// opening the row, and a shared "SaleChanged" would hide that behind a Details note. They carry the farmer
+// as ActorUserId, no TargetUserId, and "<CropCode> · Rs <price>/kg · <date>" in Details — never the
+// farmer's own note, which lives only on the UserSales row.
 public enum UserActivityEventType
 {
     LoginSucceeded = 0,
@@ -33,5 +39,8 @@ public enum UserActivityEventType
     MarketChanged = 9,
     IngestionServiceStarted = 10,
     IngestionServiceStopRequested = 11,
-    PlantedDateRemoved = 12
+    PlantedDateRemoved = 12,
+    SaleRecorded = 13,
+    SaleUpdated = 14,
+    SaleDeleted = 15
 }

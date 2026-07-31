@@ -1,9 +1,13 @@
 using AgriForecast.API.Extensions;
 using AgriForecast.Application.Requests.Portfolio.Commands.AddWatchlistCrop;
+using AgriForecast.Application.Requests.Portfolio.Commands.DeleteSale;
+using AgriForecast.Application.Requests.Portfolio.Commands.RecordSale;
 using AgriForecast.Application.Requests.Portfolio.Commands.RemoveWatchlistCrop;
+using AgriForecast.Application.Requests.Portfolio.Commands.UpdateSale;
 using AgriForecast.Application.Requests.Portfolio.Commands.UpdateWatchlistEntry;
 using AgriForecast.Application.Requests.Portfolio.Common;
 using AgriForecast.Application.Requests.Portfolio.Queries.GetDashboard;
+using AgriForecast.Application.Requests.Portfolio.Queries.GetSales;
 using AgriForecast.Application.Requests.Portfolio.Queries.GetWatchlist;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
@@ -29,18 +33,22 @@ namespace AgriForecast.API.Controllers;
 /// watches that crop.
 /// </para>
 /// <para>
-/// THREE ERROR SHAPES, deliberately distinct. A malformed request is a 400 with the usual
+/// THREE ERROR SHAPES, deliberately distinct. An unpinned failure is a 400 with the usual
 /// <c>{ errors: [{ property, message }] }</c> body. A row the caller does not own is a 404 with
-/// <c>{ "error": "watchlist_entry_not_found" }</c>. A well-formed request the PRODUCT refuses — the 11th
-/// crop, a 4th market, an impossible planting date — is a 422 with the same <c>{ "error": code }</c> body,
-/// because telling the UI "bad request" for a limit the farmer hit would send a developer hunting a
-/// serialization bug that does not exist.
+/// <c>{ "error": "watchlist_entry_not_found" }</c> or <c>{ "error": "sale_not_found" }</c>. A well-formed
+/// request the PRODUCT refuses — the 11th crop, a 4th market, an impossible planting date — is a 422 with
+/// the same <c>{ "error": code }</c> body, because telling the UI "bad request" for a limit the farmer hit
+/// would send a developer hunting a serialization bug that does not exist.
 /// </para>
 /// <para>
-/// One 400 family carries the code body instead of the prose one: the <c>clear_reason_*</c> codes on PUT
-/// (see <see cref="Application.Requests.Portfolio.Common.PortfolioErrors.BadRequestCodes"/>). The status is
-/// 400 because the payload really is wrong, but the UI must tell "you owe me a reason" apart from "that note
-/// is too long", so it needs a code and not a sentence.
+/// TWO 400 FAMILIES carry the code body instead of the prose one, and both live in
+/// <see cref="Application.Requests.Portfolio.Common.PortfolioErrors.BadRequestCodes"/>: the
+/// <c>clear_reason_*</c> codes on PUT /watchlist/{cropId}, and the sales-log validation codes
+/// (<c>invalid_price</c>, <c>price_out_of_range</c>, <c>invalid_sale_date</c>, <c>sale_date_future</c>,
+/// <c>invalid_quantity</c>, <c>note_too_long</c>, <c>unknown_crop</c>, <c>unknown_market</c>). The status is
+/// 400 in both because the payload really is wrong, but the UI must tell "you owe me a reason" apart from
+/// "that note is too long", and "fix the price" apart from "fix the date" — so each needs a code and not a
+/// sentence.
 /// </para>
 /// </remarks>
 [ApiController]
@@ -187,6 +195,132 @@ public class PortfolioController(IMediator mediator) : ControllerBase
         var result = await mediator.Send(new GetPortfolioDashboardQuery { UserId = userId.Value });
         if (result.IsSuccess)
             return Ok(result.Data);
+
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
+    // THE SALES LOG (PRD 5.3). Everything below is the farmer's own self-reported sales — the most private
+    // data in the product — and every action is scoped to the JWT subject exactly like the watchlist above.
+    // A sale id the caller does not own is a 404 with { "error": "sale_not_found" }, identical to an id
+    // that does not exist: a 403 would confirm that the id is somebody's sale.
+    //
+    // The validation failures are the pinned 400 code family (invalid_price, price_out_of_range,
+    // invalid_sale_date, sale_date_future, invalid_quantity, note_too_long, unknown_crop, unknown_market),
+    // all carrying the machine-readable { "error": code } body, because the UI has to highlight a different
+    // field for each one.
+
+    // GET /api/portfolio/sales?page=1&pageSize=20&cropId= — the caller's sales, newest first.
+    // 200 { items, page, pageSize, total } — page/pageSize are echoed AS USED, i.e. after clamping
+    //     (page >= 1, pageSize in [1, 50]). Out-of-range values are clamped rather than refused: a farmer
+    //     scrolling on a phone must never be shown an error because a stale client asked for page 0.
+    // cropId narrows the page to one crop (the More-details popup's list); an unknown crop id is an empty
+    //     page, not an error.
+    [HttpGet("sales")]
+    public async Task<IActionResult> GetSales(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = GetSalesQuery.DefaultPageSize,
+        [FromQuery] Guid? cropId = null)
+    {
+        var userId = this.GetActingUserId();
+        if (userId is null)
+            return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
+
+        var result = await mediator.Send(new GetSalesQuery
+        {
+            UserId = userId.Value,
+            Page = page,
+            PageSize = pageSize,
+            CropId = cropId
+        });
+
+        if (result.IsSuccess)
+            return Ok(result.Data);
+
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
+    // POST /api/portfolio/sales { cropId, marketId?, saleDate, pricePerKg, quantityKg?, note? }
+    // 201 with the created sale (the same shape GET returns) and a Location header pointing at the list.
+    // 400 { "error": <pinned code> } — see the family above.
+    [HttpPost("sales")]
+    public async Task<IActionResult> RecordSale([FromBody] RecordSaleCommand command)
+    {
+        // The owner comes from the JWT, never the request body, so a farmer cannot write a sale into
+        // someone else's log by editing the payload.
+        var userId = this.GetActingUserId();
+        if (userId is null)
+            return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
+        command.UserId = userId.Value;
+
+        var result = await mediator.Send(command);
+        if (result.IsSuccess)
+            // 201 Created, unlike the watchlist's idempotent 200: this really is a new row every time, and
+            // two sales of the same crop on the same day are two facts, not a double-tap.
+            // The Location header addresses the LIST, filtered to the row's crop: there is no
+            // GET /sales/{id} route (the popup and the page both read lists), and inventing one just to
+            // have somewhere to point would be a route nobody calls.
+            return Created($"/api/portfolio/sales?cropId={result.Data.CropId}", result.Data);
+
+        if (PortfolioErrors.IsBadRequestCode(result.Error))
+            return BadRequest(ToCodeResponse(result.Error));
+
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
+    // PUT /api/portfolio/sales/{id} { marketId?, saleDate, pricePerKg, quantityKg?, note? }
+    // 200 with the updated sale.
+    // 404 { "error": "sale_not_found" } — the caller does not own that sale (or it does not exist).
+    // 400 { "error": <pinned code> }.
+    // A TRUE PUT: the body is the row's complete new state, so an ABSENT optional key CLEARS that value
+    // (marketId, quantityKg, note). There is no cropId — a sale's crop is immutable, and a sale recorded
+    // against the wrong crop is deleted and re-added rather than re-pointed.
+    [HttpPut("sales/{id}")]
+    public async Task<IActionResult> UpdateSale(Guid id, [FromBody] UpdateSaleCommand command)
+    {
+        var userId = this.GetActingUserId();
+        if (userId is null)
+            return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
+
+        command.UserId = userId.Value;
+        // The route is the authority for which sale, so a mismatched body value cannot redirect the write.
+        command.SaleId = id;
+
+        var result = await mediator.Send(command);
+        if (result.IsSuccess)
+            return Ok(result.Data);
+
+        if (PortfolioErrors.IsNotFound(result.Error))
+            return NotFound(ToCodeResponse(result.Error));
+
+        if (PortfolioErrors.IsBadRequestCode(result.Error))
+            return BadRequest(ToCodeResponse(result.Error));
+
+        return BadRequest(ToErrorResponse(result.Error));
+    }
+
+    // DELETE /api/portfolio/sales/{id}
+    // 204 No Content — a hard delete of the farmer's own row; there is nothing left to describe.
+    // 404 { "error": "sale_not_found" } — including the SECOND delete of the same id. Not idempotent on
+    //     purpose: telling "you already deleted this" apart from "that was never yours" would reveal which
+    //     ids exist, and privacy wins over tidiness.
+    [HttpDelete("sales/{id}")]
+    public async Task<IActionResult> DeleteSale(Guid id)
+    {
+        var userId = this.GetActingUserId();
+        if (userId is null)
+            return Unauthorized(ToErrorResponse("Unable to identify the acting user."));
+
+        var result = await mediator.Send(new DeleteSaleCommand
+        {
+            UserId = userId.Value,
+            SaleId = id
+        });
+
+        if (result.IsSuccess)
+            return NoContent();
+
+        if (PortfolioErrors.IsNotFound(result.Error))
+            return NotFound(ToCodeResponse(result.Error));
 
         return BadRequest(ToErrorResponse(result.Error));
     }

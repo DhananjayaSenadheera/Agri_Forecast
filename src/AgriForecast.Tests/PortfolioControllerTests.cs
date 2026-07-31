@@ -2,11 +2,15 @@ using System.Security.Claims;
 using AgriForecast.API.Controllers;
 using AgriForecast.Application.common;
 using AgriForecast.Application.Requests.Portfolio.Commands.AddWatchlistCrop;
+using AgriForecast.Application.Requests.Portfolio.Commands.DeleteSale;
+using AgriForecast.Application.Requests.Portfolio.Commands.RecordSale;
 using AgriForecast.Application.Requests.Portfolio.Commands.RemoveWatchlistCrop;
+using AgriForecast.Application.Requests.Portfolio.Commands.UpdateSale;
 using AgriForecast.Application.Requests.Portfolio.Commands.UpdateWatchlistEntry;
 using AgriForecast.Application.Requests.Portfolio.Common;
 using AgriForecast.Application.Requests.Portfolio.DTOs;
 using AgriForecast.Application.Requests.Portfolio.Queries.GetDashboard;
+using AgriForecast.Application.Requests.Portfolio.Queries.GetSales;
 using AgriForecast.Application.Requests.Portfolio.Queries.GetWatchlist;
 using FluentAssertions;
 using MediatR;
@@ -300,5 +304,227 @@ public class PortfolioControllerTests
         PortfolioErrors.IsBadRequestCode("clear reason required").Should().BeFalse();
         PortfolioErrors.IsBadRequestCode(null).Should().BeFalse();
         PortfolioErrors.IsBadRequestCode("").Should().BeFalse();
+    }
+
+    // The sales log. Same two questions as above — where the identity comes from, and how a handler's code
+    // becomes a status — for the four routes a farmer's own sale prices live behind.
+
+    private static readonly Guid RouteSale = Guid.Parse("5a1e0000-0000-0000-0000-000000000001");
+    private static readonly Guid BodySale = Guid.Parse("5a1e0000-0000-0000-0000-000000000002");
+
+    [Fact]
+    public async Task RecordSale_StampsTheUserFromTheJwt_IgnoringAnyUserIdInTheBody()
+    {
+        RecordSaleCommand? captured = null;
+        var mediator = new Mock<IMediator>();
+        mediator
+            .Setup(m => m.Send(It.IsAny<RecordSaleCommand>(), It.IsAny<CancellationToken>()))
+            .Callback((object c, CancellationToken _) => captured = (RecordSaleCommand)c)
+            .ReturnsAsync(Result<SaleItem_GetDto>.Success(new SaleItem_GetDto()));
+
+        await ControllerFor(mediator.Object, HttpContextFor(Caller)).RecordSale(new RecordSaleCommand
+        {
+            UserId = Victim,
+            CropId = BodyCrop
+        });
+
+        captured!.UserId.Should().Be(Caller,
+            "a farmer must not be able to write a sale into somebody else's log by editing the payload");
+    }
+
+    [Fact]
+    public async Task UpdateSale_TakesTheSaleFromTheRoute_AndTheUserFromTheJwt()
+    {
+        UpdateSaleCommand? captured = null;
+        var mediator = new Mock<IMediator>();
+        mediator
+            .Setup(m => m.Send(It.IsAny<UpdateSaleCommand>(), It.IsAny<CancellationToken>()))
+            .Callback((object c, CancellationToken _) => captured = (UpdateSaleCommand)c)
+            .ReturnsAsync(Result<SaleItem_GetDto>.Success(new SaleItem_GetDto()));
+
+        await ControllerFor(mediator.Object, HttpContextFor(Caller))
+            .UpdateSale(RouteSale, new UpdateSaleCommand { UserId = Victim, SaleId = BodySale });
+
+        captured!.UserId.Should().Be(Caller);
+        captured.SaleId.Should().Be(RouteSale,
+            "the route is the authority for which sale, so a mismatched body cannot redirect the write");
+    }
+
+    [Fact]
+    public async Task SalesReads_ScopeToTheJwtUser_AndPassThePagingParametersThrough()
+    {
+        GetSalesQuery? captured = null;
+        var mediator = new Mock<IMediator>();
+        mediator
+            .Setup(m => m.Send(It.IsAny<GetSalesQuery>(), It.IsAny<CancellationToken>()))
+            .Callback((object q, CancellationToken _) => captured = (GetSalesQuery)q)
+            .ReturnsAsync(Result<SalesPage_GetDto>.Success(new SalesPage_GetDto()));
+
+        await ControllerFor(mediator.Object, HttpContextFor(Caller))
+            .GetSales(page: 3, pageSize: 5, cropId: RouteCrop);
+
+        captured!.UserId.Should().Be(Caller);
+        captured.Page.Should().Be(3);
+        captured.PageSize.Should().Be(5);
+        captured.CropId.Should().Be(RouteCrop);
+    }
+
+    [Fact]
+    public async Task SalesReads_DefaultTheFirstPage_WhenTheCallerAsksForNothing()
+    {
+        GetSalesQuery? captured = null;
+        var mediator = new Mock<IMediator>();
+        mediator
+            .Setup(m => m.Send(It.IsAny<GetSalesQuery>(), It.IsAny<CancellationToken>()))
+            .Callback((object q, CancellationToken _) => captured = (GetSalesQuery)q)
+            .ReturnsAsync(Result<SalesPage_GetDto>.Success(new SalesPage_GetDto()));
+
+        await ControllerFor(mediator.Object, HttpContextFor(Caller)).GetSales();
+
+        captured!.Page.Should().Be(1);
+        captured.PageSize.Should().Be(GetSalesQuery.DefaultPageSize);
+        captured.CropId.Should().BeNull("no cropId means the all-sales page, not a filter matching nothing");
+    }
+
+    [Fact]
+    public async Task DeleteSale_PassesTheJwtUserAndRouteId()
+    {
+        DeleteSaleCommand? captured = null;
+        var mediator = new Mock<IMediator>();
+        mediator
+            .Setup(m => m.Send(It.IsAny<DeleteSaleCommand>(), It.IsAny<CancellationToken>()))
+            .Callback((object c, CancellationToken _) => captured = (DeleteSaleCommand)c)
+            .ReturnsAsync(Result<SaleDelete_ResultDto>.Success(new SaleDelete_ResultDto()));
+
+        await ControllerFor(mediator.Object, HttpContextFor(Caller)).DeleteSale(RouteSale);
+
+        captured!.UserId.Should().Be(Caller);
+        captured.SaleId.Should().Be(RouteSale);
+    }
+
+    [Fact]
+    public async Task EverySalesAction_WithoutASubjectClaim_Is401()
+    {
+        var mediator = new Mock<IMediator>();
+        var controller = ControllerFor(mediator.Object, HttpContextWithoutSubject());
+
+        Assert.IsType<UnauthorizedObjectResult>(await controller.GetSales());
+        Assert.IsType<UnauthorizedObjectResult>(await controller.RecordSale(new RecordSaleCommand()));
+        Assert.IsType<UnauthorizedObjectResult>(
+            await controller.UpdateSale(RouteSale, new UpdateSaleCommand()));
+        Assert.IsType<UnauthorizedObjectResult>(await controller.DeleteSale(RouteSale));
+
+        mediator.Verify(
+            m => m.Send(It.IsAny<IRequest<object>>(), It.IsAny<CancellationToken>()), Times.Never,
+            "an unidentifiable caller never reaches a handler");
+    }
+
+    [Fact]
+    public async Task RecordSale_Success_Is201Created()
+    {
+        // 201, unlike the watchlist's idempotent 200: this really is a new row every time.
+        var created = new SaleItem_GetDto { Id = RouteSale, CropId = RouteCrop };
+        var mediator = MediatorReturning<RecordSaleCommand, Result<SaleItem_GetDto>>(
+            Result<SaleItem_GetDto>.Success(created));
+
+        var response = await ControllerFor(mediator.Object, HttpContextFor(Caller))
+            .RecordSale(new RecordSaleCommand());
+
+        var result = Assert.IsType<CreatedResult>(response);
+        result.StatusCode.Should().Be(StatusCodes.Status201Created);
+        // Assert.Same rather than Should().BeSameAs(): FluentAssertions 8 binds the nullable-annotated
+        // object? to its enum overload (CS0453).
+        Assert.Same(created, result.Value);
+        result.Location.Should().Be($"/api/portfolio/sales?cropId={RouteCrop}",
+            "there is no GET /sales/{id}; Location points at the list the new row is in");
+    }
+
+    [Fact]
+    public async Task DeleteSale_Success_Is204NoContent()
+    {
+        var mediator = MediatorReturning<DeleteSaleCommand, Result<SaleDelete_ResultDto>>(
+            Result<SaleDelete_ResultDto>.Success(new SaleDelete_ResultDto { Removed = true }));
+
+        var response = await ControllerFor(mediator.Object, HttpContextFor(Caller)).DeleteSale(RouteSale);
+
+        Assert.IsType<NoContentResult>(response);
+    }
+
+    [Fact]
+    public async Task UpdateSale_SaleNotFound_Maps404_WithTheMachineReadableBody()
+    {
+        var mediator = MediatorReturning<UpdateSaleCommand, Result<SaleItem_GetDto>>(
+            Result<SaleItem_GetDto>.Failure(PortfolioErrors.SaleNotFound));
+
+        var response = await ControllerFor(mediator.Object, HttpContextFor(Caller))
+            .UpdateSale(RouteSale, new UpdateSaleCommand());
+
+        var notFound = Assert.IsType<NotFoundObjectResult>(response);
+        notFound.StatusCode.Should().Be(StatusCodes.Status404NotFound,
+            "404, not 403 — a 403 would confirm that the id is somebody else's sale");
+        var code = notFound.Value!.GetType().GetProperty("error")!.GetValue(notFound.Value) as string;
+        code.Should().Be("sale_not_found");
+    }
+
+    [Fact]
+    public async Task DeleteSale_SaleNotFound_Maps404()
+    {
+        var mediator = MediatorReturning<DeleteSaleCommand, Result<SaleDelete_ResultDto>>(
+            Result<SaleDelete_ResultDto>.Failure(PortfolioErrors.SaleNotFound));
+
+        var response = await ControllerFor(mediator.Object, HttpContextFor(Caller)).DeleteSale(RouteSale);
+
+        Assert.IsType<NotFoundObjectResult>(response);
+    }
+
+    [Theory]
+    [InlineData("invalid_price")]
+    [InlineData("price_out_of_range")]
+    [InlineData("invalid_sale_date")]
+    [InlineData("sale_date_future")]
+    [InlineData("invalid_quantity")]
+    [InlineData("note_too_long")]
+    [InlineData("unknown_crop")]
+    [InlineData("unknown_market")]
+    public async Task SalesValidationCodes_Map400_WithTheMachineReadableBody(string code)
+    {
+        // The CODE body, not the prose validation shape: the UI highlights a different field for each one,
+        // and switching on a code beats parsing a sentence.
+        var post = MediatorReturning<RecordSaleCommand, Result<SaleItem_GetDto>>(
+            Result<SaleItem_GetDto>.Failure(code));
+        var postResponse = await ControllerFor(post.Object, HttpContextFor(Caller))
+            .RecordSale(new RecordSaleCommand());
+
+        var postBad = Assert.IsType<BadRequestObjectResult>(postResponse);
+        postBad.StatusCode.Should().Be(StatusCodes.Status400BadRequest);
+        (postBad.Value!.GetType().GetProperty("error")!.GetValue(postBad.Value) as string)
+            .Should().Be(code);
+
+        var put = MediatorReturning<UpdateSaleCommand, Result<SaleItem_GetDto>>(
+            Result<SaleItem_GetDto>.Failure(code));
+        var putResponse = await ControllerFor(put.Object, HttpContextFor(Caller))
+            .UpdateSale(RouteSale, new UpdateSaleCommand());
+
+        var putBad = Assert.IsType<BadRequestObjectResult>(putResponse);
+        (putBad.Value!.GetType().GetProperty("error")!.GetValue(putBad.Value) as string)
+            .Should().Be(code);
+    }
+
+    [Fact]
+    public async Task AnUnpinnedSalesFailure_StaysA400_InTheProseShape()
+    {
+        var mediator = MediatorReturning<RecordSaleCommand, Result<SaleItem_GetDto>>(
+            Result<SaleItem_GetDto>.Failure("The sale could not be read back."));
+
+        var response = await ControllerFor(mediator.Object, HttpContextFor(Caller))
+            .RecordSale(new RecordSaleCommand());
+
+        var bad = Assert.IsType<BadRequestObjectResult>(response);
+        // The prose shape has an `errors` array, not an `error` string — a read-back failure is a server
+        // problem, not a field the farmer can fix, so it must not arrive as a code the UI switches on.
+        // Assert.NotNull/Null rather than Should(): FluentAssertions 8 binds PropertyInfo? to its enum
+        // overload (CS0453).
+        Assert.NotNull(bad.Value!.GetType().GetProperty("errors"));
+        Assert.Null(bad.Value!.GetType().GetProperty("error"));
     }
 }

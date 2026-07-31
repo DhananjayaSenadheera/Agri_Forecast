@@ -2,6 +2,8 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using AgriForecast.API.Controllers;
+using AgriForecast.Application.Requests.Portfolio.Commands.RecordSale;
+using AgriForecast.Application.Requests.Portfolio.Commands.UpdateSale;
 using AgriForecast.Application.Requests.Portfolio.Commands.UpdateWatchlistEntry;
 using AgriForecast.Application.Requests.Portfolio.Common;
 using FluentAssertions;
@@ -147,6 +149,107 @@ public class PortfolioWireContractTests
             .Select(f => f.Name)
             .Should().NotContain("<PlantedDate>k__BackingField",
                 "an auto-property cannot tell an omitted key from an explicit null");
+    }
+
+    // The SALES bodies, bound the same way. The contract here is the opposite of the watchlist's: PUT is a
+    // FULL REPLACE, so an absent optional key must bind to null and CLEAR the stored value — there is no
+    // tri-state and there must not be one, or "remove the market from this sale" becomes inexpressible.
+
+    private static RecordSaleCommand BindPost(string json)
+        => JsonSerializer.Deserialize<RecordSaleCommand>(json, Web)!;
+
+    private static UpdateSaleCommand BindPut(string json)
+        => JsonSerializer.Deserialize<UpdateSaleCommand>(json, Web)!;
+
+    [Fact]
+    public void ASaleBody_BindsFromCamelCaseKeys()
+    {
+        var command = BindPost(
+            """
+            {"cropId":"c0000000-0000-0000-0000-000000000001",
+             "marketId":"b2a20001-0000-0000-0000-000000000001",
+             "saleDate":"2026-07-28","pricePerKg":155.50,"quantityKg":42.5,"note":"paid in cash"}
+            """);
+
+        command.CropId.Should().Be(Guid.Parse("c0000000-0000-0000-0000-000000000001"));
+        command.MarketId.Should().Be(Guid.Parse("b2a20001-0000-0000-0000-000000000001"));
+        command.SaleDate.Should().Be("2026-07-28");
+        command.PricePerKg.Should().Be(155.50m);
+        command.QuantityKg.Should().Be(42.5m);
+        command.Note.Should().Be("paid in cash");
+    }
+
+    [Fact]
+    public void AnEmptySaleBody_LeavesEveryOptionalNull_AndThePriceNull()
+    {
+        var command = BindPost("{}");
+
+        command.MarketId.Should().BeNull();
+        command.QuantityKg.Should().BeNull();
+        command.Note.Should().BeNull();
+
+        // decimal? rather than decimal, so a missing price is answered with invalid_price rather than
+        // silently becoming 0 and failing a different rule (or, worse, being stored).
+        command.PricePerKg.Should().BeNull(
+            "a missing price must reach the handler as absent, not as zero");
+        command.SaleDate.Should().BeNull();
+    }
+
+    [Fact]
+    public void TheSaleDateIsAString_SoEveryBadSpellingReachesTheHandler()
+    {
+        // A DateOnly-typed property would make "28/07/2026" a serializer error with a body the UI cannot
+        // switch on; as a string it arrives intact and is answered with invalid_sale_date.
+        typeof(RecordSaleCommand).GetProperty(nameof(RecordSaleCommand.SaleDate))!
+            .PropertyType.Should().Be<string>();
+
+        BindPost("""{"saleDate":"28/07/2026"}""").SaleDate.Should().Be("28/07/2026");
+        PortfolioTime.ParseYmd("28/07/2026").Should().BeNull();
+        PortfolioTime.ParseYmd("2026-07-28").Should().Be(new DateOnly(2026, 7, 28));
+    }
+
+    [Fact]
+    public void OnAPut_AnAbsentOptionalKeyBindsToNull_WhichIsHowAValueIsCLEARED()
+    {
+        var command = BindPut("""{"saleDate":"2026-07-28","pricePerKg":155}""");
+
+        command.MarketId.Should().BeNull();
+        command.QuantityKg.Should().BeNull();
+        command.Note.Should().BeNull();
+
+        // ...and an explicit null is the SAME request. On this endpoint omission and null mean one thing,
+        // deliberately unlike the watchlist PUT.
+        var explicitNulls = BindPut(
+            """{"saleDate":"2026-07-28","pricePerKg":155,"marketId":null,"quantityKg":null,"note":null}""");
+
+        explicitNulls.MarketId.Should().BeNull();
+        explicitNulls.QuantityKg.Should().BeNull();
+        explicitNulls.Note.Should().BeNull();
+    }
+
+    [Fact]
+    public void ThePutBodyCannotNameACrop()
+    {
+        // THE ENFORCEMENT IS THE SHAPE: an unknown JSON key is ignored, so a body carrying cropId binds to
+        // a command that has nowhere to put it and the stored crop is untouched.
+        typeof(UpdateSaleCommand).GetProperties().Select(p => p.Name).Should().NotContain("CropId");
+
+        var command = BindPut(
+            """{"cropId":"c0000000-0000-0000-0000-000000000009","saleDate":"2026-07-28","pricePerKg":155}""");
+
+        command.SaleId.Should().Be(Guid.Empty, "the id comes from the route, never the body");
+        command.PricePerKg.Should().Be(155m);
+    }
+
+    [Fact]
+    public void TheOwnerCannotBeForgedFromTheWire()
+    {
+        // UserId IS a settable property (the controller stamps it), so the guarantee is not the type — it
+        // is that the controller overwrites whatever arrived. This pins the shape the controller test then
+        // proves is overwritten.
+        BindPost("""{"userId":"22222222-2222-2222-2222-222222222222"}""")
+            .UserId.Should().Be(Guid.Parse("22222222-2222-2222-2222-222222222222"),
+                "binding does not protect it — PortfolioControllerTests proves the JWT always wins");
     }
 
     [Fact]

@@ -36,6 +36,10 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
     public DbSet<UserCropWatchlist> UserCropWatchlists { get; set; }
     public DbSet<UserCropWatchMarket> UserCropWatchMarkets { get; set; }
     public DbSet<PlantedDateRemoval> PlantedDateRemovals { get; set; }
+
+    // QUARANTINED (PRD 3.1): farmer-entered sale prices. Read and written by the portfolio endpoints only,
+    // never by the feature or training path, and never copied into PriceObservations/MarketPrices.
+    public DbSet<UserSale> UserSales { get; set; }
     public DbSet<UserActivityEvent> UserActivityLog { get; set; }
     public DbSet<SystemError> SystemErrors { get; set; }
 
@@ -709,6 +713,59 @@ public class AgriForecastDbContext(DbContextOptions<AgriForecastDbContext> optio
             e.HasIndex(x => new { x.UserId, x.CropId, x.OccurredUtc },
                     "IX_PlantedDateRemovals_UserCropOccurredUtc")
                 .IsDescending(false, false, true);
+        });
+
+        // FARMER SALES — one row per sale a farmer typed in themselves. QUARANTINED (PRD 3.1): this is the
+        // one table holding farmer-entered PRICES, and it is a dead end for them. Nothing copies a row into
+        // PriceObservations or MarketPrices, no navigation reaches here from Users, Crops or Markets (so no
+        // careless Include on reference data can drag one farmer's sales into another's response), and the
+        // Python loader is statically forbidden from naming the table at all. Note is the farmer's own free
+        // text and is the ONE free-text column here — never copied into UserActivityLog.Details.
+        modelBuilder.Entity<UserSale>(e =>
+        {
+            e.ToTable("UserSales");
+
+            // CASCADE from Users, matching UserCropWatchlist and PlantedDateRemovals: personal data does not
+            // outlive its owner, and an orphan row would be un-scoped personal data.
+            e.HasOne<User>()
+                .WithMany()
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // RESTRICT on Crops and on Markets: reference data a farmer's own record refers to cannot be
+            // deleted out from under it. The delete fails loudly instead of shredding a sales history, and
+            // (as on the watchlist) NoAction/Restrict is explicit rather than defaulted because SQL Server
+            // would otherwise reject multiple cascade paths into this table.
+            e.HasOne<Crop>()
+                .WithMany()
+                .HasForeignKey(x => x.CropId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasOne<Market>()
+                .WithMany()
+                .HasForeignKey(x => x.MarketId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // DATE, not datetime2 — a sale happened on a DAY, and a hidden 00:00:00 would make it
+            // timezone-dependent exactly as it would on UserCropWatchlist.PlantedDate.
+            e.Property(x => x.SaleDate).HasColumnType("date").IsRequired();
+
+            // Money and weight get EXPLICIT precision: the provider default (18,2 for decimal) is fine by
+            // accident, and a column whose scale was never stated is a column that silently changes when a
+            // convention does. 2dp on both — cents on the price, 10 g on the quantity.
+            e.Property(x => x.PricePerKg).HasPrecision(10, 2).IsRequired();
+            e.Property(x => x.QuantityKg).HasPrecision(12, 2);
+
+            e.Property(x => x.Note).HasMaxLength(UserSale.NoteMaxLength);
+
+            e.Property(x => x.CreatedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+            e.Property(x => x.UpdatedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+
+            // THE read path: one farmer's sales, newest first. UserId leads so the owner-scoped list seeks
+            // rather than scans, and SaleDate is DESCENDING because that is the order every screen shows
+            // them in — an ascending index would be scanned backwards for every page.
+            e.HasIndex(x => new { x.UserId, x.SaleDate }, "IX_UserSales_UserSaleDate")
+                .IsDescending(false, true);
         });
 
         // User ACTIVITY rows — one per account or content event, written by IUserActivityAudit. EventType is
