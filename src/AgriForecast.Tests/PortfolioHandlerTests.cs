@@ -253,6 +253,16 @@ public class PortfolioHandlerTests
 
         public Task<bool> CropExistsAsync(Guid cropId, CancellationToken ct = default)
             => Task.FromResult(Crops.ContainsKey(cropId));
+
+        // The sales log has its own fixture (SalesHandlerTests). A watchlist or dashboard handler reaching
+        // into a farmer's sales would be a real bug, so these fail loudly rather than returning an empty
+        // page that would let it pass unnoticed.
+        public Task<UserSalesPage> GetSalesPageAsync(
+            Guid userId, Guid? cropId, int page, int pageSize, CancellationToken ct = default)
+            => throw new NotSupportedException("No watchlist or dashboard handler reads the sales log.");
+
+        public Task<UserSaleRow?> GetSaleAsync(Guid userId, Guid saleId, CancellationToken ct = default)
+            => throw new NotSupportedException("No watchlist or dashboard handler reads the sales log.");
     }
 
     // A store seeded with the reference data every test needs, plus the markets and three crops.
@@ -2169,7 +2179,11 @@ public class PortfolioHandlerTests
         PortfolioErrors.ClearReasonNoteWithoutReason.Should().Be("clear_reason_note_without_reason");
         PortfolioErrors.ClearReasonNoteTooLong.Should().Be("clear_reason_note_too_long");
 
-        PortfolioErrors.BadRequestCodes.Should().BeEquivalentTo(new[]
+        // CONTAIN, not equal: the sales log added its own codes to this same family (see
+        // SalesHandlerTests). What must not change is that these five are still in it and still 400s —
+        // an equality assertion here would have to be edited by anyone adding a code anywhere on the
+        // controller, which teaches people to edit it rather than think about it.
+        PortfolioErrors.BadRequestCodes.Should().Contain(new[]
         {
             "clear_reason_required", "clear_reason_not_applicable", "invalid_clear_reason",
             "clear_reason_note_without_reason", "clear_reason_note_too_long"

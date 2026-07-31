@@ -80,4 +80,19 @@ public interface IUserActivityAudit
     // whereas this log line is not.
     Task RecordPlantedDateRemovedAsync(
         Guid actorUserId, string? details, CancellationToken ct = default);
+
+    // A FARMER recorded / edited / deleted one of their own sales. Farmer-authored like the method above,
+    // and one method per verb because "a sale was deleted" is what an admin needs to see in the Logs list.
+    //
+    // details is pre-rendered by the caller (SaleAuditDetails.RenderAuditDetails) as
+    // "<CropCode> · Rs <price>/kg · <date>". THE FARMER'S NOTE IS NOT A PARAMETER of that renderer and
+    // cannot be one here either: audit Details is code-authored text only, and the note lives solely on the
+    // UserSales row where it is scoped to its owner. Called AFTER the commit and fail-open — unlike the
+    // sale row itself, an unwritable log line must never fail the farmer's request.
+
+    Task RecordSaleRecordedAsync(Guid actorUserId, string? details, CancellationToken ct = default);
+
+    Task RecordSaleUpdatedAsync(Guid actorUserId, string? details, CancellationToken ct = default);
+
+    Task RecordSaleDeletedAsync(Guid actorUserId, string? details, CancellationToken ct = default);
 }

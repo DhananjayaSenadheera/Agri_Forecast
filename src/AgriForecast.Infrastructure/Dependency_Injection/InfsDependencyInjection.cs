@@ -90,6 +90,9 @@ public static class InfsDependencyInjection
         // Scoped, not singleton: it shares the request's DbContext so its insert is committed by the
         // handler's unit of work, in the same transaction as the planting date it explains.
         services.AddScoped<IPlantedDateRemovalRepository, PlantedDateRemovalRepository>();
+        // Scoped for the same reason: the sales handlers mutate what they load and commit through the
+        // request's unit of work, so the repository must share that DbContext.
+        services.AddScoped<IUserSaleRepository, UserSaleRepository>();
         services.AddScoped<IUserRepository, UserRepository>();
         services.AddScoped<IPasswordHasher, PasswordHasher>();
         services.AddScoped<IJwtTokenGenerator, JwtTokenGenerator>();

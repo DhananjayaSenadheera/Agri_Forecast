@@ -30,6 +30,13 @@ public static class UserActivityEventStrings
     // "<CropCode> · <Reason word>"; the farmer's optional free-text note is deliberately NOT in it.
     public const string PlantedDateRemoved = "plantedDateRemoved";
 
+    // The farmer's sales log — one wire string PER VERB, so an admin can filter the Logs page for deletions
+    // alone. Details is "<CropCode> · Rs <price>/kg · <date>"; the farmer's optional free-text note is
+    // deliberately NOT in it.
+    public const string SaleRecorded = "saleRecorded";
+    public const string SaleUpdated = "saleUpdated";
+    public const string SaleDeleted = "saleDeleted";
+
     // Ordered so KnownTypes (and therefore the validator's error message) reads in enum order.
     private static readonly (UserActivityEventType Type, string Wire)[] Pairs =
     {
@@ -45,7 +52,10 @@ public static class UserActivityEventStrings
         (UserActivityEventType.MarketChanged, MarketChanged),
         (UserActivityEventType.IngestionServiceStarted, IngestionServiceStarted),
         (UserActivityEventType.IngestionServiceStopRequested, IngestionServiceStopRequested),
-        (UserActivityEventType.PlantedDateRemoved, PlantedDateRemoved)
+        (UserActivityEventType.PlantedDateRemoved, PlantedDateRemoved),
+        (UserActivityEventType.SaleRecorded, SaleRecorded),
+        (UserActivityEventType.SaleUpdated, SaleUpdated),
+        (UserActivityEventType.SaleDeleted, SaleDeleted)
     };
 
     private static readonly Dictionary<UserActivityEventType, string> ByType =

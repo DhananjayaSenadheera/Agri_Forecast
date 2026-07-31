@@ -136,6 +136,23 @@ public class UserActivityEvent
         Guid actorUserId, string? details, DateTime occurredUtc) =>
         ContentChanged(UserActivityEventType.PlantedDateRemoved, actorUserId, details, occurredUtc);
 
+    // The farmer's SALES LOG: one factory per verb, because "a sale was deleted" is the fact an admin needs
+    // to see in the list without opening the row. Details is "<CropCode> · Rs <price>/kg · <date>", rendered
+    // by SaleAuditDetails, whose signature cannot accept the farmer's free-text note — the note lives only
+    // on the UserSales row.
+
+    public static UserActivityEvent SaleRecorded(
+        Guid actorUserId, string? details, DateTime occurredUtc) =>
+        ContentChanged(UserActivityEventType.SaleRecorded, actorUserId, details, occurredUtc);
+
+    public static UserActivityEvent SaleUpdated(
+        Guid actorUserId, string? details, DateTime occurredUtc) =>
+        ContentChanged(UserActivityEventType.SaleUpdated, actorUserId, details, occurredUtc);
+
+    public static UserActivityEvent SaleDeleted(
+        Guid actorUserId, string? details, DateTime occurredUtc) =>
+        ContentChanged(UserActivityEventType.SaleDeleted, actorUserId, details, occurredUtc);
+
     // Private so a content or pipeline row can only be built through the intent-named factories above.
     // An empty actor id is stored as NULL rather than an all-zeros GUID, so an action that reached the
     // handler without a JWT-stamped admin is recorded honestly instead of looking like a real account.

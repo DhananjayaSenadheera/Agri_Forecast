@@ -763,6 +763,14 @@ public class UserCropWatchlistTests
 
         public Task<bool> CropExistsAsync(Guid cropId, CancellationToken ct = default)
             => throw new NotSupportedException();
+
+        // The sales log is not on the watchlist-add path at all; reaching it from here would be a bug.
+        public Task<UserSalesPage> GetSalesPageAsync(
+            Guid userId, Guid? cropId, int page, int pageSize, CancellationToken ct = default)
+            => throw new NotSupportedException();
+
+        public Task<UserSaleRow?> GetSaleAsync(Guid userId, Guid saleId, CancellationToken ct = default)
+            => throw new NotSupportedException();
     }
 
     // Records only the levels, which is all the race test needs: a Warning proves the recovery path ran and

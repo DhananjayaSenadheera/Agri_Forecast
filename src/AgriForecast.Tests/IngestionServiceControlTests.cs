@@ -170,6 +170,9 @@ public class IngestionServiceControlTests
         public Task RecordCropChangedAsync(Guid a, ContentChangeAction b, string? c, CancellationToken ct = default) => Task.CompletedTask;
         public Task RecordMarketChangedAsync(Guid a, ContentChangeAction b, string? c, CancellationToken ct = default) => Task.CompletedTask;
         public Task RecordPlantedDateRemovedAsync(Guid a, string? b, CancellationToken ct = default) => Task.CompletedTask;
+        public Task RecordSaleRecordedAsync(Guid a, string? b, CancellationToken ct = default) => Task.CompletedTask;
+        public Task RecordSaleUpdatedAsync(Guid a, string? b, CancellationToken ct = default) => Task.CompletedTask;
+        public Task RecordSaleDeletedAsync(Guid a, string? b, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     // A controller context carrying (or deliberately lacking) the JWT subject claim the controller reads
