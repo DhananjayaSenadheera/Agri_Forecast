@@ -21,6 +21,10 @@ public static class PipelineSentinelEmails
 {
     private const string Subject = "AgriForecast pipeline";
 
+    // A distinct subject prefix, not a variant of the one above: the reader must be able to tell a
+    // monthly macro problem from last night's pipeline in the notification preview alone.
+    private const string MacroSubject = "AgriForecast macro data";
+
     public static SentinelEmail ComposeAlert(
         PipelineHealth_GetDto health, string logsUrl, TimeOnly checkTime, string zoneLabel) =>
         new(
@@ -50,6 +54,68 @@ public static class PipelineSentinelEmails
                 .AppendLine()
                 .Append(Footer(logsUrl, checkTime, zoneLabel))
                 .ToString());
+
+    /// <summary>
+    /// The macro-stale alert: a DIFFERENT job, a different cadence, and so a different mail with its own
+    /// subject line rather than a paragraph bolted onto the nightly one. The nightly mail's subject names
+    /// a night; putting a monthly problem under it would send the reader looking at the wrong pipeline.
+    /// <para>Says out loud that it repeats on a timer, because an alert that appears to arrive at random
+    /// is one the reader starts ignoring.</para>
+    /// </summary>
+    public static SentinelEmail ComposeMacroStaleAlert(
+        PipelineHealth_GetDto health,
+        int staleAfterDays,
+        int alertRepeatDays,
+        string logsUrl,
+        TimeOnly checkTime,
+        string zoneLabel)
+    {
+        // Age is null ONLY when MacroSeriesPoints is empty, which is a different and worse finding than
+        // "old" — printing "0 days old" there would be a flat lie, so it gets its own subject and lead.
+        var hasData = health.MacroDataAgeDays is not null;
+
+        var subject = hasData
+            ? $"{MacroSubject}: no refresh in {health.MacroDataAgeDays} days"
+            : $"{MacroSubject}: no macro data at all";
+
+        var lead = hasData
+            ? new StringBuilder()
+                .AppendLine($"The newest CBSL macro data (CCPI / MEI) is {health.MacroDataAgeDays} days old, past the")
+                .AppendLine($"{staleAfterDays}-day threshold. The monthly macro job fires on the 1st of each month, so")
+                .AppendLine("anything older than about five weeks means a run has been missed or has failed.")
+                .ToString()
+            : new StringBuilder()
+                .AppendLine("There is NO CBSL macro data in the database at all — not stale, absent. Either the")
+                .AppendLine("monthly macro job has never completed successfully, or this is pointing at an empty")
+                .AppendLine("database.")
+                .ToString();
+
+        return new SentinelEmail(
+            subject,
+            new StringBuilder()
+                .Append(lead)
+                .AppendLine()
+                .AppendLine("What it costs: macro features are as-of joined with a 60-day staleness cap, so once")
+                .AppendLine("the newest vintage passes that cap the macro columns quietly go NaN and forecasts")
+                .AppendLine("carry on without them. Nothing turns red on its own — which is why this mail exists.")
+                .AppendLine()
+                .AppendLine("Details")
+                .AppendLine($"  Newest macro data (UTC): {Or(Utc(health.MacroLastRetrievedUtc))}")
+                .AppendLine($"  Age:                     {(hasData ? $"{health.MacroDataAgeDays} day(s)" : "(no data)")}")
+                .AppendLine($"  Stale after:             {staleAfterDays} day(s)")
+                .AppendLine($"  Checked at (UTC):        {Utc(health.CheckedAtUtc)}")
+                .AppendLine()
+                .AppendLine("Where to look: the monthly-cbsl-macro CronJob (kubectl get cronjob -n agriforecast,")
+                .AppendLine("then kubectl get jobs / logs for its most recent run). A container killed for memory")
+                .AppendLine("leaves no row behind and no failed status anywhere the app can see.")
+                .AppendLine()
+                .AppendLine($"This alert repeats every {alertRepeatDays} day(s) while the data stays stale, and stops on its")
+                .AppendLine("own once a macro run lands. It says nothing about last night's daily pipeline, which")
+                .AppendLine("is reported separately.")
+                .AppendLine()
+                .Append(Footer(logsUrl, checkTime, zoneLabel))
+                .ToString());
+    }
 
     // The state -> plain-English map. Mirrors the admin banner copy.
     private static string Explain(string state) => state switch

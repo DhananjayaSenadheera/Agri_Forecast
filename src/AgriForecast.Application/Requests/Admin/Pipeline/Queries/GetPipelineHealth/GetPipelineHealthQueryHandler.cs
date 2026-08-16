@@ -30,23 +30,32 @@ namespace AgriForecast.Application.Requests.Admin.Pipeline.Queries.GetPipelineHe
 //
 // Staleness deliberately reuses the ingestion card's Ingestion:RunningStalenessMinutes knob, so
 // "running" means the same thing on both screens.
+//
+// SECOND, INDEPENDENT SIGNAL — macro freshness. The monthly CBSL macro job is a different CronJob on a
+// different cadence, and it failed silently for 15 days because nothing here watched it. It is reported
+// through the macro* fields ONLY; it never touches `state`. The six-value ladder above is the daily state
+// machine, pinned with the FE banner, and overloading it would both break that contract and make the
+// banner lie about last night over a fortnight-old monthly failure.
 public class GetPipelineHealthQueryHandler
     : IRequestHandler<GetPipelineHealthQuery, Result<PipelineHealth_GetDto>>
 {
     private readonly IPipelineHealthReadStore _store;
     private readonly IPipelineScheduleSettings _schedule;
     private readonly IIngestionStatusSettings _ingestionSettings;
+    private readonly IMacroFreshnessSettings _macroSettings;
     private readonly TimeProvider _timeProvider;
 
     public GetPipelineHealthQueryHandler(
         IPipelineHealthReadStore store,
         IPipelineScheduleSettings schedule,
         IIngestionStatusSettings ingestionSettings,
+        IMacroFreshnessSettings macroSettings,
         TimeProvider timeProvider)
     {
         _store = store;
         _schedule = schedule;
         _ingestionSettings = ingestionSettings;
+        _macroSettings = macroSettings;
         _timeProvider = timeProvider;
     }
 
@@ -112,6 +121,11 @@ public class GetPipelineHealthQueryHandler
 
         var state = DeriveState(batch, featureBuildRows, featureBuildStatus, verification, nowUtc);
 
+        // Read AFTER the state is derived, and never passed into DeriveState — the compiler cannot enforce
+        // "the macro signal must not reach the daily ladder", so the separation is kept structural here.
+        var macroRetrievedAtUtc = await _store.GetLatestMacroRetrievedAtUtcAsync(cancellationToken);
+        var macro = EvaluateMacroFreshness(macroRetrievedAtUtc, nowUtc, _macroSettings.StaleAfterDays);
+
         var dto = new PipelineHealth_GetDto
         {
             ExpectedForDate = fire.LocalDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
@@ -122,7 +136,10 @@ public class GetPipelineHealthQueryHandler
                 ? null
                 : IngestionStatusStrings.ToWire(verification.OverallStatus),
             FeatureBuildStatus = featureBuildStatus,
-            CheckedAtUtc = DateTime.SpecifyKind(nowUtc, DateTimeKind.Utc)
+            CheckedAtUtc = DateTime.SpecifyKind(nowUtc, DateTimeKind.Utc),
+            MacroStale = macro.IsStale,
+            MacroDataAgeDays = macro.AgeDays,
+            MacroLastRetrievedUtc = macroRetrievedAtUtc is null ? null : AsUtc(macroRetrievedAtUtc.Value)
         };
 
         return Result<PipelineHealth_GetDto>.Success(dto);
@@ -180,6 +197,33 @@ public class GetPipelineHealthQueryHandler
         return featureBuildStatus == IngestionStatusStrings.ToWire(IngestionRunStatus.Succeeded)
             ? PipelineHealthStates.Green
             : PipelineHealthStates.Failed;
+    }
+
+    // Is the newest macro data older than the configured window, and by how much?
+    //
+    // The comparison is on the raw TimeSpan with a STRICT greater-than — exactly 40.0 days old is still
+    // fresh, 40 days plus a tick is stale — matching the operator the ML staleness caps already use, so
+    // "older than N days" means one thing across the system. The reported age is the FLOOR of the same
+    // span, so a 40-day-and-2-hour gap reads as 40 days AND as stale; rounding the age up to 41 to make
+    // the two agree would be inventing a day that has not passed.
+    //
+    // Two edges, both decided towards over-reporting rather than a comfortable silence:
+    //   * empty table -> stale with a NULL age. There is no age, and 0 would read as "refreshed today",
+    //     which is the exact false-green this feature exists to prevent.
+    //   * a RetrievedAtUtc in the FUTURE (clock skew between the pod that wrote it and this one) -> not
+    //     stale, age clamped to 0. A negative age is not a fact about the data, and refusing to alert on
+    //     data that is too NEW is the safe direction.
+    private static (bool IsStale, int? AgeDays) EvaluateMacroFreshness(
+        DateTime? latestRetrievedAtUtc, DateTime nowUtc, int staleAfterDays)
+    {
+        if (latestRetrievedAtUtc is null)
+            return (true, null);
+
+        var age = nowUtc - latestRetrievedAtUtc.Value;
+        if (age < TimeSpan.Zero)
+            return (false, 0);
+
+        return (age > TimeSpan.FromDays(staleAfterDays), (int)Math.Floor(age.TotalDays));
     }
 
     // The fire-time / next-fire / DST-safe conversion maths moved to PipelineScheduleClock when the email

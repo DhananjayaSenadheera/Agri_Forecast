@@ -55,6 +55,15 @@ public class PipelineHealthReadStore : IPipelineHealthReadStore
             .Where(v => v.PipelineDate == pipelineDate && v.RunUtc >= notBeforeUtc), ct);
     }
 
+    // MAX over an unfiltered table: MacroSeriesPoints holds ~160 rows (two series, monthly vintages since
+    // 2021), so this is a trivial aggregate and no index is warranted for it.
+    //
+    // The cast to DateTime? is load-bearing, not decoration: MaxAsync over a non-nullable projection on an
+    // EMPTY table throws InvalidOperationException, and the empty table is precisely the case the caller
+    // must be able to see — a fresh database, or a macro table that was never populated at all.
+    public Task<DateTime?> GetLatestMacroRetrievedAtUtcAsync(CancellationToken ct = default) =>
+        _db.MacroSeriesPoints.AsNoTracking().MaxAsync(p => (DateTime?)p.RetrievedAtUtc, ct);
+
     private static Task<IngestionVerificationRow?> Latest(
         IQueryable<Domain.Entities.IngestionVerification> query, CancellationToken ct) =>
         query
