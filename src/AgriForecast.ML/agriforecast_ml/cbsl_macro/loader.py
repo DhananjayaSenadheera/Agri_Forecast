@@ -204,13 +204,34 @@ def _yyyymm_plus_one_month(d: date) -> str:
     return f"{y:04d}{m:02d}"
 
 
-def get_watermarks(*, engine: sa.engine.Engine | None = None) -> MacroWatermarks:
+def get_watermarks(
+    *, engine: sa.engine.Engine | None = None, now: "date | None" = None
+) -> MacroWatermarks:
     """Read the current MacroSeriesPoints coverage. Read-only, no writes.
 
     Returns MacroWatermarks(None, None) for an empty DB (both source's queries
     return NULL/no rows) -- the natural "keep everything" state for a true
     backfill, with no special-casing needed by the caller.
+
+    Both fields are CLAMPED to `now` (defaults to `date.today()`, injectable
+    for tests -- same pattern as data_quality.py). Without this, one bad row
+    can poison the watermark into the FUTURE and permanently, silently stop
+    ingestion of everything after it:
+      - parser._mei_reference_month()'s last-resort fallback can emit a
+        ReferenceDate AFTER the pack month it came from (confirmed:
+        _mei_reference_month("202601", "March") -> 2026-03, i.e. AHEAD of the
+        202601 pack) -- OPR's pack-month-direct inverse would then push
+        mei_pack_yyyymm past the pack that produced it, and every
+        watermark-filtered future pass would drop that pack's true successor
+        forever, with no error anywhere.
+      - a garbage /CreationDate on a single CCPI PDF (a wrong year, say) can
+        push MAX(PublishedAt) years into the future and silently halt ALL
+        CCPI ingestion from that point on.
+    Clamping means the WORST case is "one month/day of unnecessary re-parse"
+    (harmless, idempotent), never "silent permanent gap".
     """
+    today = now if now is not None else date.today()
+
     if engine is None:
         engine = get_engine()
 
@@ -235,6 +256,14 @@ def get_watermarks(*, engine: sa.engine.Engine | None = None) -> MacroWatermarks
         ).scalar()
 
     ccpi_published_at = _coerce_date(ccpi_pub_raw)
+    if ccpi_published_at is not None and ccpi_published_at > today:
+        logger.warning(
+            "CCPI watermark %s is in the FUTURE relative to today (%s) -- "
+            "clamping to today. Likely a garbage /CreationDate on one PDF; "
+            "unclamped this would silently stop ALL future CCPI ingestion.",
+            ccpi_published_at, today,
+        )
+        ccpi_published_at = today
 
     pack_candidates: list[str] = []
     opr_ref = _coerce_date(opr_ref_raw)
@@ -244,6 +273,18 @@ def get_watermarks(*, engine: sa.engine.Engine | None = None) -> MacroWatermarks
     if food_ref is not None:
         pack_candidates.append(_yyyymm_plus_one_month(food_ref))
     mei_pack_yyyymm = max(pack_candidates) if pack_candidates else None
+
+    current_month_yyyymm = f"{today.year:04d}{today.month:02d}"
+    if mei_pack_yyyymm is not None and mei_pack_yyyymm > current_month_yyyymm:
+        logger.warning(
+            "MEI watermark pack %s is in the FUTURE relative to the current "
+            "month (%s) -- clamping. Likely a malformed trade-table row "
+            "month resolving past its own pack (see "
+            "parser._mei_reference_month's last-resort fallback); unclamped "
+            "this would silently drop that pack's true successor forever.",
+            mei_pack_yyyymm, current_month_yyyymm,
+        )
+        mei_pack_yyyymm = current_month_yyyymm
 
     logger.info(
         "MacroSeriesPoints watermarks: CCPI PublishedAt=%s, MEI pack=%s "

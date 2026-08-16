@@ -54,6 +54,16 @@ as the corpus grows. Now:
 an error — this CLI is meant to be safe to run on a schedule (the k8s
 monthly-cbsl-macro CronJob) where most runs will legitimately find nothing
 new.
+
+HONEST FAILURE REPORTING (2026-08-17 reviewer fix): a DB-write failure on one
+artifact (per-artifact isolation, see design note 2 above) is now counted
+separately in the summary's `artifactsFailed` key and flips `status` to
+"partial" — it is NEVER folded into "0 series parsed" `artifactsSkipped`,
+and it is never silently reported as `status="ok"` / exit 0 the way it was
+before this fix (a real regression vs. the pre-incremental main(), which let
+the exception propagate loudly). `status != "ok"` makes `main()` exit 1, so
+k8s marks the Job Failed. "No new bulletin" always has `artifactsFailed == 0`
+and is unaffected — it still exits 0.
 """
 from __future__ import annotations
 
@@ -120,9 +130,17 @@ def run(
             watermarks.ccpi_published_at, watermarks.mei_pack_yyyymm,
             downloader._WATERMARK_OVERLAP_MONTHS,
         )
+        # A source with no prior coverage at all on a non-full run means this
+        # pass will scan that source's FULL listing (same cost as --full for
+        # that source alone) -- cheap to flag, easy to miss otherwise.
+        if watermarks.ccpi_published_at is None:
+            log.warning("ingest_cbsl_macro: no prior CCPI coverage in the DB — this pass scans the FULL CCPI listing")
+        if watermarks.mei_pack_yyyymm is None:
+            log.warning("ingest_cbsl_macro: no prior MEI coverage in the DB — this pass scans the FULL MEI listing")
 
     artifacts_fetched = 0
     artifacts_skipped = 0
+    artifacts_failed = 0
     artifacts_watermark_skipped = 0
     rows_inserted = 0
     rows_updated = 0
@@ -170,13 +188,15 @@ def run(
         except Exception:
             # Per-artifact isolation: one bad artifact's DB write must never
             # abort the rest of the pass — the old single-big-transaction
-            # shape would have lost EVERY other artifact's rows too.
+            # shape would have lost EVERY other artifact's rows too. This is
+            # a genuine FAILURE though (not a "0 series parsed" skip), so it
+            # is counted and reported separately — see artifactsFailed below.
             log.exception(
                 "ingest_cbsl_macro: upsert FAILED for CCPI artifact %s — this "
-                "artifact's rows are skipped, the rest of the pass continues",
+                "artifact's rows are LOST, the rest of the pass continues",
                 pdf_path.name,
             )
-            artifacts_skipped += 1
+            artifacts_failed += 1
             continue
         artifacts_fetched += 1
         coverage.update(p.series_code for p in points)
@@ -223,10 +243,10 @@ def run(
         except Exception:
             log.exception(
                 "ingest_cbsl_macro: upsert FAILED for MEI artifact %s — this "
-                "artifact's rows are skipped, the rest of the pass continues",
+                "artifact's rows are LOST, the rest of the pass continues",
                 pdf_path.name,
             )
-            artifacts_skipped += 1
+            artifacts_failed += 1
             continue
         artifacts_fetched += 1
         coverage.update(p.series_code for p in points)
@@ -234,10 +254,23 @@ def run(
         rows_updated += counters.get("updated", 0)
         rows_skipped_invalid += counters.get("skipped_invalid", 0)
 
+    # status is "ok" only when every fetched artifact's rows actually landed.
+    # A DB-write failure is a real loss of data, not merely "found nothing
+    # new" — it must never be reported the same way as a legitimate
+    # zero-new-artifacts pass (both used to report status="ok"/exit 0, which
+    # is the honest-reporting regression this fixes). "partial" because
+    # per-artifact isolation means the OTHER artifacts in the same pass still
+    # succeeded — this is not a whole-pipeline failure.
+    status = "partial" if artifacts_failed > 0 else "ok"
+
     summary = {
-        "status": "ok",
+        "status": status,
         "artifactsFetched": artifacts_fetched,
         "artifactsSkipped": artifacts_skipped,
+        # Distinct from artifactsSkipped ("0 series parsed", a benign PDF
+        # content miss) — a DB upsert EXCEPTION on an otherwise successfully
+        # parsed artifact, whose rows are consequently lost this pass.
+        "artifactsFailed": artifacts_failed,
         # Additive field (not part of the original contract): artifacts the
         # watermark dropped BEFORE download/parse. Zero on a true backfill or
         # --full run; high on a routine steady-state monthly pass — the
@@ -291,15 +324,26 @@ def main() -> None:
         full=args.full,
     )
 
-    print(f"Artifacts fetched (>=1 series parsed): {summary['artifactsFetched']}")
-    print(f"Artifacts skipped (0 series parsed):   {summary['artifactsSkipped']}")
-    print(f"Artifacts skipped (before watermark):  {summary['artifactsWatermarkSkipped']}")
+    print(f"Status: {summary['status']}")
+    print(f"Artifacts fetched (>=1 series parsed):    {summary['artifactsFetched']}")
+    print(f"Artifacts skipped (0 series parsed):      {summary['artifactsSkipped']}")
+    print(f"Artifacts FAILED (DB upsert error):       {summary['artifactsFailed']}")
+    print(f"Artifacts skipped (before watermark):     {summary['artifactsWatermarkSkipped']}")
     print(f"Rows inserted: {summary['rowsInserted']}")
     print(f"Rows updated:  {summary['rowsUpdated']}")
     print(f"Rows skipped (invalid vintage): {summary['rowsSkippedInvalid']}")
     print("Per-series coverage:")
     for series_code, n in sorted(summary["perSeriesCoverage"].items()):
         print(f"  {series_code}: {n} point(s) parsed")
+
+    if summary["status"] != "ok":
+        # A real DB-write failure occurred this pass (artifactsFailed > 0) --
+        # exit non-zero so k8s marks the Job Failed and it shows up loudly,
+        # instead of the old silent "status ok / exit 0" regression. "No new
+        # bulletin since watermark" is untouched: that path always has
+        # artifactsFailed == 0, so status stays "ok" and this still exits 0.
+        print(f"ingest_cbsl_macro: FAILED — {summary['artifactsFailed']} artifact(s) lost a DB write this pass", file=sys.stderr)
+        sys.exit(1)
 
     sys.exit(0)
 

@@ -371,6 +371,17 @@ def ingest_cbsl_macro_endpoint(req: IngestCbslMacroRequest):
     returning a structured summary of artifacts, rows and per-series coverage. 'No new
     bulletin since the watermark' is a success with zero rows, never an error. The heavy
     module is imported lazily.
+
+    HTTP status stays 200 even when the summary body's own `status` field is
+    "partial" (one or more artifacts lost a DB write this pass, per-artifact
+    isolated — see ingest_cbsl_macro.py's WRITE-BACK) -- this endpoint's own
+    contract is "the pass ran and here is an honest report", the same as
+    /admin/ingest-harti's gaps/outliers report-only fields; only a whole-pass
+    exception (this route's own except below) is a 502, and only an import
+    failure is a 503. Checked (2026-08-17 review): no .NET caller inspects
+    this body's `status` field today, so this is a safe, additive change --
+    but any FUTURE caller wiring this into an automated gate MUST check
+    `status`, not just the HTTP code, to see a partial failure.
     """
     try:
         import ingest_cbsl_macro
