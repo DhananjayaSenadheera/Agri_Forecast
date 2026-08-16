@@ -52,4 +52,34 @@ public class PipelineHealth_GetDto
 
     // When this snapshot was taken, so the banner can show staleness of its own poll.
     public DateTime CheckedAtUtc { get; set; }
+
+    // --- the MONTHLY macro job, reported ALONGSIDE the nightly verdict -----------------------------
+    //
+    // Everything above describes ONE NIGHT of the daily pipeline. The three fields below describe a
+    // different CronJob on a different cadence (k8s/pipeline-monthly.yaml, the 1st of each month) and are
+    // deliberately NOT folded into State: the six PipelineHealthStates values are the daily state machine
+    // and the FE banner maps them one-for-one, so a seventh value — or a nightly state quietly flipped to
+    // "failed" because a monthly job died two weeks ago — would make the banner lie about last night and
+    // would break every consumer of the existing ladder. Two independent signals, reported as two
+    // independent facts.
+    //
+    // The incident: the monthly macro job was OOMKilled on 2026-08-01 and nobody knew for 15 days, because
+    // both the banner and the email sentinel only ever looked at the daily pipeline.
+
+    // True when the newest MacroSeriesPoints row was retrieved more than MacroFreshness:StaleAfterDays
+    // ago (40 by default, STRICT greater-than), and ALSO true when the table is empty. Never null: the
+    // question always has an answer, and "we hold no macro data at all" is the worst answer, not an
+    // absent one.
+    public bool MacroStale { get; set; }
+
+    // Whole days between the newest macro retrieval and CheckedAtUtc, floored. NULL only when the table
+    // is empty — there is no age to report and zero would read as "refreshed today". A consumer must
+    // therefore treat (macroStale == true && macroDataAgeDays == null) as "no macro data at all", not as
+    // a missing field.
+    public int? MacroDataAgeDays { get; set; }
+
+    // The newest MacroSeriesPoints.RetrievedAtUtc itself, or null on an empty table, so the banner and
+    // the alert email can name the date rather than only the age. A monthly pass refreshes this even when
+    // it inserts no new rows, so it tracks "when macro data last landed", which is the thing at risk.
+    public DateTime? MacroLastRetrievedUtc { get; set; }
 }

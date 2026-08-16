@@ -76,6 +76,10 @@ public static class InfsDependencyInjection
         // behind it, and the API's nightly sentinel is a singleton hosted service that needs the same
         // schedule the request-scoped handler uses. A scoped registration would be a captive dependency.
         services.AddSingleton<IPipelineScheduleSettings, AgriForecast.Infrastructure.Services.PipelineHealth.PipelineScheduleSettings>();
+        // Same reasoning as the line above — immutable config read by BOTH the request-scoped health
+        // handler and the singleton sentinel, so it must be a singleton to avoid a captive dependency.
+        // Describes the MONTHLY macro CronJob, not the nightly one.
+        services.AddSingleton<IMacroFreshnessSettings, AgriForecast.Infrastructure.Services.PipelineHealth.MacroFreshnessSettings>();
         services.AddSingleton<ISentinelSettings, AgriForecast.Infrastructure.Services.PipelineSentinel.SentinelSettings>();
         services.AddSingleton<ISentinelMailer, AgriForecast.Infrastructure.Services.PipelineSentinel.SmtpSentinelMailer>();
         services.TryAddSingleton(TimeProvider.System);

@@ -53,6 +53,14 @@ public class PipelineHealthHandlerTests
         private readonly List<IngestionRun> _runs = new();
         private readonly List<IngestionVerification> _verifications = new();
 
+        /// <summary>
+        /// MAX(MacroSeriesPoints.RetrievedAtUtc). DEFAULTS TO NULL — an empty macro table, i.e. the
+        /// WORST macro reading there is — on purpose: every pre-existing daily test in this class runs
+        /// with macro data at its most alarming, so if the macro signal could ever leak into `state` or
+        /// into any other daily field, those tests would fail rather than pass quietly.
+        /// </summary>
+        public DateTime? MacroRetrievedAtUtc { get; set; }
+
         public FakeStore Add(params IngestionRun[] runs)
         {
             _runs.AddRange(runs);
@@ -97,6 +105,12 @@ public class PipelineHealthHandlerTests
                     v.PipelineDate == pipelineDate && v.RunUtc >= notBeforeUtc)));
         }
 
+        public Task<DateTime?> GetLatestMacroRetrievedAtUtcAsync(CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.FromResult(MacroRetrievedAtUtc);
+        }
+
         private static IngestionVerificationRow? Latest(IEnumerable<IngestionVerification> rows)
         {
             var row = rows.OrderByDescending(v => v.RunUtc).FirstOrDefault();
@@ -119,12 +133,23 @@ public class PipelineHealthHandlerTests
         public int RunningStalenessMinutes => minutes;
     }
 
+    // The macro-freshness seam. The REAL implementation is exercised by MacroFreshnessSettingsTests at the
+    // bottom of this file; here the threshold is stated explicitly so a boundary test reads as arithmetic
+    // rather than as a coincidence of the default.
+    private sealed class FixedMacroFreshness(int staleAfterDays = 40, int alertRepeatDays = 7)
+        : IMacroFreshnessSettings
+    {
+        public int StaleAfterDays => staleAfterDays;
+        public int AlertRepeatDays => alertRepeatDays;
+    }
+
     private static async Task<PipelineHealth_GetDto> HealthAsync(
-        FakeStore store, DateTime nowUtc, int stalenessMinutes = 120)
+        FakeStore store, DateTime nowUtc, int stalenessMinutes = 120, int macroStaleAfterDays = 40)
     {
         var schedule = new PipelineScheduleSettings(new ConfigurationBuilder().Build());
         var handler = new GetPipelineHealthQueryHandler(
-            store, schedule, new FixedStaleness(stalenessMinutes), new FixedClock(nowUtc));
+            store, schedule, new FixedStaleness(stalenessMinutes),
+            new FixedMacroFreshness(macroStaleAfterDays), new FixedClock(nowUtc));
 
         var result = await handler.Handle(new GetPipelineHealthQuery(), CancellationToken.None);
         result.IsSuccess.Should().BeTrue();
@@ -798,6 +823,262 @@ public class PipelineHealthHandlerTests
             "the snapshot's solo batch must never be selectable as the night's ingestion batch");
         health.State.Should().Be(PipelineHealthStates.Partial,
             "a clean, later FORECAST_SNAPSHOT row must not paper over a genuinely partial ingestion night");
+    }
+
+    // --- the MONTHLY macro job: a second, independent signal ----------------------------------
+    //
+    // The incident: the monthly CBSL macro CronJob was OOMKilled on 2026-08-01 and nobody knew for 15
+    // days, because everything above — and the email sentinel — only ever looked at the DAILY pipeline.
+    // A k8s job's exit status is invisible to the API, so staleness is read from the data instead:
+    // MAX(MacroSeriesPoints.RetrievedAtUtc), which a healthy monthly pass moves forward even when it
+    // inserts no new rows.
+
+    private static readonly DateTime MacroNow = FireUtc.AddHours(2);
+
+    private static FakeStore GreenNightWith(DateTime? macroRetrievedAtUtc)
+    {
+        var batchId = Guid.NewGuid();
+        var store = new FakeStore()
+            .Add(CleanBatch(batchId, FireUtc.AddMinutes(1)))
+            .Add(FeatureBuild(FireUtc.AddMinutes(25), IngestionRunStatus.Succeeded))
+            .Add(Verification(batchId, IngestionVerificationStatus.Pass, FireUtc.AddMinutes(20)));
+        store.MacroRetrievedAtUtc = macroRetrievedAtUtc;
+        return store;
+    }
+
+    [Fact]
+    public async Task MacroFresh_WhenTheNewestMacroRowIsInsideTheWindow()
+    {
+        var retrieved = MacroNow.AddDays(-10);
+        var health = await HealthAsync(GreenNightWith(retrieved), MacroNow);
+
+        health.MacroStale.Should().BeFalse();
+        health.MacroDataAgeDays.Should().Be(10);
+        health.MacroLastRetrievedUtc.Should().Be(retrieved);
+        health.MacroLastRetrievedUtc!.Value.Kind.Should().Be(DateTimeKind.Utc,
+            "the FE parses this as an instant, and EF materializes datetime2 as Unspecified");
+    }
+
+    // THE THRESHOLD, pinned to the tick. The operator is a STRICT greater-than — exactly 40.0 days old is
+    // still fresh — matching the ML staleness caps, so "older than N days" means one thing system-wide.
+    // Asserted at 40 days minus a tick / exactly 40 days / 40 days plus a tick: an off-by-one that made
+    // the comparison >= would flip the middle case and nothing else, so only pinning 39 and 41 would let
+    // it through.
+    [Theory]
+    [InlineData(-1, false)]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    public async Task MacroStale_TurnsOverAtExactlyFortyDays_StrictGreaterThan(long tickOffset, bool expectStale)
+    {
+        var retrieved = MacroNow.AddDays(-40).AddTicks(-tickOffset);
+
+        var health = await HealthAsync(GreenNightWith(retrieved), MacroNow);
+
+        health.MacroStale.Should().Be(expectStale);
+    }
+
+    [Theory]
+    [InlineData(39, false)]
+    [InlineData(40, false)]
+    [InlineData(41, true)]
+    [InlineData(43, true)] // the live reading on 2026-08-16, 15 days after the OOMKill
+    [InlineData(400, true)]
+    public async Task MacroStaleness_AndTheReportedAge_AgreeAcrossWholeDays(int ageDays, bool expectStale)
+    {
+        var health = await HealthAsync(GreenNightWith(MacroNow.AddDays(-ageDays)), MacroNow);
+
+        health.MacroStale.Should().Be(expectStale);
+        health.MacroDataAgeDays.Should().Be(ageDays);
+    }
+
+    // The age is the FLOOR of the gap, and the staleness decision is made on the raw span. So 40 days and
+    // 2 hours is BOTH "40 days old" and stale, and that is not a contradiction: rounding the age up to 41
+    // to make the two agree would invent a day that has not passed.
+    [Fact]
+    public async Task MacroAge_IsFlooredWhileStalenessIsDecidedOnTheExactSpan()
+    {
+        var health = await HealthAsync(
+            GreenNightWith(MacroNow.AddDays(-40).AddHours(-2)), MacroNow);
+
+        health.MacroStale.Should().BeTrue("the exact gap is past 40 days");
+        health.MacroDataAgeDays.Should().Be(40, "40 days and 2 hours is 40 whole days, not 41");
+    }
+
+    // An empty table is the WORST answer, not a missing one. Reporting age 0 here (or macroStale false)
+    // would be the exact false-green this feature exists to prevent.
+    [Fact]
+    public async Task MacroStale_WhenTheTableIsEmpty_WithNoAgeToReport()
+    {
+        var health = await HealthAsync(GreenNightWith(null), MacroNow);
+
+        health.MacroStale.Should().BeTrue("no macro data at all is worse than old macro data, never better");
+        health.MacroDataAgeDays.Should().BeNull("there is no age, and 0 would read as 'refreshed today'");
+        health.MacroLastRetrievedUtc.Should().BeNull();
+    }
+
+    // Clock skew between the pod that wrote the row and the one reading it. Refusing to alert on data
+    // that is too NEW is the safe direction, and a negative age is not a fact about anything.
+    [Fact]
+    public async Task MacroRetrievedInTheFuture_IsNotStale_AndReportsZeroDays()
+    {
+        var health = await HealthAsync(GreenNightWith(MacroNow.AddHours(3)), MacroNow);
+
+        health.MacroStale.Should().BeFalse();
+        health.MacroDataAgeDays.Should().Be(0, "a negative age is clock skew, not a measurement");
+    }
+
+    [Fact]
+    public async Task MacroThreshold_ComesFromConfiguration_NotFromAHardCodedForty()
+    {
+        var store = GreenNightWith(MacroNow.AddDays(-20));
+
+        (await HealthAsync(store, MacroNow, macroStaleAfterDays: 40)).MacroStale.Should().BeFalse();
+        (await HealthAsync(store, MacroNow, macroStaleAfterDays: 10)).MacroStale.Should().BeTrue();
+    }
+
+    // --- the regression pin: the daily ladder is untouched -------------------------------------
+    //
+    // The recorded trap this guards (lastRunStatus-hijack): a new signal quietly redefining an existing
+    // one. `state` is the DAILY state machine, mapped one-for-one by the FE banner. A monthly job that
+    // died a fortnight ago must not repaint last night, in either direction.
+
+    [Theory]
+    [InlineData(null)]      // no macro data at all
+    [InlineData(400)]       // catastrophically stale
+    [InlineData(1)]         // perfectly fresh
+    public async Task MacroSignal_NeverChangesAGreenNight(int? macroAgeDays)
+    {
+        var retrieved = macroAgeDays is null ? (DateTime?)null : MacroNow.AddDays(-macroAgeDays.Value);
+
+        var health = await HealthAsync(GreenNightWith(retrieved), MacroNow);
+
+        health.State.Should().Be(PipelineHealthStates.Green,
+            "macro freshness is reported alongside the night, never as the night");
+        health.VerificationStatus.Should().Be("Pass");
+        health.FeatureBuildStatus.Should().Be("succeeded");
+        health.ExpectedForDate.Should().Be(ExpectedNight);
+    }
+
+    // And the other direction: fresh macro data must not wash out a night that genuinely failed its gate.
+    [Fact]
+    public async Task FreshMacroData_DoesNotSoftenAGateBlockedNight()
+    {
+        var batchId = Guid.NewGuid();
+        var store = new FakeStore()
+            .Add(CleanBatch(batchId, FireUtc.AddMinutes(1)))
+            .Add(Verification(batchId, IngestionVerificationStatus.Fail, FireUtc.AddMinutes(20)));
+        store.MacroRetrievedAtUtc = MacroNow.AddHours(-1);
+
+        var health = await HealthAsync(store, MacroNow);
+
+        health.State.Should().Be(PipelineHealthStates.GateBlocked);
+        health.MacroStale.Should().BeFalse();
+    }
+
+    // The wire shape is pinned with the FE banner, so this feature had to be ADDITIVE. Enumerated by
+    // reflection rather than by eye: a renamed daily field would break the banner silently, and this is
+    // the cheapest place to notice.
+    [Fact]
+    public void TheDto_GainsExactlyTheThreeMacroFields_AndRenamesNothing()
+    {
+        var properties = typeof(PipelineHealth_GetDto)
+            .GetProperties()
+            .Select(p => p.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        properties.Should().Equal(
+            "BatchId",
+            "CheckedAtUtc",
+            "ExpectedForDate",
+            "FeatureBuildStatus",
+            "MacroDataAgeDays",
+            "MacroLastRetrievedUtc",
+            "MacroStale",
+            "StartedUtc",
+            "State",
+            "VerificationStatus");
+
+        // macroStale is never null: the question always has an answer.
+        typeof(PipelineHealth_GetDto).GetProperty("MacroStale")!.PropertyType
+            .Should().Be(typeof(bool));
+        typeof(PipelineHealth_GetDto).GetProperty("MacroDataAgeDays")!.PropertyType
+            .Should().Be(typeof(int?), "an empty macro table has no age, and 0 would be a lie");
+    }
+
+    // The six-value ladder is pinned with the FE banner. Macro staleness deliberately did NOT add a
+    // seventh: it is a field, not a state.
+    [Fact]
+    public void TheStateLadder_StillHasExactlySixValues()
+    {
+        typeof(PipelineHealthStates)
+            .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Select(f => (string)f.GetValue(null)!)
+            .Should().BeEquivalentTo(
+                "green", "running", "partial", "failed", "gate_blocked", "missing");
+    }
+}
+
+/// <summary>
+/// The macro-freshness config seam. Like the schedule below it, the DEFAULTS have to hold on their own —
+/// and unlike the schedule, the default here encodes a judgement: 40 days sits above the ~37-day worst
+/// normal cycle of a job that fires on the 1st of each month, and well below two cycles (59-62 days), so
+/// one missed run is caught about nine days after the miss rather than at the next month's run.
+/// </summary>
+public class MacroFreshnessSettingsTests
+{
+    private static MacroFreshnessSettings Build(params (string Key, string? Value)[] values) =>
+        new(new ConfigurationBuilder()
+            .AddInMemoryCollection(values.Select(v => new KeyValuePair<string, string?>(v.Key, v.Value)))
+            .Build());
+
+    [Fact]
+    public void Defaults_AreFortyDaysStaleAndASevenDayRepeat()
+    {
+        var settings = Build();
+
+        settings.StaleAfterDays.Should().Be(40);
+        settings.AlertRepeatDays.Should().Be(7);
+    }
+
+    [Fact]
+    public void TheDefaultThreshold_SitsBetweenOneCycleAndTwo()
+    {
+        var settings = Build();
+
+        settings.StaleAfterDays.Should().BeGreaterThan(37,
+            "a healthy monthly job can legitimately leave data ~37 days old just before it next fires");
+        settings.StaleAfterDays.Should().BeLessThan(59,
+            "two whole cycles must never be able to pass unnoticed — that is the 15-day blind spot this closes");
+    }
+
+    [Fact]
+    public void Overrides_AreHonoured()
+    {
+        var settings = Build(
+            ("MacroFreshness:StaleAfterDays", "50"),
+            ("MacroFreshness:AlertRepeatDays", "3"));
+
+        settings.StaleAfterDays.Should().Be(50);
+        settings.AlertRepeatDays.Should().Be(3);
+    }
+
+    // A typo must not throw at construction — that would be a 500 on the endpoint whose job is to report
+    // trouble. Zero and negatives are refused too: StaleAfterDays=0 calls every database stale forever and
+    // AlertRepeatDays=0 mails nightly, and both destroy the alert rather than merely mis-tuning it.
+    [Theory]
+    [InlineData("not-a-number", "")]
+    [InlineData("0", "0")]
+    [InlineData("-5", "-1")]
+    [InlineData("40.5", "7.5")]
+    public void MalformedOrNonPositiveValues_FallBackInsteadOfThrowing(string stale, string repeat)
+    {
+        var settings = Build(
+            ("MacroFreshness:StaleAfterDays", stale),
+            ("MacroFreshness:AlertRepeatDays", repeat));
+
+        settings.StaleAfterDays.Should().Be(40);
+        settings.AlertRepeatDays.Should().Be(7);
     }
 }
 

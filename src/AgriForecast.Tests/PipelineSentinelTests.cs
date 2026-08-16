@@ -48,6 +48,13 @@ public class PipelineSentinelTests
 
         public List<TimeSpan> Waits { get; } = new();
 
+        /// <summary>
+        /// Moves virtual time forward WITHOUT the code under test asking to wait. Needed only by the
+        /// macro dedup tests, where the thing being measured is the gap between two nightly checks —
+        /// days apart in a loop this unit test does not run.
+        /// </summary>
+        public void Advance(TimeSpan by) => Interlocked.Add(ref _utcTicks, by.Ticks);
+
         public override DateTimeOffset GetUtcNow() =>
             new(new DateTime(Interlocked.Read(ref _utcTicks), DateTimeKind.Utc), TimeSpan.Zero);
 
@@ -195,6 +202,12 @@ public class PipelineSentinelTests
         public string AdminLogsUrl { get; init; } = "http://localhost:30080/admin/logs/ingestion";
     }
 
+    private sealed class TestMacroFreshness : IMacroFreshnessSettings
+    {
+        public int StaleAfterDays { get; init; } = 40;
+        public int AlertRepeatDays { get; init; } = 7;
+    }
+
     // ---- helpers -----------------------------------------------------------------------------------
 
     private static PipelineHealth_GetDto Snapshot(string state) => new()
@@ -216,9 +229,10 @@ public class PipelineSentinelTests
         IPipelineHealthProbe probe,
         ISentinelMailer mailer,
         VirtualTimeProvider clock,
-        ISentinelSettings? settings = null) =>
-        new(probe, mailer, settings ?? new TestSentinelSettings(), Schedule, clock,
-            NullLogger<PipelineSentinel>.Instance);
+        ISentinelSettings? settings = null,
+        IMacroFreshnessSettings? macroSettings = null) =>
+        new(probe, mailer, settings ?? new TestSentinelSettings(), macroSettings ?? new TestMacroFreshness(),
+            Schedule, clock, NullLogger<PipelineSentinel>.Instance);
 
     // ---- the decision matrix ------------------------------------------------------------------------
 
@@ -600,6 +614,332 @@ public class PipelineSentinelTests
         // the hosted service spin instead of sleeping a day.
         PipelineScheduleClock.ResolveNextOccurrenceUtc(CheckUtc, tz, checkTime)
             .Should().Be(new DateTime(2026, 7, 27, 17, 0, 0, DateTimeKind.Utc));
+    }
+
+    // ---- the MONTHLY macro job -----------------------------------------------------------------------
+    //
+    // The incident: the monthly CBSL macro CronJob was OOMKilled on 2026-08-01 and nobody knew for 15
+    // days, because this sentinel and the admin banner both only ever looked at the DAILY pipeline. The
+    // macro signal rides on the same nightly snapshot and the same mailer, and shares nothing else: its
+    // own email, its own dedup window, and no ability whatsoever to change the nightly verdict.
+
+    private static PipelineHealth_GetDto StaleMacro(
+        int? ageDays = 43, string state = PipelineHealthStates.Green)
+    {
+        var snapshot = Snapshot(state);
+        snapshot.MacroStale = true;
+        snapshot.MacroDataAgeDays = ageDays;
+        snapshot.MacroLastRetrievedUtc = ageDays is null ? null : CheckUtc.AddDays(-ageDays.Value);
+        return snapshot;
+    }
+
+    private static PipelineHealth_GetDto FreshMacro(string state = PipelineHealthStates.Green)
+    {
+        var snapshot = Snapshot(state);
+        snapshot.MacroStale = false;
+        snapshot.MacroDataAgeDays = 3;
+        snapshot.MacroLastRetrievedUtc = CheckUtc.AddDays(-3);
+        return snapshot;
+    }
+
+    [Fact]
+    public async Task Stale_macro_data_sends_its_own_alert_naming_the_age_and_the_job()
+    {
+        var mailer = new FakeMailer();
+        var sentinel = Build(new FakeProbe(), mailer, new VirtualTimeProvider(CheckUtc));
+
+        // 43 days: the live reading on 2026-08-16, fifteen days after the OOMKill nobody saw.
+        var outcome = await sentinel.RunMacroStalenessCheckAsync(StaleMacro(43), CancellationToken.None);
+
+        outcome.Should().Be(MacroAlertOutcome.AlertSent);
+        var email = mailer.Sent.Should().ContainSingle().Which;
+
+        // A DIFFERENT subject prefix from the nightly mail: on a lock screen the reader must be able to
+        // tell a monthly macro problem from last night's pipeline without opening anything.
+        email.Subject.Should().Be("AgriForecast macro data: no refresh in 43 days");
+        email.Subject.Should().NotContain(Night, "this says nothing about any particular night");
+        email.Body.Should().Contain("43 days old").And.Contain("40-day threshold");
+        // Names the job and where to look, or the reader has an alarm and no next step.
+        email.Body.Should().Contain("monthly-cbsl-macro");
+        // Says out loud why nothing else went red — that silence is the whole failure mode.
+        email.Body.Should().Contain("NaN");
+    }
+
+    [Fact]
+    public async Task Fresh_macro_data_sends_nothing_at_all()
+    {
+        var mailer = new FakeMailer();
+        var sentinel = Build(new FakeProbe(), mailer, new VirtualTimeProvider(CheckUtc));
+
+        var outcome = await sentinel.RunMacroStalenessCheckAsync(FreshMacro(), CancellationToken.None);
+
+        outcome.Should().Be(MacroAlertOutcome.Fresh);
+        mailer.Sent.Should().BeEmpty();
+    }
+
+    // An empty macro table is a WORSE finding than an old one, so it gets its own subject and lead rather
+    // than a "0 days" that would be a flat lie.
+    [Fact]
+    public async Task An_empty_macro_table_says_so_rather_than_claiming_zero_days()
+    {
+        var mailer = new FakeMailer();
+        var sentinel = Build(new FakeProbe(), mailer, new VirtualTimeProvider(CheckUtc));
+
+        var outcome = await sentinel.RunMacroStalenessCheckAsync(
+            StaleMacro(ageDays: null), CancellationToken.None);
+
+        outcome.Should().Be(MacroAlertOutcome.AlertSent);
+        var email = mailer.Sent.Should().ContainSingle().Which;
+        email.Subject.Should().Be("AgriForecast macro data: no macro data at all");
+        email.Body.Should().Contain("not stale, absent");
+        email.Body.Should().NotContain("0 days old");
+    }
+
+    // ---- dedup: one alert per episode, then a paced repeat -------------------------------------------
+
+    // Without this the sentinel would mail every single night for as long as the macro job stayed broken —
+    // 15 nights for the incident that prompted it — which is how an operator learns to filter the alert
+    // into a folder and stops reading it.
+    [Fact]
+    public async Task The_macro_alert_does_not_repeat_every_night_during_one_stale_episode()
+    {
+        var clock = new VirtualTimeProvider(CheckUtc);
+        var mailer = new FakeMailer();
+        var sentinel = Build(new FakeProbe(), mailer, clock);
+
+        var first = await sentinel.RunMacroStalenessCheckAsync(StaleMacro(41), CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromDays(1));
+        var second = await sentinel.RunMacroStalenessCheckAsync(StaleMacro(42), CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromDays(1));
+        var third = await sentinel.RunMacroStalenessCheckAsync(StaleMacro(43), CancellationToken.None);
+
+        first.Should().Be(MacroAlertOutcome.AlertSent);
+        second.Should().Be(MacroAlertOutcome.AlertSuppressed);
+        third.Should().Be(MacroAlertOutcome.AlertSuppressed);
+        mailer.Sent.Should().ContainSingle("one episode, one email — until the repeat window elapses");
+    }
+
+    // The repeat window's edge, pinned to the tick: suppression is a STRICT "less than the window", so a
+    // check exactly seven days after the last alert sends. An off-by-one the other way would silently
+    // stretch every repeat to eight days.
+    [Theory]
+    [InlineData(-1, MacroAlertOutcome.AlertSuppressed)] // one tick shy of seven days
+    [InlineData(0, MacroAlertOutcome.AlertSent)]        // exactly seven days
+    [InlineData(1, MacroAlertOutcome.AlertSent)]
+    public async Task The_repeat_window_turns_over_at_exactly_seven_days(
+        long tickOffset, MacroAlertOutcome expected)
+    {
+        var clock = new VirtualTimeProvider(CheckUtc);
+        var mailer = new FakeMailer();
+        var sentinel = Build(new FakeProbe(), mailer, clock);
+
+        await sentinel.RunMacroStalenessCheckAsync(StaleMacro(41), CancellationToken.None);
+        clock.Advance(TimeSpan.FromDays(7) + TimeSpan.FromTicks(tickOffset));
+
+        var outcome = await sentinel.RunMacroStalenessCheckAsync(StaleMacro(48), CancellationToken.None);
+
+        outcome.Should().Be(expected);
+        mailer.Sent.Should().HaveCount(expected == MacroAlertOutcome.AlertSent ? 2 : 1);
+    }
+
+    [Fact]
+    public async Task The_repeat_window_comes_from_configuration()
+    {
+        var clock = new VirtualTimeProvider(CheckUtc);
+        var mailer = new FakeMailer();
+        var sentinel = Build(new FakeProbe(), mailer, clock,
+            macroSettings: new TestMacroFreshness { AlertRepeatDays = 2 });
+
+        await sentinel.RunMacroStalenessCheckAsync(StaleMacro(41), CancellationToken.None);
+        clock.Advance(TimeSpan.FromDays(2));
+        var outcome = await sentinel.RunMacroStalenessCheckAsync(StaleMacro(43), CancellationToken.None);
+
+        outcome.Should().Be(MacroAlertOutcome.AlertSent);
+        mailer.Sent.Should().HaveCount(2);
+        // The mail states its own cadence, or a reader cannot tell a paced repeat from a random one.
+        mailer.Sent[0].Body.Should().Contain("repeats every 2 day(s)");
+    }
+
+    // A recovery closes the episode, so the NEXT outage is announced on the night it is seen instead of
+    // inheriting the previous episode's silence.
+    [Fact]
+    public async Task A_new_stale_episode_alerts_at_once_after_the_data_recovered()
+    {
+        var clock = new VirtualTimeProvider(CheckUtc);
+        var mailer = new FakeMailer();
+        var sentinel = Build(new FakeProbe(), mailer, clock);
+
+        await sentinel.RunMacroStalenessCheckAsync(StaleMacro(41), CancellationToken.None);
+
+        // The macro job is fixed and runs: the episode is over.
+        clock.Advance(TimeSpan.FromDays(1));
+        (await sentinel.RunMacroStalenessCheckAsync(FreshMacro(), CancellationToken.None))
+            .Should().Be(MacroAlertOutcome.Fresh);
+
+        // It breaks again the very next night — well inside the seven-day repeat window.
+        clock.Advance(TimeSpan.FromDays(1));
+        var outcome = await sentinel.RunMacroStalenessCheckAsync(StaleMacro(41), CancellationToken.None);
+
+        outcome.Should().Be(MacroAlertOutcome.AlertSent,
+            "the repeat window paces ONE episode; it must not mute the next one");
+        mailer.Sent.Should().HaveCount(2);
+    }
+
+    // A send that never left the building must not start a seven-day silence.
+    [Fact]
+    public async Task A_macro_alert_that_failed_to_send_is_retried_the_next_night()
+    {
+        var clock = new VirtualTimeProvider(CheckUtc);
+        var attempts = 0;
+        // Throws on the FIRST attempt only: a dead mailbox tonight, a working one tomorrow.
+        var mailer = new FakeMailer
+        {
+            OnSend = () =>
+            {
+                if (++attempts == 1) throw new InvalidOperationException("smtp is down");
+            }
+        };
+        var sentinel = Build(new FakeProbe(), mailer, clock);
+
+        var failed = await sentinel.RunMacroStalenessCheckAsync(StaleMacro(41), CancellationToken.None);
+
+        // The next night — one day later, deep inside what would have been the repeat window.
+        clock.Advance(TimeSpan.FromDays(1));
+        var retried = await sentinel.RunMacroStalenessCheckAsync(StaleMacro(42), CancellationToken.None);
+
+        failed.Should().Be(MacroAlertOutcome.SendFailed);
+        retried.Should().Be(MacroAlertOutcome.AlertSent,
+            "a failed send never set the marker, so the alert is retried rather than deduped away");
+        mailer.Sent.Should().ContainSingle().Which.Subject
+            .Should().Be("AgriForecast macro data: no refresh in 42 days");
+    }
+
+    // Unlike a night that is still "running", staleness is a fact about a 40-day window — there is nothing
+    // to wait for, and a macro check that slept would delay the nightly verdict behind it.
+    [Fact]
+    public async Task The_macro_check_never_waits_or_re_reads()
+    {
+        var clock = new VirtualTimeProvider(CheckUtc);
+        var probe = new FakeProbe();
+        var sentinel = Build(probe, new FakeMailer(), clock);
+
+        await sentinel.RunMacroStalenessCheckAsync(StaleMacro(43), CancellationToken.None);
+
+        clock.Waits.Should().BeEmpty();
+        probe.Calls.Should().Be(0, "it judges the snapshot the nightly check already read");
+    }
+
+    // ---- the two signals do not touch each other -----------------------------------------------------
+    //
+    // The recorded trap this guards (lastRunStatus-hijack): a new signal quietly redefining an existing
+    // one. The nightly verdict and its email must be exactly what they were before macro staleness
+    // existed, whatever the macro fields say.
+
+    [Fact]
+    public async Task A_green_night_with_stale_macro_data_sends_BOTH_emails_and_still_reads_green()
+    {
+        var mailer = new FakeMailer();
+        var sentinel = Build(
+            new FakeProbe(StaleMacro(43, PipelineHealthStates.Green)), mailer,
+            new VirtualTimeProvider(CheckUtc));
+
+        var outcome = await sentinel.RunNightlyCheckAsync(CancellationToken.None);
+
+        outcome.Should().Be(SentinelOutcome.HeartbeatSent,
+            "a monthly job that died a fortnight ago does not make last night non-green");
+        mailer.Sent.Should().HaveCount(2);
+        mailer.Sent.Select(e => e.Subject).Should().BeEquivalentTo(
+            "AgriForecast macro data: no refresh in 43 days",
+            $"AgriForecast pipeline: green for {Night}");
+
+        // The nightly mail is untouched: it says nothing about macro data, exactly as before.
+        var nightly = mailer.Sent.Single(e => e.Subject.StartsWith("AgriForecast pipeline"));
+        nightly.Body.Should().NotContain("macro").And.NotContain("CBSL");
+    }
+
+    // The macro alert is sent BEFORE the nightly path can return early. With the heartbeat off a green
+    // night sends nothing at all, and a macro warning appended to that mail would vanish precisely when
+    // the pipeline is otherwise fine.
+    [Fact]
+    public async Task The_heartbeat_switch_never_silences_the_macro_alert()
+    {
+        var mailer = new FakeMailer();
+        var sentinel = Build(
+            new FakeProbe(StaleMacro(43, PipelineHealthStates.Green)), mailer,
+            new VirtualTimeProvider(CheckUtc),
+            new TestSentinelSettings { SendGreenHeartbeat = false });
+
+        var outcome = await sentinel.RunNightlyCheckAsync(CancellationToken.None);
+
+        outcome.Should().Be(SentinelOutcome.HeartbeatSuppressed);
+        mailer.Sent.Should().ContainSingle()
+            .Which.Subject.Should().Be("AgriForecast macro data: no refresh in 43 days");
+    }
+
+    // And the reverse: fresh macro data must not soften a night that genuinely failed.
+    [Fact]
+    public async Task Fresh_macro_data_does_not_soften_a_failed_night()
+    {
+        var mailer = new FakeMailer();
+        var sentinel = Build(
+            new FakeProbe(FreshMacro(PipelineHealthStates.Failed)), mailer,
+            new VirtualTimeProvider(CheckUtc));
+
+        var outcome = await sentinel.RunNightlyCheckAsync(CancellationToken.None);
+
+        outcome.Should().Be(SentinelOutcome.AlertSent);
+        mailer.Sent.Should().ContainSingle()
+            .Which.Subject.Should().Be($"AgriForecast pipeline: failed for {Night}");
+    }
+
+    [Fact]
+    public async Task No_macro_alert_when_smtp_is_not_configured()
+    {
+        var mailer = new FakeMailer { IsConfigured = false };
+        var probe = new FakeProbe(StaleMacro(43));
+        var sentinel = Build(probe, mailer, new VirtualTimeProvider(CheckUtc));
+
+        var outcome = await sentinel.RunNightlyCheckAsync(CancellationToken.None);
+
+        outcome.Should().Be(SentinelOutcome.Disabled);
+        probe.Calls.Should().Be(0);
+        mailer.Sent.Should().BeEmpty();
+    }
+
+    // Fail-open, same as the nightly verdict: an unreadable database means the sentinel says nothing,
+    // rather than inventing a staleness it never observed.
+    [Fact]
+    public async Task No_macro_alert_when_health_cannot_be_read()
+    {
+        var mailer = new FakeMailer();
+        var sentinel = Build(
+            new FakeProbe { Throws = true }, mailer, new VirtualTimeProvider(CheckUtc));
+
+        var outcome = await sentinel.RunNightlyCheckAsync(CancellationToken.None);
+
+        outcome.Should().Be(SentinelOutcome.ProbeFailed);
+        mailer.Sent.Should().BeEmpty();
+    }
+
+    // An unsettled night is re-read for hours; the macro verdict is taken from the FINAL snapshot, so it
+    // can never be decided on a reading the sentinel later replaced.
+    [Fact]
+    public async Task The_macro_verdict_is_taken_from_the_final_snapshot_of_an_unsettled_night()
+    {
+        var clock = new VirtualTimeProvider(CheckUtc);
+        var mailer = new FakeMailer();
+        var probe = new FakeProbe(
+            FreshMacro(PipelineHealthStates.Running),
+            StaleMacro(43, PipelineHealthStates.Failed));
+
+        var outcome = await Build(probe, mailer, clock).RunNightlyCheckAsync(CancellationToken.None);
+
+        outcome.Should().Be(SentinelOutcome.AlertSent);
+        mailer.Sent.Select(e => e.Subject).Should().BeEquivalentTo(
+            "AgriForecast macro data: no refresh in 43 days",
+            $"AgriForecast pipeline: failed for {Night}");
     }
 
     // ---- configuration -------------------------------------------------------------------------------
