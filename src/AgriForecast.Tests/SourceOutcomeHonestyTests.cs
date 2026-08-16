@@ -265,6 +265,10 @@ public class SourceOutcomeHonestyTests
 
         public Task SaveChangesAsync(CancellationToken ct = default) => Task.CompletedTask;
         public IngestionWatermark? Peek(string source) => _store.GetValueOrDefault(source);
+
+        // "Was this watermark ever touched?" — asserted as a bool so an absent row reads as a fact about
+        // the pass rather than as a null dereference waiting to happen.
+        public bool Has(string source) => _store.ContainsKey(source);
     }
 
     private static CbslMacroIngestionService MacroService(
@@ -329,21 +333,115 @@ public class SourceOutcomeHonestyTests
     [Fact]
     public async Task CbslMacro_Success_MarksTheRunRowSucceeded()
     {
+        var watermarks = new FakeWatermarkRepository();
         var svc = MacroService(
             new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(
                     """
-                    {"status":"ok","artifactsFetched":2,"artifactsSkipped":0,
+                    {"status":"ok","artifactsFetched":2,"artifactsSkipped":0,"artifactsFailed":0,
                      "rowsInserted":14,"rowsUpdated":0,"rowsSkippedInvalid":1,
                      "perSeriesCoverage":{"CCPI":7,"MEI":7}}
+                    """, Encoding.UTF8, "application/json")
+            }),
+            watermarks, enabled: true);
+
+        var row = await RowFor(CbslMacroIngestionService.SourceKey, svc.IngestAsync);
+
+        row.Status.Should().Be(IngestionRunStatus.Succeeded);
+        row.RowsInserted.Should().Be(14);
+        // The success path is UNCHANGED by the status gate: watermarks still advance, including per series.
+        watermarks.Peek(CbslMacroIngestionService.SourceKey)!.Status
+            .Should().Be(IngestionSourceStatus.Ok);
+        watermarks.Has(CbslMacroIngestionService.SeriesSourcePrefix + "CCPI").Should().BeTrue();
+    }
+
+    // A LEGITIMATELY quiet pass — the watermark dropped every artifact because there is no new bulletin —
+    // still says "ok" and must still be green. The other half of the honesty pair: a source that cries wolf
+    // on a routine month trains the admin to ignore red just as surely as a false green does.
+    [Fact]
+    public async Task CbslMacro_NothingNewSinceTheWatermark_StaysSucceeded()
+    {
+        var svc = MacroService(
+            new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """
+                    {"status":"ok","artifactsFetched":0,"artifactsSkipped":0,"artifactsFailed":0,
+                     "artifactsWatermarkSkipped":37,"rowsInserted":0,"rowsUpdated":0,
+                     "rowsSkippedInvalid":0,"perSeriesCoverage":{}}
                     """, Encoding.UTF8, "application/json")
             }),
             new FakeWatermarkRepository(), enabled: true);
 
         var row = await RowFor(CbslMacroIngestionService.SourceKey, svc.IngestAsync);
 
-        row.Status.Should().Be(IngestionRunStatus.Succeeded);
-        row.RowsInserted.Should().Be(14);
+        row.Status.Should().Be(IngestionRunStatus.Succeeded,
+            "no new bulletin since the watermark is the NORMAL monthly outcome, not a failure");
+        row.ErrorSummary.Should().BeNull();
+    }
+
+    // THE REGRESSION THIS CLOSES. The Python route now reports per-artifact DB-write losses honestly in the
+    // body and still answers HTTP 200 (report-only, like /admin/ingest-harti). On main the same underlying
+    // failure threw, 502'd, and correctly wrote a RED row — so a .NET caller that reads only the HTTP code
+    // would have turned the Python side's new honesty into a GREEN row for a pass that lost data. Parsed
+    // artifacts whose rows never landed are missing data, and the run row has to say so.
+    [Fact]
+    public async Task CbslMacro_PartialStatusOn200_MarksTheRunRowFailed()
+    {
+        var watermarks = new FakeWatermarkRepository();
+        var svc = MacroService(
+            new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """
+                    {"status":"partial","artifactsFetched":3,"artifactsSkipped":0,"artifactsFailed":2,
+                     "rowsInserted":7,"rowsUpdated":0,"rowsSkippedInvalid":0,
+                     "perSeriesCoverage":{"CCPI":7}}
+                    """, Encoding.UTF8, "application/json")
+            }),
+            watermarks, enabled: true);
+
+        var row = await RowFor(CbslMacroIngestionService.SourceKey, svc.IngestAsync);
+
+        row.Status.Should().Be(IngestionRunStatus.Failed,
+            "a 200 carrying status 'partial' is a pass that LOST rows it had already parsed");
+        // The row must name the damage, or an admin sees red with nothing to act on.
+        row.ErrorSummary.Should().Contain("partial").And.Contain("2 artifact(s)");
+
+        watermarks.Peek(CbslMacroIngestionService.SourceKey)!.Status
+            .Should().Be(IngestionSourceStatus.Failed, "watermark and run row must agree");
+        // Nothing about a pass that did not fully land is a new high-water mark — not even for the series
+        // that DID succeed, which would otherwise look freshly covered on the ingestion card.
+        watermarks.Has(CbslMacroIngestionService.SeriesSourcePrefix + "CCPI")
+            .Should().BeFalse("no watermark may advance on a partial pass");
+    }
+
+    // Anything that is not exactly "ok" is unrecognised, and unrecognised is failure. A missing field is
+    // NOT an old ML image being tolerant of: every version of run() that can produce a 200 sets status on
+    // every return path, so an absent one means the body is not this contract at all. A JSON null body
+    // deserializes to a null result and lands here too — before this gate it became a silent zero-row green.
+    [Theory]
+    [InlineData("""{"artifactsFetched":1,"rowsInserted":3,"perSeriesCoverage":{"CCPI":3}}""", "(missing)")]
+    [InlineData("""{"status":null,"artifactsFetched":1,"rowsInserted":3}""", "(missing)")]
+    [InlineData("""{"status":"OK","artifactsFetched":1,"rowsInserted":3}""", "OK")]
+    [InlineData("""{"status":"failed","artifactsFetched":1,"rowsInserted":3}""", "failed")]
+    [InlineData("null", "(missing)")]
+    public async Task CbslMacro_AnyStatusOtherThanOk_MarksTheRunRowFailed(string body, string expectedInReason)
+    {
+        var watermarks = new FakeWatermarkRepository();
+        var svc = MacroService(
+            new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            }),
+            watermarks, enabled: true);
+
+        var row = await RowFor(CbslMacroIngestionService.SourceKey, svc.IngestAsync);
+
+        row.Status.Should().Be(IngestionRunStatus.Failed);
+        row.ErrorSummary.Should().Contain(expectedInReason);
+        watermarks.Peek(CbslMacroIngestionService.SourceKey)!.Status
+            .Should().Be(IngestionSourceStatus.Failed);
     }
 }

@@ -11,6 +11,20 @@
 # suspend: false — `kubectl apply` overwrites any live patch, so a manifest
 # still saying true silently re-suspends the schedule on the next apply.
 #
+# INCIDENT + FIX (2026-08-16): the FIRST-EVER run (2026-08-01) OOMKilled at
+# the old 768Mi limit after ~24 minutes, because ingest_cbsl_macro.py had NO
+# real watermark despite its old docstring's claim — every run re-scraped,
+# re-downloaded and re-parsed the ENTIRE CCPI+MEI corpus (~65 artifacts,
+# 2020-04→present and growing every month), a cost that only ever goes up.
+# Fixed in ingest_cbsl_macro.py: a DB-driven watermark (loader.get_watermarks())
+# now skips already-covered artifacts BEFORE download/parse (1-month safety
+# overlap; the upsert is idempotent so re-parsing the overlap is harmless),
+# and each artifact is parsed+upserted immediately rather than accumulated
+# into one big list first, so peak memory no longer grows with total corpus
+# size. Resources raised below to safely absorb the one-off catch-up run
+# (DB was left ~2 months stale by the outage) and any future --full backfill,
+# with real headroom rather than a tight fit.
+#
 # RESOURCES + SECURITY CONTEXT: same reasoning/tiers as pipeline-daily.yaml's
 # python steps (see its header) -- a bit more headroom here because
 # ingest_cbsl_macro.py parses PDFs (pdfplumber), which is more memory-hungry
@@ -61,8 +75,8 @@ spec:
                 - name: AGRI_DB_HOST
                   value: host.docker.internal # host-level sql_server_container
               resources:
-                requests: { memory: "256Mi", cpu: "100m" }
-                limits: { memory: "768Mi", cpu: "500m" }
+                requests: { memory: "512Mi", cpu: "100m" }
+                limits: { memory: "1.5Gi", cpu: "500m" }
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }

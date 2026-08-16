@@ -346,12 +346,21 @@ def ingest_cbsl_endpoint(req: IngestCbslRequest):
 class IngestCbslMacroRequest(BaseModel):
     """Orchestration knobs for the monthly CBSL macro pass.
 
-    noDownload and dryRun are for offline reruns and tests. There is no sinceDate knob:
-    both CBSL listings are small corpora, so a full re-scrape with an idempotent upsert
-    every pass is cheaper than watermark plumbing.
+    noDownload and dryRun are for offline reruns and tests. `full` forces a
+    full re-scan of the entire CCPI+MEI corpus, ignoring the DB watermark —
+    for backfills/repairs only, default OFF.
+
+    CORRECTED 2026-08 (see ingest_cbsl_macro.py's WRITE-BACK): the earlier
+    "no sinceDate knob, a full re-scrape every pass is cheaper than watermark
+    plumbing" reasoning here was WRONG in practice — a full re-scrape/re-parse
+    every pass OOMKilled the k8s CronJob on its very first run and would only
+    get worse as the corpus grows monthly forever. The pass is now
+    watermark-driven by default (loader.get_watermarks() inside run()); `full`
+    is the explicit escape hatch for when a genuine full re-scan is wanted.
     """
     noDownload: bool = False
     dryRun: bool = False
+    full: bool = False
 
 
 @admin_router.post("/ingest-cbsl-macro")
@@ -362,6 +371,23 @@ def ingest_cbsl_macro_endpoint(req: IngestCbslMacroRequest):
     returning a structured summary of artifacts, rows and per-series coverage. 'No new
     bulletin since the watermark' is a success with zero rows, never an error. The heavy
     module is imported lazily.
+
+    HTTP status stays 200 even when the summary body's own `status` field is
+    "partial" (one or more artifacts lost a DB write this pass, per-artifact
+    isolated — see ingest_cbsl_macro.py's WRITE-BACK) -- this endpoint's own
+    contract is "the pass ran and here is an honest report", the same as
+    /admin/ingest-harti's gaps/outliers report-only fields; only a whole-pass
+    exception (this route's own except below) is a 502, and only an import
+    failure is a 503.
+
+    THE HTTP CODE IS NOT THE WHOLE ANSWER, and there is now a caller that
+    depends on that: .NET's CbslMacroIngestionService gates on this body's
+    `status` and writes a FAILED IngestionRuns row for anything that is not
+    exactly "ok" (missing/null included). So `status` is a load-bearing part
+    of this response, not a decorative field -- never drop it, never rename
+    it, and never widen its vocabulary beyond "ok"|"partial" without changing
+    that caller in the same PR. Any other future caller wiring this into an
+    automated gate must check `status` too, not just the HTTP code.
     """
     try:
         import ingest_cbsl_macro
@@ -376,6 +402,7 @@ def ingest_cbsl_macro_endpoint(req: IngestCbslMacroRequest):
         return ingest_cbsl_macro.run(
             no_download=req.noDownload,
             dry_run=req.dryRun,
+            full=req.full,
         )
     except Exception:
         _log.exception("CBSL macro ingestion failed")

@@ -24,15 +24,25 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Sequence
 
 import sqlalchemy as sa
 
 from ..db import get_engine
-from .parser import ParsedMacroPoint
+from .parser import (
+    ParsedMacroPoint,
+    SERIES_CCPI_FOOD_YOY,
+    SERIES_CCPI_HEADLINE_YOY,
+    SERIES_CCPI_INDEX,
+    SERIES_FOOD_IMPORTS_YOY,
+    SERIES_POLICY_RATE,
+)
 
 logger = logging.getLogger(__name__)
+
+_CCPI_SERIES_CODES = (SERIES_CCPI_INDEX, SERIES_CCPI_FOOD_YOY, SERIES_CCPI_HEADLINE_YOY)
 
 # PDF /CreationDate format: "D:YYYYMMDDHHmmSS+HH'mm'" (harti/loader.py precedent).
 _PDF_DATE_RE = re.compile(
@@ -140,6 +150,148 @@ def resolve_published_at(point: ParsedMacroPoint, *, listing_date: "date | None"
     if point.source == "CBSL_MEI":
         return _resolve_mei_published_at(point.reference_date, point.pdf_creation_date_raw, listing_date)
     raise ValueError(f"Unknown CBSL macro source: {point.source!r}")
+
+
+def _coerce_date(value) -> "date | None":
+    """Normalise a raw DB scalar (driver-dependent: date / datetime / str) into
+    a plain `date`. Duplicated from `ingest_verify.py`'s `_coerce_date` rather
+    than imported, same independently-deletable-subpackage rule the rest of
+    this module follows."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return date.fromisoformat(value[:10])
+    if hasattr(value, "date") and not isinstance(value, date):
+        return value.date()
+    return value
+
+
+@dataclass
+class MacroWatermarks:
+    """DB-driven coverage snapshot used to skip already-ingested artifacts
+    BEFORE they are downloaded/parsed (ingest_cbsl_macro.run()'s incremental
+    mode). Both fields are None for an empty DB (or when the caller wants a
+    full re-scan), which downstream filtering treats as "keep everything".
+
+    ccpi_published_at: MAX(PublishedAt) across the 3 CCPI series. CCPI
+      filenames carry press_YYYYMMDD_..., which -- absent a same-day
+      /CreationDate disagreement (loader._resolve_ccpi_published_at) -- IS
+      PublishedAt, so this is directly comparable to a CcpiLink.pub_date.
+
+    mei_pack_yyyymm: the latest MEI pack month we already have data for,
+      inferred from ReferenceDate rather than PublishedAt (PublishedAt for
+      MEI is usually IMPUTED with a lag prior and is NOT recoverable back to
+      a pack month). Two series are combined because either one being
+      present proves that pack was already ingested:
+        - POLICY_RATE_OPR.ReferenceDate IS the pack month directly (an
+          end-of-month snapshot for the pack's own month) -- an exact,
+          non-approximate inverse.
+        - FOOD_IMPORTS_YOY.ReferenceDate is the pack month MINUS one month
+          (parser._mei_reference_month steps back one month for the trade
+          table's internal lag), so + 1 month recovers the pack month.
+      The MAX of the two (as YYYYMM strings, lexicographically comparable)
+      is used, since a pack missing one series (e.g. an OPR parse failure)
+      must not understate the watermark and re-trigger unnecessary work.
+    """
+    ccpi_published_at: "date | None"
+    mei_pack_yyyymm: "str | None"
+
+
+def _yyyymm_plus_one_month(d: date) -> str:
+    y, m = d.year, d.month + 1
+    if m == 13:
+        y, m = y + 1, 1
+    return f"{y:04d}{m:02d}"
+
+
+def get_watermarks(
+    *, engine: sa.engine.Engine | None = None, now: "date | None" = None
+) -> MacroWatermarks:
+    """Read the current MacroSeriesPoints coverage. Read-only, no writes.
+
+    Returns MacroWatermarks(None, None) for an empty DB (both source's queries
+    return NULL/no rows) -- the natural "keep everything" state for a true
+    backfill, with no special-casing needed by the caller.
+
+    Both fields are CLAMPED to `now` (defaults to `date.today()`, injectable
+    for tests -- same pattern as data_quality.py). Without this, one bad row
+    can poison the watermark into the FUTURE and permanently, silently stop
+    ingestion of everything after it:
+      - parser._mei_reference_month()'s last-resort fallback can emit a
+        ReferenceDate AFTER the pack month it came from (confirmed:
+        _mei_reference_month("202601", "March") -> 2026-03, i.e. AHEAD of the
+        202601 pack) -- OPR's pack-month-direct inverse would then push
+        mei_pack_yyyymm past the pack that produced it, and every
+        watermark-filtered future pass would drop that pack's true successor
+        forever, with no error anywhere.
+      - a garbage /CreationDate on a single CCPI PDF (a wrong year, say) can
+        push MAX(PublishedAt) years into the future and silently halt ALL
+        CCPI ingestion from that point on.
+    Clamping means the WORST case is "one month/day of unnecessary re-parse"
+    (harmless, idempotent), never "silent permanent gap".
+    """
+    today = now if now is not None else date.today()
+
+    if engine is None:
+        engine = get_engine()
+
+    with engine.connect() as conn:
+        placeholders = ", ".join(f":c{i}" for i in range(len(_CCPI_SERIES_CODES)))
+        ccpi_params = {f"c{i}": code for i, code in enumerate(_CCPI_SERIES_CODES)}
+        ccpi_pub_raw = conn.execute(
+            sa.text(
+                f"SELECT MAX(PublishedAt) FROM MacroSeriesPoints WHERE SeriesCode IN ({placeholders})"
+            ),
+            ccpi_params,
+        ).scalar()
+
+        opr_ref_raw = conn.execute(
+            sa.text("SELECT MAX(ReferenceDate) FROM MacroSeriesPoints WHERE SeriesCode = :s"),
+            {"s": SERIES_POLICY_RATE},
+        ).scalar()
+
+        food_ref_raw = conn.execute(
+            sa.text("SELECT MAX(ReferenceDate) FROM MacroSeriesPoints WHERE SeriesCode = :s"),
+            {"s": SERIES_FOOD_IMPORTS_YOY},
+        ).scalar()
+
+    ccpi_published_at = _coerce_date(ccpi_pub_raw)
+    if ccpi_published_at is not None and ccpi_published_at > today:
+        logger.warning(
+            "CCPI watermark %s is in the FUTURE relative to today (%s) -- "
+            "clamping to today. Likely a garbage /CreationDate on one PDF; "
+            "unclamped this would silently stop ALL future CCPI ingestion.",
+            ccpi_published_at, today,
+        )
+        ccpi_published_at = today
+
+    pack_candidates: list[str] = []
+    opr_ref = _coerce_date(opr_ref_raw)
+    if opr_ref is not None:
+        pack_candidates.append(f"{opr_ref.year:04d}{opr_ref.month:02d}")
+    food_ref = _coerce_date(food_ref_raw)
+    if food_ref is not None:
+        pack_candidates.append(_yyyymm_plus_one_month(food_ref))
+    mei_pack_yyyymm = max(pack_candidates) if pack_candidates else None
+
+    current_month_yyyymm = f"{today.year:04d}{today.month:02d}"
+    if mei_pack_yyyymm is not None and mei_pack_yyyymm > current_month_yyyymm:
+        logger.warning(
+            "MEI watermark pack %s is in the FUTURE relative to the current "
+            "month (%s) -- clamping. Likely a malformed trade-table row "
+            "month resolving past its own pack (see "
+            "parser._mei_reference_month's last-resort fallback); unclamped "
+            "this would silently drop that pack's true successor forever.",
+            mei_pack_yyyymm, current_month_yyyymm,
+        )
+        mei_pack_yyyymm = current_month_yyyymm
+
+    logger.info(
+        "MacroSeriesPoints watermarks: CCPI PublishedAt=%s, MEI pack=%s "
+        "(from OPR ReferenceDate=%s, FOOD_IMPORTS ReferenceDate=%s)",
+        ccpi_published_at, mei_pack_yyyymm, opr_ref, food_ref,
+    )
+    return MacroWatermarks(ccpi_published_at=ccpi_published_at, mei_pack_yyyymm=mei_pack_yyyymm)
 
 
 def upsert_macro_points(
