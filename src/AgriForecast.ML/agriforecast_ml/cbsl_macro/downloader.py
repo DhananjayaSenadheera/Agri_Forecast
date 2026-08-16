@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urljoin
 
 import requests
@@ -56,6 +57,15 @@ _DOWNLOAD_TIMEOUT = 60           # seconds, per-request
 _MAX_PDF_BYTES = 25 * 1024 * 1024  # 25 MB -- same cap as HARTI (F-10 precedent)
 _STREAM_CHUNK_BYTES = 64 * 1024
 _MAX_LISTING_PAGES = 20          # hard stop on MEI pagination crawl (safety net)
+
+# Watermark safety overlap (ingest_cbsl_macro.py incremental mode, 2026-08
+# OOM/staleness fix). >=1 calendar month per spec: re-parsing an artifact
+# already ingested is harmless -- the loader upsert is idempotent on the full
+# (SeriesCode, ReferenceDate, PublishedAt) vintage triple -- so the overlap
+# only ever costs a little extra parse time, never correctness. Kept at
+# module scope (not hardcoded inline) so a test can pin it without
+# duplicating the literal.
+_WATERMARK_OVERLAP_MONTHS = 1
 
 
 class PdfTooLargeError(Exception):
@@ -302,6 +312,83 @@ def _dedup_by_key(links: list, key_fn) -> tuple[list, int]:
         seen.add(key)
         kept.append(link)
     return kept, n_dropped
+
+
+def _month_shift_date(d: date, delta_months: int) -> date:
+    """Shift `d` by `delta_months` whole calendar months, returned as the 1st
+    of the resulting month (day-of-month is deliberately dropped -- callers
+    only ever compare this against other 1st-of-month or filename-derived
+    dates at month granularity)."""
+    total = d.year * 12 + (d.month - 1) + delta_months
+    y, m = divmod(total, 12)
+    return date(y, m + 1, 1)
+
+
+def _shift_yyyymm(yyyymm: str, delta_months: int) -> str:
+    """Same contract as `_month_shift_date` but for a 'YYYYMM' string key."""
+    y = int(yyyymm[:4])
+    m = int(yyyymm[4:6])
+    total = y * 12 + (m - 1) + delta_months
+    ny, nm = divmod(total, 12)
+    return f"{ny:04d}{nm + 1:02d}"
+
+
+def filter_ccpi_since(
+    items: list,
+    key_fn: "Callable[[object], date]",
+    watermark_pub_date: "date | None",
+    *,
+    overlap_months: int = _WATERMARK_OVERLAP_MONTHS,
+) -> "tuple[list, int]":
+    """Drop CCPI items whose `key_fn(item)` (a filename pub_date) is more than
+    `overlap_months` before `watermark_pub_date`, keeping everything else.
+
+    Deliberately generic over `items`/`key_fn` so the SAME logic runs at both
+    the scrape/download stage (CcpiLink objects, key_fn=lambda l: l.pub_date)
+    and the --no-download cache-glob stage ((date, Path) tuples,
+    key_fn=lambda t: t[0]) -- an ephemeral k8s cache dir must never force a
+    full re-download just because nothing is cached locally; the DB
+    watermark alone decides what is worth fetching in the first place.
+
+    watermark_pub_date=None (empty DB, or the caller passed --full) keeps
+    every item unfiltered -- a true backfill needs the whole corpus.
+    """
+    if watermark_pub_date is None:
+        return list(items), 0
+    threshold = _month_shift_date(watermark_pub_date, -overlap_months)
+    kept = [it for it in items if key_fn(it) >= threshold]
+    n_skipped = len(items) - len(kept)
+    if n_skipped:
+        logger.info(
+            "CCPI watermark skip: %d artifact(s) before %s dropped pre-parse "
+            "(watermark=%s, %d-month overlap)",
+            n_skipped, threshold, watermark_pub_date, overlap_months,
+        )
+    return kept, n_skipped
+
+
+def filter_mei_since(
+    items: list,
+    key_fn: "Callable[[object], str]",
+    watermark_pack_yyyymm: "str | None",
+    *,
+    overlap_months: int = _WATERMARK_OVERLAP_MONTHS,
+) -> "tuple[list, int]":
+    """Same contract as `filter_ccpi_since`, keyed on the MEI pack's 'YYYYMM'
+    string instead of a date (lexicographic YYYYMM comparison is safe --
+    always 4-digit year + 2-digit zero-padded month)."""
+    if watermark_pack_yyyymm is None:
+        return list(items), 0
+    threshold = _shift_yyyymm(watermark_pack_yyyymm, -overlap_months)
+    kept = [it for it in items if key_fn(it) >= threshold]
+    n_skipped = len(items) - len(kept)
+    if n_skipped:
+        logger.info(
+            "MEI watermark skip: %d artifact(s) before pack %s dropped pre-parse "
+            "(watermark=%s, %d-month overlap)",
+            n_skipped, threshold, watermark_pack_yyyymm, overlap_months,
+        )
+    return kept, n_skipped
 
 
 def download_ccpi_pdfs(

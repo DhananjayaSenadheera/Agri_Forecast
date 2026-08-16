@@ -36,6 +36,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures" / "cbsl"
 
 from agriforecast_ml.cbsl_macro import downloader, loader, parser  # noqa: E402
 from agriforecast_ml import netguard  # noqa: E402
+import ingest_cbsl_macro  # noqa: E402
 
 
 # 1. Parser tests against real fixture PDFs — exact expected values
@@ -657,3 +658,453 @@ class TestAdminRouteAuth:
         assert resp.status_code == 502
         detail = resp.json().get("detail", "")
         assert "some secret internal detail" not in detail
+
+
+# 9. Watermark incremental design (2026-08-16 OOM/staleness fix, ClickUp
+#    fix/cbsl-macro-incremental). See ingest_cbsl_macro.py's module docstring
+#    for the full incident writeup.
+
+def _mock_engine(connect_payloads: list) -> "tuple[MagicMock, MagicMock]":
+    """Mirrors test_ingest_verify.py::_mock_engine / test_dec_mirror.py's
+    original. `connect_payloads` is a list of dicts, one per successive
+    `engine.connect()...execute()` call (in call order), shaped
+    {"scalar": v}."""
+    engine = MagicMock()
+    conn = MagicMock()
+    state = {"n": 0}
+
+    def _connect_execute(stmt, params=None):
+        idx = state["n"]
+        state["n"] += 1
+        res = MagicMock()
+        payload = connect_payloads[idx] if idx < len(connect_payloads) else {}
+        res.scalar.return_value = payload.get("scalar")
+        return res
+
+    conn.execute.side_effect = _connect_execute
+    engine.connect.return_value.__enter__.return_value = conn
+    return engine, conn
+
+
+class TestMonthArithmeticHelpers:
+    """Pure month-shift helpers -- exact pins, including the year-boundary
+    case (the class of bug most likely to silently miscount)."""
+
+    def test_month_shift_date_within_year(self):
+        assert downloader._month_shift_date(date(2026, 6, 30), -1) == date(2026, 5, 1)
+
+    def test_month_shift_date_crosses_year_boundary(self):
+        assert downloader._month_shift_date(date(2026, 1, 15), -1) == date(2025, 12, 1)
+
+    def test_month_shift_date_zero_delta_floors_to_first_of_month(self):
+        assert downloader._month_shift_date(date(2026, 6, 30), 0) == date(2026, 6, 1)
+
+    def test_shift_yyyymm_within_year(self):
+        assert downloader._shift_yyyymm("202605", -1) == "202604"
+
+    def test_shift_yyyymm_crosses_year_boundary(self):
+        assert downloader._shift_yyyymm("202601", -1) == "202512"
+
+    def test_shift_yyyymm_positive_delta(self):
+        assert downloader._shift_yyyymm("202512", 1) == "202601"
+
+
+class TestCcpiWatermarkFilter:
+    LINKS = [
+        downloader.CcpiLink(pub_date=date(2026, 4, 30), url="apr"),
+        downloader.CcpiLink(pub_date=date(2026, 5, 29), url="may"),
+        downloader.CcpiLink(pub_date=date(2026, 6, 30), url="jun"),
+    ]
+
+    def test_none_watermark_keeps_everything(self):
+        """Empty DB / --full: nothing is dropped."""
+        kept, n_skipped = downloader.filter_ccpi_since(self.LINKS, lambda l: l.pub_date, None)
+        assert n_skipped == 0
+        assert len(kept) == 3
+
+    def test_watermark_at_latest_keeps_one_month_overlap(self):
+        """Watermark == June: April (2 months back) is dropped, May+June
+        (within the 1-month overlap) are kept."""
+        kept, n_skipped = downloader.filter_ccpi_since(
+            self.LINKS, lambda l: l.pub_date, date(2026, 6, 30)
+        )
+        assert n_skipped == 1
+        assert [l.url for l in kept] == ["may", "jun"]
+
+    def test_overlap_boundary_is_inclusive_of_the_overlap_month(self):
+        """The artifact exactly `overlap_months` before the watermark's month
+        must be KEPT (it is the whole point of the safety overlap), not
+        dropped -- an off-by-one here would silently narrow the overlap to
+        zero."""
+        watermark = date(2026, 6, 30)
+        threshold_month_link = downloader.CcpiLink(pub_date=date(2026, 5, 1), url="boundary")
+        kept, n_skipped = downloader.filter_ccpi_since(
+            [threshold_month_link], lambda l: l.pub_date, watermark
+        )
+        assert n_skipped == 0
+        assert kept == [threshold_month_link]
+
+    def test_one_day_before_the_overlap_boundary_is_dropped(self):
+        watermark = date(2026, 6, 30)
+        just_before = downloader.CcpiLink(pub_date=date(2026, 4, 30), url="just_before")
+        kept, n_skipped = downloader.filter_ccpi_since(
+            [just_before], lambda l: l.pub_date, watermark
+        )
+        assert n_skipped == 1
+        assert kept == []
+
+    def test_reusable_against_cache_glob_tuples_not_just_link_objects(self):
+        """The same function must work against (date, Path) tuples from the
+        --no-download cache-glob branch, not only CcpiLink objects -- this is
+        the mechanism that stops an ephemeral k8s cache from forcing a full
+        re-download every run."""
+        cache_tuples = [(date(2026, 4, 30), Path("a.pdf")), (date(2026, 6, 30), Path("b.pdf"))]
+        kept, n_skipped = downloader.filter_ccpi_since(
+            cache_tuples, lambda t: t[0], date(2026, 6, 30)
+        )
+        assert n_skipped == 1
+        assert kept == [(date(2026, 6, 30), Path("b.pdf"))]
+
+
+class TestMeiWatermarkFilter:
+    LINKS = [
+        downloader.MeiLink(pack_yyyymm="202604", url="apr"),
+        downloader.MeiLink(pack_yyyymm="202605", url="may"),
+        downloader.MeiLink(pack_yyyymm="202606", url="jun"),
+    ]
+
+    def test_none_watermark_keeps_everything(self):
+        kept, n_skipped = downloader.filter_mei_since(self.LINKS, lambda l: l.pack_yyyymm, None)
+        assert n_skipped == 0
+        assert len(kept) == 3
+
+    def test_watermark_at_latest_keeps_one_month_overlap(self):
+        kept, n_skipped = downloader.filter_mei_since(
+            self.LINKS, lambda l: l.pack_yyyymm, "202606"
+        )
+        assert n_skipped == 1
+        assert [l.url for l in kept] == ["may", "jun"]
+
+    def test_year_boundary_watermark(self):
+        """Watermark pack=202601 (January): threshold must roll back into the
+        PRIOR year (202512), not wrap incorrectly."""
+        links = [
+            downloader.MeiLink(pack_yyyymm="202511", url="nov"),
+            downloader.MeiLink(pack_yyyymm="202512", url="dec"),
+            downloader.MeiLink(pack_yyyymm="202601", url="jan"),
+        ]
+        kept, n_skipped = downloader.filter_mei_since(links, lambda l: l.pack_yyyymm, "202601")
+        assert n_skipped == 1
+        assert [l.url for l in kept] == ["dec", "jan"]
+
+
+class TestGetWatermarks:
+    """Hermetic -- a mocked SQLAlchemy engine, no live DB (mirrors
+    test_ingest_verify.py's `_mock_engine` pattern)."""
+
+    def test_empty_db_returns_none_for_both(self):
+        engine, _conn = _mock_engine([{"scalar": None}, {"scalar": None}, {"scalar": None}])
+        wm = loader.get_watermarks(engine=engine)
+        assert wm.ccpi_published_at is None
+        assert wm.mei_pack_yyyymm is None
+
+    def test_full_coverage_combines_ccpi_and_mei_correctly(self):
+        # order: ccpi MAX(PublishedAt), MAX(ReferenceDate) OPR, MAX(ReferenceDate) FOOD_IMPORTS
+        engine, _conn = _mock_engine([
+            {"scalar": date(2026, 6, 30)},
+            {"scalar": date(2026, 5, 1)},   # OPR ReferenceDate == pack month directly
+            {"scalar": date(2026, 4, 1)},   # FOOD_IMPORTS ReferenceDate == pack month - 1
+        ])
+        wm = loader.get_watermarks(engine=engine)
+        assert wm.ccpi_published_at == date(2026, 6, 30)
+        assert wm.mei_pack_yyyymm == "202605", (
+            "OPR ReferenceDate maps directly to the pack month; FOOD_IMPORTS "
+            "ReferenceDate + 1 month must resolve to the SAME pack (202605), "
+            "matching the real live-DB numbers verified pre-fix"
+        )
+
+    def test_opr_missing_falls_back_to_food_derived_pack(self):
+        engine, _conn = _mock_engine([
+            {"scalar": None},
+            {"scalar": None},               # OPR absent (e.g. section parse miss)
+            {"scalar": date(2026, 4, 1)},    # FOOD_IMPORTS present -> pack 202605
+        ])
+        wm = loader.get_watermarks(engine=engine)
+        assert wm.mei_pack_yyyymm == "202605"
+
+    def test_food_missing_falls_back_to_opr_derived_pack(self):
+        engine, _conn = _mock_engine([
+            {"scalar": None},
+            {"scalar": date(2026, 5, 1)},    # OPR present -> pack 202605
+            {"scalar": None},
+        ])
+        wm = loader.get_watermarks(engine=engine)
+        assert wm.mei_pack_yyyymm == "202605"
+
+    def test_takes_the_max_of_the_two_pack_candidates_not_the_first(self):
+        """A stale OPR (e.g. many packs never had a parseable OPR section)
+        must never understate the watermark below what FOOD_IMPORTS alone
+        already proves is covered."""
+        engine, _conn = _mock_engine([
+            {"scalar": None},
+            {"scalar": date(2025, 11, 1)},   # OPR -> pack 202511 (stale)
+            {"scalar": date(2026, 4, 1)},    # FOOD_IMPORTS -> pack 202605 (fresher)
+        ])
+        wm = loader.get_watermarks(engine=engine)
+        assert wm.mei_pack_yyyymm == "202605"
+
+    def test_string_and_datetime_scalars_are_coerced_to_date(self):
+        """Some driver/dialect paths return str or datetime instead of a bare
+        date -- both must coerce correctly, not raise or silently misparse."""
+        engine, _conn = _mock_engine([
+            {"scalar": "2026-06-30"},
+            {"scalar": datetime(2026, 5, 1, 0, 0, 0)},
+            {"scalar": None},
+        ])
+        wm = loader.get_watermarks(engine=engine)
+        assert wm.ccpi_published_at == date(2026, 6, 30)
+        assert wm.mei_pack_yyyymm == "202605"
+
+
+class TestPerArtifactBatchingShape:
+    """The core memory-bound fix: each artifact must be parsed AND upserted
+    immediately, one at a time -- never accumulated into one list first. Uses
+    call-order tracking (not just "no exception") so the test has teeth
+    against a regression back to the accumulate-everything shape."""
+
+    def _write_dummy_ccpi_cache(self, cache_dir: Path, dates: list) -> None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        for d in dates:
+            (cache_dir / f"cbsl_ccpi_{d.isoformat().replace('-', '')}.pdf").write_bytes(b"%PDF-1.4 fake")
+
+    def test_ccpi_upsert_called_immediately_after_each_parse_not_accumulated(
+        self, tmp_path, monkeypatch
+    ):
+        cache_dir = tmp_path / "cbsl_cache"
+        dates = [date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31)]
+        self._write_dummy_ccpi_cache(cache_dir, dates)
+
+        call_log: list = []
+
+        def fake_parse(pdf_path, *, filename_pub_date=None):
+            call_log.append(("parse", filename_pub_date))
+            return [parser.ParsedMacroPoint(
+                series_code=parser.SERIES_CCPI_INDEX,
+                reference_date=filename_pub_date.replace(day=1),
+                value=100.0, source="CBSL_CCPI", filename_pub_date=filename_pub_date,
+            )]
+
+        def fake_upsert(points, *, dry_run=False):
+            assert len(points) == 1, (
+                "an accumulate-then-upsert-once regression would eventually "
+                "call this with points from MULTIPLE artifacts at once -- "
+                "each call here must see exactly ONE artifact's points"
+            )
+            call_log.append(("upsert", points[0].filename_pub_date))
+            return {"inserted": 1, "updated": 0, "skipped_invalid": 0}
+
+        monkeypatch.setattr(parser, "parse_ccpi_pdf", fake_parse)
+        monkeypatch.setattr(loader, "upsert_macro_points", fake_upsert)
+        monkeypatch.setattr(loader, "get_watermarks", lambda *a, **k: loader.MacroWatermarks(None, None))
+
+        summary = ingest_cbsl_macro.run(cache_dir=cache_dir, no_download=True, dry_run=False)
+
+        expected = [
+            ("parse", dates[0]), ("upsert", dates[0]),
+            ("parse", dates[1]), ("upsert", dates[1]),
+            ("parse", dates[2]), ("upsert", dates[2]),
+        ]
+        assert call_log == expected, (
+            f"expected strict parse/upsert interleaving, got {call_log} -- an "
+            "accumulate-then-upsert-once shape would show all 3 parses "
+            "before any upsert"
+        )
+        assert loader.upsert_macro_points is fake_upsert  # sanity: still patched
+        assert summary["artifactsFetched"] == 3
+        assert summary["rowsInserted"] == 3
+        assert summary["artifactsWatermarkSkipped"] == 0
+
+    def test_parse_failure_on_one_artifact_does_not_abort_the_rest(self, tmp_path, monkeypatch):
+        """Existing skip-accounting contract, extended: a 0-point parse for
+        ONE artifact must not stop the other artifacts from being processed
+        (item 3 of the fix contract)."""
+        cache_dir = tmp_path / "cbsl_cache"
+        dates = [date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31)]
+        self._write_dummy_ccpi_cache(cache_dir, dates)
+
+        def fake_parse(pdf_path, *, filename_pub_date=None):
+            if filename_pub_date == date(2026, 2, 28):
+                return []  # simulated parse failure for the middle artifact
+            return [parser.ParsedMacroPoint(
+                series_code=parser.SERIES_CCPI_INDEX,
+                reference_date=filename_pub_date.replace(day=1),
+                value=1.0, source="CBSL_CCPI", filename_pub_date=filename_pub_date,
+            )]
+
+        def fake_upsert(points, *, dry_run=False):
+            return {"inserted": len(points), "updated": 0, "skipped_invalid": 0}
+
+        monkeypatch.setattr(parser, "parse_ccpi_pdf", fake_parse)
+        monkeypatch.setattr(loader, "upsert_macro_points", fake_upsert)
+        monkeypatch.setattr(loader, "get_watermarks", lambda *a, **k: loader.MacroWatermarks(None, None))
+
+        summary = ingest_cbsl_macro.run(cache_dir=cache_dir, no_download=True, dry_run=False)
+
+        assert summary["artifactsFetched"] == 2
+        assert summary["artifactsSkipped"] == 1
+        assert summary["rowsInserted"] == 2
+
+    def test_upsert_exception_on_one_artifact_does_not_abort_the_rest(self, tmp_path, monkeypatch):
+        """Per-artifact DB-write isolation: the OLD single-big-transaction
+        shape would have lost every artifact's rows if any one upsert raised.
+        The new per-artifact shape must only lose the ONE bad artifact."""
+        cache_dir = tmp_path / "cbsl_cache"
+        dates = [date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31)]
+        self._write_dummy_ccpi_cache(cache_dir, dates)
+
+        def fake_parse(pdf_path, *, filename_pub_date=None):
+            return [parser.ParsedMacroPoint(
+                series_code=parser.SERIES_CCPI_INDEX,
+                reference_date=filename_pub_date.replace(day=1),
+                value=1.0, source="CBSL_CCPI", filename_pub_date=filename_pub_date,
+            )]
+
+        def fake_upsert(points, *, dry_run=False):
+            if points[0].filename_pub_date == date(2026, 2, 28):
+                raise RuntimeError("simulated DB blip")
+            return {"inserted": len(points), "updated": 0, "skipped_invalid": 0}
+
+        monkeypatch.setattr(parser, "parse_ccpi_pdf", fake_parse)
+        monkeypatch.setattr(loader, "upsert_macro_points", fake_upsert)
+        monkeypatch.setattr(loader, "get_watermarks", lambda *a, **k: loader.MacroWatermarks(None, None))
+
+        summary = ingest_cbsl_macro.run(cache_dir=cache_dir, no_download=True, dry_run=False)
+
+        assert summary["artifactsFetched"] == 2, "the two GOOD artifacts must still land"
+        assert summary["artifactsSkipped"] == 1, "only the ONE bad artifact is lost"
+        assert summary["rowsInserted"] == 2
+
+
+class TestFullBackfillEmptyDb:
+    """A true full backfill (empty DB) must process the WHOLE cache with zero
+    watermark skips -- the watermark logic must never accidentally throttle
+    the very case it is designed to leave untouched."""
+
+    def test_empty_db_watermark_processes_every_cached_artifact(self, tmp_path, monkeypatch):
+        cache_dir = tmp_path / "cbsl_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        dates = [date(2020, 4, 30), date(2023, 1, 31), date(2026, 6, 30)]
+        for d in dates:
+            (cache_dir / f"cbsl_ccpi_{d.isoformat().replace('-', '')}.pdf").write_bytes(b"%PDF-1.4 fake")
+
+        def fake_parse(pdf_path, *, filename_pub_date=None):
+            return [parser.ParsedMacroPoint(
+                series_code=parser.SERIES_CCPI_INDEX,
+                reference_date=filename_pub_date.replace(day=1),
+                value=1.0, source="CBSL_CCPI", filename_pub_date=filename_pub_date,
+            )]
+
+        def fake_upsert(points, *, dry_run=False):
+            return {"inserted": len(points), "updated": 0, "skipped_invalid": 0}
+
+        monkeypatch.setattr(parser, "parse_ccpi_pdf", fake_parse)
+        monkeypatch.setattr(loader, "upsert_macro_points", fake_upsert)
+        # Empty DB: get_watermarks() would genuinely return (None, None) here --
+        # simulated directly rather than hitting a real DB (hermetic test).
+        monkeypatch.setattr(loader, "get_watermarks", lambda *a, **k: loader.MacroWatermarks(None, None))
+
+        summary = ingest_cbsl_macro.run(cache_dir=cache_dir, no_download=True, dry_run=False)
+
+        assert summary["artifactsWatermarkSkipped"] == 0
+        assert summary["artifactsFetched"] == len(dates) == 3
+        assert summary["rowsInserted"] == 3
+
+
+class TestFullFlagOverride:
+    def test_full_flag_never_calls_get_watermarks(self, tmp_path, monkeypatch):
+        cache_dir = tmp_path / "cbsl_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        watermark_mock = MagicMock(side_effect=AssertionError("get_watermarks must not be called under --full"))
+        monkeypatch.setattr(loader, "get_watermarks", watermark_mock)
+
+        summary = ingest_cbsl_macro.run(cache_dir=cache_dir, no_download=True, full=True)
+
+        assert watermark_mock.call_count == 0
+        assert summary["status"] == "ok"
+
+    def test_full_flag_processes_artifacts_the_watermark_would_have_dropped(self, tmp_path, monkeypatch):
+        cache_dir = tmp_path / "cbsl_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        old_date = date(2020, 4, 30)
+        (cache_dir / f"cbsl_ccpi_{old_date.isoformat().replace('-', '')}.pdf").write_bytes(b"%PDF-1.4 fake")
+
+        def fake_parse(pdf_path, *, filename_pub_date=None):
+            return [parser.ParsedMacroPoint(
+                series_code=parser.SERIES_CCPI_INDEX,
+                reference_date=filename_pub_date.replace(day=1),
+                value=1.0, source="CBSL_CCPI", filename_pub_date=filename_pub_date,
+            )]
+
+        def fake_upsert(points, *, dry_run=False):
+            return {"inserted": len(points), "updated": 0, "skipped_invalid": 0}
+
+        monkeypatch.setattr(parser, "parse_ccpi_pdf", fake_parse)
+        monkeypatch.setattr(loader, "upsert_macro_points", fake_upsert)
+        # A DB watermark far in the future -- would drop the old_date artifact
+        # entirely if respected.
+        far_future_watermarks = loader.MacroWatermarks(ccpi_published_at=date(2026, 6, 30), mei_pack_yyyymm="202605")
+        monkeypatch.setattr(loader, "get_watermarks", lambda *a, **k: far_future_watermarks)
+
+        # Without --full: dropped by the watermark.
+        summary_incremental = ingest_cbsl_macro.run(cache_dir=cache_dir, no_download=True, full=False)
+        assert summary_incremental["artifactsWatermarkSkipped"] == 1
+        assert summary_incremental["artifactsFetched"] == 0
+
+        # With --full: watermark bypassed entirely, the artifact IS processed.
+        summary_full = ingest_cbsl_macro.run(cache_dir=cache_dir, no_download=True, full=True)
+        assert summary_full["artifactsWatermarkSkipped"] == 0
+        assert summary_full["artifactsFetched"] == 1
+        assert summary_full["rowsInserted"] == 1
+
+
+class TestSummaryContractPreserved:
+    """The summary dict shape mirrors ingest_harti_service.run()'s contract
+    and is consumed by the FastAPI admin route -- these keys must always be
+    present, regardless of the watermark/batching internals."""
+
+    REQUIRED_KEYS = {
+        "status", "artifactsFetched", "artifactsSkipped",
+        "rowsInserted", "rowsUpdated", "rowsSkippedInvalid",
+        "perSeriesCoverage",
+    }
+
+    def test_zero_new_artifacts_is_a_success_with_the_full_key_set(self, tmp_path, monkeypatch):
+        cache_dir = tmp_path / "cbsl_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)  # completely empty cache
+        monkeypatch.setattr(loader, "get_watermarks", lambda *a, **k: loader.MacroWatermarks(None, None))
+
+        summary = ingest_cbsl_macro.run(cache_dir=cache_dir, no_download=True)
+
+        assert self.REQUIRED_KEYS <= set(summary.keys())
+        assert summary["status"] == "ok"
+        assert summary["artifactsFetched"] == 0
+        assert summary["artifactsSkipped"] == 0
+        assert summary["rowsInserted"] == 0
+        assert summary["rowsUpdated"] == 0
+        assert summary["rowsSkippedInvalid"] == 0
+        assert summary["perSeriesCoverage"] == {}
+        assert isinstance(summary["perSeriesCoverage"], dict)
+
+    def test_watermark_skip_field_is_additive_not_a_contract_break(self, tmp_path, monkeypatch):
+        """artifactsWatermarkSkipped is a NEW field -- must never replace or
+        rename any of the required keys."""
+        cache_dir = tmp_path / "cbsl_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(loader, "get_watermarks", lambda *a, **k: loader.MacroWatermarks(None, None))
+
+        summary = ingest_cbsl_macro.run(cache_dir=cache_dir, no_download=True)
+
+        assert self.REQUIRED_KEYS <= set(summary.keys())
+        assert "artifactsWatermarkSkipped" in summary
+        assert summary["artifactsWatermarkSkipped"] == 0

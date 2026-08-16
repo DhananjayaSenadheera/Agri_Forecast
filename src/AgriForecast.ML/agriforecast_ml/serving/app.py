@@ -346,12 +346,21 @@ def ingest_cbsl_endpoint(req: IngestCbslRequest):
 class IngestCbslMacroRequest(BaseModel):
     """Orchestration knobs for the monthly CBSL macro pass.
 
-    noDownload and dryRun are for offline reruns and tests. There is no sinceDate knob:
-    both CBSL listings are small corpora, so a full re-scrape with an idempotent upsert
-    every pass is cheaper than watermark plumbing.
+    noDownload and dryRun are for offline reruns and tests. `full` forces a
+    full re-scan of the entire CCPI+MEI corpus, ignoring the DB watermark —
+    for backfills/repairs only, default OFF.
+
+    CORRECTED 2026-08 (see ingest_cbsl_macro.py's WRITE-BACK): the earlier
+    "no sinceDate knob, a full re-scrape every pass is cheaper than watermark
+    plumbing" reasoning here was WRONG in practice — a full re-scrape/re-parse
+    every pass OOMKilled the k8s CronJob on its very first run and would only
+    get worse as the corpus grows monthly forever. The pass is now
+    watermark-driven by default (loader.get_watermarks() inside run()); `full`
+    is the explicit escape hatch for when a genuine full re-scan is wanted.
     """
     noDownload: bool = False
     dryRun: bool = False
+    full: bool = False
 
 
 @admin_router.post("/ingest-cbsl-macro")
@@ -376,6 +385,7 @@ def ingest_cbsl_macro_endpoint(req: IngestCbslMacroRequest):
         return ingest_cbsl_macro.run(
             no_download=req.noDownload,
             dry_run=req.dryRun,
+            full=req.full,
         )
     except Exception:
         _log.exception("CBSL macro ingestion failed")
