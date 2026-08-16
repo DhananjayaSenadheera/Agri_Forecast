@@ -1265,6 +1265,59 @@ class TestFailureReporting:
         assert summary["status"] == "partial"
         assert summary["artifactsFailed"] == 1
 
+    def test_parse_skips_alone_keep_status_ok(self, tmp_path, monkeypatch):
+        """THE BOUNDARY between the two skip-ish counters, pinned on status.
+
+        artifactsSkipped ("0 series parsed from this PDF") is a benign
+        content miss -- a layout tweak, a bulletin without the labelled
+        lines, a cover page. artifactsFailed (a DB upsert exception) is real
+        lost data. Only the latter may flip status to "partial".
+
+        Folding parse-skips into "partial" would make the CLI exit non-zero
+        and FAIL the k8s Job on a routine parser warning, in a month where
+        every row that was parsed landed perfectly -- turning the honest
+        failure signal into noise the operator learns to ignore, which is the
+        same disease as the false green it replaced. The existing
+        test_parse_failure_on_one_artifact_does_not_abort_the_rest pins the
+        COUNTS for this shape but never asserts status, so that mutation
+        survives it; this is the test that kills it.
+        """
+        cache_dir = tmp_path / "cbsl_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        for d in (date(2026, 1, 31), date(2026, 2, 28)):
+            (cache_dir / f"cbsl_ccpi_{d.isoformat().replace('-', '')}.pdf").write_bytes(
+                b"%PDF-1.4 fake"
+            )
+
+        def fake_parse(pdf_path, *, filename_pub_date=None):
+            # One artifact yields nothing (a benign parse skip); the other is fine.
+            if filename_pub_date == date(2026, 1, 31):
+                return []
+            return [parser.ParsedMacroPoint(
+                series_code=parser.SERIES_CCPI_INDEX,
+                reference_date=filename_pub_date.replace(day=1),
+                value=1.0, source="CBSL_CCPI", filename_pub_date=filename_pub_date,
+            )]
+
+        def fake_upsert(points, *, dry_run=False):
+            # Every write that is attempted SUCCEEDS -- nothing is lost this pass.
+            return {"inserted": len(points), "updated": 0, "skipped_invalid": 0}
+
+        monkeypatch.setattr(parser, "parse_ccpi_pdf", fake_parse)
+        monkeypatch.setattr(loader, "upsert_macro_points", fake_upsert)
+        monkeypatch.setattr(loader, "get_watermarks", lambda *a, **k: loader.MacroWatermarks(None, None))
+
+        summary = ingest_cbsl_macro.run(cache_dir=cache_dir, no_download=True)
+
+        # The premise: this run really did skip something, or the assertion below is vacuous.
+        assert summary["artifactsSkipped"] == 1, "premise: one artifact parsed to zero points"
+        assert summary["artifactsFailed"] == 0, "premise: no DB write was lost"
+        assert summary["status"] == "ok", (
+            "a parse skip with zero write failures is a SUCCESS -- folding it into "
+            "'partial' would fail the monthly k8s Job over a parser warning"
+        )
+        assert summary["rowsInserted"] == 1
+
     def test_cli_main_exits_zero_on_ok_status(self, monkeypatch):
         ok_summary = {
             "status": "ok", "artifactsFetched": 0, "artifactsSkipped": 0,

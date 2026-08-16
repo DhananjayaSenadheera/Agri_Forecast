@@ -378,10 +378,16 @@ def ingest_cbsl_macro_endpoint(req: IngestCbslMacroRequest):
     contract is "the pass ran and here is an honest report", the same as
     /admin/ingest-harti's gaps/outliers report-only fields; only a whole-pass
     exception (this route's own except below) is a 502, and only an import
-    failure is a 503. Checked (2026-08-17 review): no .NET caller inspects
-    this body's `status` field today, so this is a safe, additive change --
-    but any FUTURE caller wiring this into an automated gate MUST check
-    `status`, not just the HTTP code, to see a partial failure.
+    failure is a 503.
+
+    THE HTTP CODE IS NOT THE WHOLE ANSWER, and there is now a caller that
+    depends on that: .NET's CbslMacroIngestionService gates on this body's
+    `status` and writes a FAILED IngestionRuns row for anything that is not
+    exactly "ok" (missing/null included). So `status` is a load-bearing part
+    of this response, not a decorative field -- never drop it, never rename
+    it, and never widen its vocabulary beyond "ok"|"partial" without changing
+    that caller in the same PR. Any other future caller wiring this into an
+    automated gate must check `status` too, not just the HTTP code.
     """
     try:
         import ingest_cbsl_macro
