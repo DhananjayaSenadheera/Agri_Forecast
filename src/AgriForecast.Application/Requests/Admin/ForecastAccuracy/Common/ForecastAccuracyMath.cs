@@ -35,6 +35,17 @@ public static class ForecastAccuracyMath
     /// denominator for, so a figure computed over a handful of rows can never look like a verdict.
     /// ScoredCount is the denominator of Mape, MedianApe AND SignedBias — the three are computed over
     /// one shared row filter, not three coincidentally-similar ones.
+    ///
+    /// BaselineScoredCount is the denominator of BaselineMape, BaselineMedianApe, SkillVsBaseline AND
+    /// PredictionEqualsReferenceShare: the scored rows that also carry the ReferencePrice (and
+    /// ActualPrice) the baseline formula needs. SkillVsBaseline compares like with like — skill is
+    /// measured over the N = baselineScoredCount rows where both the prediction and the do-nothing
+    /// anchor are measurable: the model MAPE restricted to those rows, divided by BaselineMape. Below
+    /// 1.0 the model beats carrying the plant-day price forward, above 1.0 doing nothing would have
+    /// been more accurate. Null when baselineScoredCount is 0 or BaselineMape is 0.
+    /// PredictionEqualsReferenceCount/-Share (over BaselineScoredCount) are the anchored rows where
+    /// the served prediction made no claim independent of the carry-forward anchor; anchorless rows
+    /// are unmeasured, not non-copies.
     /// </summary>
     public sealed record AccuracyMetrics(
         int MaturedCount,
@@ -42,6 +53,12 @@ public static class ForecastAccuracyMath
         decimal? Mape,
         decimal? MedianApe,
         decimal? SignedBias,
+        int BaselineScoredCount,
+        decimal? BaselineMape,
+        decimal? BaselineMedianApe,
+        decimal? SkillVsBaseline,
+        int PredictionEqualsReferenceCount,
+        decimal? PredictionEqualsReferenceShare,
         int IntervalScoredCount,
         int WithinIntervalCount,
         decimal? IntervalCoverage,
@@ -110,6 +127,50 @@ public static class ForecastAccuracyMath
         var apes = scored.Select(r => Math.Abs(r.PercentageError!.Value)).ToList();
         var signedErrors = scored.Select(r => r.SignedError!.Value).ToList();
 
+        decimal? mape = apes.Count == 0 ? null : Round(apes.Average(), MagnitudeDecimals);
+
+        // The do-nothing baseline: score the carry-forward ReferencePrice as if IT were the prediction,
+        // to the SAME convention as the stored PercentageError (snapshots.py _percentage_error:
+        // error / max(|actual|, 1e-6) * 100 — percent units, absolute-value denominator, 1e-6 clip),
+        // so BaselineMape and the model's error are directly comparable. The clip is mirrored here so
+        // an actual of exactly zero (nothing in the DB forbids one) yields a huge-but-finite APE
+        // instead of a DivideByZeroException taking down the whole endpoint. Computed over the scored
+        // rows that also carry the two prices the formula needs; a scored row without a reference is
+        // EXCLUDED and visible as the gap between ScoredCount and BaselineScoredCount, never treated
+        // as zero-error.
+        var baselineScored = scored
+            .Where(r => r.ReferencePrice.HasValue && r.ActualPrice.HasValue)
+            .ToList();
+        var baselineApes = baselineScored
+            .Select(r => Math.Abs(r.ReferencePrice!.Value - r.ActualPrice!.Value)
+                / Math.Max(Math.Abs(r.ActualPrice!.Value), 0.000001m) * 100m)
+            .ToList();
+
+        decimal? baselineMape = baselineApes.Count == 0 ? null : Round(baselineApes.Average(), MagnitudeDecimals);
+
+        // Skill compares like with like: the model's MAPE restricted to the SAME anchored rows the
+        // baseline was scored on (mean of their stored PercentageError magnitudes, same rounding).
+        // Skill is measured over the N = baselineScoredCount rows where both the prediction and the
+        // do-nothing anchor are measurable; the headline Mape above keeps covering every scored row,
+        // so the two may differ when some rows are anchorless.
+        decimal? anchoredMape = baselineScored.Count == 0
+            ? null
+            : Round(baselineScored.Select(r => Math.Abs(r.PercentageError!.Value)).Average(), MagnitudeDecimals);
+
+        // Ratio of the two ROUNDED figures. Null (not a blow-up, not 0) when nothing is anchored or
+        // when BaselineMape is 0.00 — meaning the baseline mean rounds to zero at 2 dp, so the ratio
+        // is unpublishable at page precision, NOT that the baseline was perfect.
+        decimal? skillVsBaseline = anchoredMape is null || baselineMape is null || baselineMape.Value == 0m
+            ? null
+            : Round(anchoredMape.Value / baselineMape.Value, MagnitudeDecimals);
+
+        // Of the ANCHORED rows, those whose prediction is value-equal to the anchor (decimal equality,
+        // scale-insensitive; both prices are stored decimal(10,2), so equality is meaningful).
+        // Anchorless rows are unmeasured, not non-copies — with no reference there is nothing to
+        // compare the prediction against.
+        var predictionEqualsReference = baselineScored.Count(r =>
+            r.PredictedPrice == r.ReferencePrice!.Value);
+
         var intervalScored = list.Count(r => r.WithinInterval.HasValue);
         var withinInterval = list.Count(r => r.WithinInterval == true);
 
@@ -122,9 +183,17 @@ public static class ForecastAccuracyMath
         return new AccuracyMetrics(
             MaturedCount: list.Count,
             ScoredCount: scored.Count,
-            Mape: apes.Count == 0 ? null : Round(apes.Average(), MagnitudeDecimals),
+            Mape: mape,
             MedianApe: apes.Count == 0 ? null : Round(Median(apes), MagnitudeDecimals),
             SignedBias: signedErrors.Count == 0 ? null : Round(signedErrors.Average(), MagnitudeDecimals),
+            BaselineScoredCount: baselineScored.Count,
+            BaselineMape: baselineMape,
+            BaselineMedianApe: baselineApes.Count == 0 ? null : Round(Median(baselineApes), MagnitudeDecimals),
+            SkillVsBaseline: skillVsBaseline,
+            PredictionEqualsReferenceCount: predictionEqualsReference,
+            PredictionEqualsReferenceShare: baselineScored.Count == 0
+                ? null
+                : Round((decimal)predictionEqualsReference / baselineScored.Count, RateDecimals),
             IntervalScoredCount: intervalScored,
             WithinIntervalCount: withinInterval,
             IntervalCoverage: coverage,

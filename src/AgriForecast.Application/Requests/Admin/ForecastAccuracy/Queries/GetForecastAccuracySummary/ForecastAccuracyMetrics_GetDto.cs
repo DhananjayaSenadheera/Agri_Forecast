@@ -29,6 +29,46 @@ public class ForecastAccuracyMetrics_GetDto
     // value; equal and opposite misses cancelling to ~0 is exactly the fact this metric reports.
     public decimal? SignedBias { get; set; }
 
+    // Of the scored rows, those also carrying the referencePrice (and actualPrice) the baseline formula
+    // needs — the ANCHORED rows: the denominator of baselineMape, baselineMedianApe, skillVsBaseline
+    // and predictionEqualsReferenceShare. Rows without a plant-day anchor are excluded, not scored as
+    // zero-error, and this count makes the exclusion visible.
+    public int BaselineScoredCount { get; set; }
+
+    // MAPE of DOING NOTHING: score the carry-forward referencePrice as if it were the prediction,
+    // computed to the same convention as the stored percentageError (percent units,
+    // |ref − actual| / max(|actual|, 1e-6) — the same denominator clip the Python maturing pass uses,
+    // so an actual of zero yields a huge-but-finite figure, never an error). This is the number the
+    // model has to beat — a model error near baselineMape is a model adding nothing over the price
+    // already known on plant day.
+    public decimal? BaselineMape { get; set; }
+
+    // Median absolute percentage error of the same do-nothing baseline, the robust companion to
+    // baselineMape exactly as medianApe is to mape.
+    public decimal? BaselineMedianApe { get; set; }
+
+    // The model's MAPE over the anchored rows, divided by baselineMape (ratio of the two 2-dp-rounded
+    // figures). Skill is measured over the N = baselineScoredCount rows where both the prediction and
+    // the do-nothing anchor are measurable — never a mix of populations, so when some scored rows are
+    // anchorless the numerator is NOT the headline mape above. Read it as: below 1.0 the model beats
+    // carrying the plant-day price forward; above 1.0 doing nothing would have been MORE accurate;
+    // exactly 1.0 the served predictions are indistinguishable from the carry-forward. Null when
+    // baselineScoredCount is 0 or baselineMape is 0 — the latter meaning the baseline mean rounds to
+    // zero at 2 dp, so the ratio is unpublishable at page precision, not that the baseline was perfect.
+    public decimal? SkillVsBaseline { get; set; }
+
+    // Of the ANCHORED rows (baselineScoredCount), those where the served prediction made no claim
+    // independent of the carry-forward anchor: predictedPrice is value-equal to referencePrice
+    // (decimal equality, scale-insensitive; both stored decimal(10,2), so equality is meaningful).
+    // Anchorless rows are unmeasured, not non-copies — there was no anchor to compare against. A high
+    // count means the "accuracy" above is largely the baseline wearing a model's name.
+    public int PredictionEqualsReferenceCount { get; set; }
+
+    // The same as a share of the anchored rows (baselineScoredCount), 0..1. Null when no scored row
+    // carries an anchor. A share of 1.0 means no anchored prediction in this group ever departed from
+    // the carry-forward price.
+    public decimal? PredictionEqualsReferenceShare { get; set; }
+
     // Rows carrying a withinInterval verdict — the coverage denominator.
     public int IntervalScoredCount { get; set; }
     public int WithinIntervalCount { get; set; }

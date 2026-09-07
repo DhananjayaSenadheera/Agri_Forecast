@@ -415,6 +415,189 @@ public class ForecastAccuracyHandlerTests
         m.DirectionalAccuracy.Should().BeNull();
     }
 
+    // ---------------------------------------------------------------- SUMMARY: the do-nothing baseline
+
+    // THE LIVE FAILURE MODE this baseline exists to expose: every prediction is value-equal to the
+    // carry-forward referencePrice, so the group's MAPE *is* the baseline's MAPE wearing a model's
+    // name. skillVsBaseline must read exactly 1.00 and predictionEqualsReferenceShare exactly 1.0.
+    [Fact]
+    public async Task Summary_AllPredictionsCopyTheReference_SkillIsOne_AndTheCopyShareSaysSo()
+    {
+        var store = new FakeStore();
+        // pred == ref on both rows; stored PE matches (pred − actual)/actual: 5% and −10%.
+        store.AddMatured(SRow(predictedPrice: 105m, referencePrice: 105m, actualPrice: 100m,
+            percentageError: 5m, signedError: 5m));
+        store.AddMatured(SRow(predictedPrice: 90m, referencePrice: 90m, actualPrice: 100m,
+            percentageError: -10m, signedError: -10m));
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.Mape.Should().Be(7.50m);                          // (5+10)/2
+        m.BaselineScoredCount.Should().Be(2);
+        m.BaselineMape.Should().Be(7.50m);                  // identical by construction
+        m.BaselineMedianApe.Should().Be(7.50m);
+        m.SkillVsBaseline.Should().Be(1.00m);               // no skill over doing nothing
+        m.PredictionEqualsReferenceCount.Should().Be(2);
+        m.PredictionEqualsReferenceShare.Should().Be(1.0000m);
+    }
+
+    // A model genuinely closer to the actual than the plant-day price: skill lands below 1.0.
+    [Fact]
+    public async Task Summary_ModelBeatsBaseline_SkillBelowOne()
+    {
+        var store = new FakeStore();
+        // APE 2 vs baseline |90−100|/100·100 = 10
+        store.AddMatured(SRow(predictedPrice: 102m, referencePrice: 90m, actualPrice: 100m,
+            percentageError: 2m, signedError: 2m));
+        // APE 3 vs baseline |110−100|/100·100 = 10
+        store.AddMatured(SRow(predictedPrice: 97m, referencePrice: 110m, actualPrice: 100m,
+            percentageError: -3m, signedError: -3m));
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.Mape.Should().Be(2.50m);
+        m.BaselineMape.Should().Be(10.00m);
+        m.BaselineMedianApe.Should().Be(10.00m);
+        m.SkillVsBaseline.Should().Be(0.25m);               // 2.50 / 10.00
+        m.PredictionEqualsReferenceCount.Should().Be(0);
+        m.PredictionEqualsReferenceShare.Should().Be(0.0000m);
+    }
+
+    // A model further from the actual than the price already known on plant day: skill above 1.0, and
+    // the ratio is rounded AwayFromZero from the two 2-dp figures (10.00/3.00 → 3.33).
+    [Fact]
+    public async Task Summary_ModelLosesToBaseline_SkillAboveOne()
+    {
+        var store = new FakeStore();
+        // APE 10 vs baseline |103−100|/100·100 = 3
+        store.AddMatured(SRow(predictedPrice: 110m, referencePrice: 103m, actualPrice: 100m,
+            percentageError: 10m, signedError: 10m));
+        // APE 10 vs baseline |97−100|/100·100 = 3
+        store.AddMatured(SRow(predictedPrice: 90m, referencePrice: 97m, actualPrice: 100m,
+            percentageError: -10m, signedError: -10m));
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.Mape.Should().Be(10.00m);
+        m.BaselineMape.Should().Be(3.00m);
+        m.SkillVsBaseline.Should().Be(3.33m);               // 10.00/3.00 = 3.333… → 3.33
+    }
+
+    // A scored row with no plant-day anchor is EXCLUDED from the baseline (visible via the count), and
+    // from BOTH sides of the skill ratio: the anchorless row's APE (25) is deliberately different from
+    // the anchored row's (5), so a skill computed from the headline mape (15.00/5.00 = 3.00) would fail
+    // here. It is also excluded from the copy share — unmeasured, not a non-copy.
+    [Fact]
+    public async Task Summary_NullReferenceRow_LeavesTheBaseline_TheSkillRatio_AndTheCopyShare()
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(predictedPrice: 125m, referencePrice: null, actualPrice: 100m,
+            percentageError: 25m, signedError: 25m));
+        store.AddMatured(SRow(predictedPrice: 105m, referencePrice: 105m, actualPrice: 100m,
+            percentageError: 5m, signedError: 5m));
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.ScoredCount.Should().Be(2);
+        m.Mape.Should().Be(15.00m);                         // headline still covers ALL scored rows
+        m.BaselineScoredCount.Should().Be(1);               // the anchorless row is out, and it shows
+        m.BaselineMape.Should().Be(5.00m);                  // over 1 row, NOT diluted over 2
+        m.SkillVsBaseline.Should().Be(1.00m);               // anchored-rows MAPE 5.00 / 5.00, NOT 15.00/5.00
+        m.PredictionEqualsReferenceCount.Should().Be(1);
+        m.PredictionEqualsReferenceShare.Should().Be(1.0000m); // 1 of 1 ANCHORED rows, not 1 of 2 scored
+    }
+
+    // A baselineMape of 0.00 means the baseline mean rounds to zero at the page's 2 dp: the ratio is
+    // unpublishable at page precision, so skill is null — not an exception and not infinity dressed as
+    // a number.
+    [Fact]
+    public async Task Summary_BaselineMapeZero_SkillIsNull_NotADivisionBlowUp()
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(predictedPrice: 105m, referencePrice: 100m, actualPrice: 100m,
+            percentageError: 5m, signedError: 5m));
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.BaselineScoredCount.Should().Be(1);
+        m.BaselineMape.Should().Be(0.00m);
+        m.BaselineMedianApe.Should().Be(0.00m);
+        m.SkillVsBaseline.Should().BeNull();
+    }
+
+    // When NO scored row carries an anchor, every anchored metric is null with a zero count: baseline,
+    // skill AND the copy share. The share in particular must be null (unmeasured), not 0.0000 — a zero
+    // would read as "no prediction ever copied the reference" when in fact nothing could be measured.
+    [Fact]
+    public async Task Summary_AllScoredRowsAnchorless_EveryAnchoredMetricIsNull_WithZeroCounts()
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(predictedPrice: 105m, referencePrice: null, actualPrice: 100m,
+            percentageError: 5m, signedError: 5m));
+        store.AddMatured(SRow(predictedPrice: 112m, referencePrice: null, actualPrice: 100m,
+            percentageError: 12m, signedError: 12m));
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.ScoredCount.Should().Be(2);
+        m.Mape.Should().Be(8.50m);                          // the model is still measurable
+        m.BaselineScoredCount.Should().Be(0);
+        m.BaselineMape.Should().BeNull();
+        m.BaselineMedianApe.Should().BeNull();
+        m.SkillVsBaseline.Should().BeNull();
+        m.PredictionEqualsReferenceCount.Should().Be(0);
+        m.PredictionEqualsReferenceShare.Should().BeNull();
+    }
+
+    // An actual of exactly zero (nothing in the DB forbids one) must not 500 the endpoint with a
+    // DivideByZeroException: the baseline mirrors the Python 1e-6 denominator clip, so the APE comes
+    // out huge but finite — |50 − 0| / 1e-6 · 100 = 5e9 percent. Pinned on the FALLBACK group so at
+    // least one baseline test proves the maths is predictor-agnostic.
+    [Fact]
+    public async Task Summary_ActualPriceZero_BaselineIsHugeButFinite_NotADivideByZero()
+    {
+        var store = new FakeStore();
+        // Defensive only — a real row like this cannot be stored: PercentageError is decimal(9,4)
+        // (max 99999.9999) and Python's _accepted_actual refuses a non-positive actual upstream.
+        // The fixture pins that IF such a row ever appeared, the clip yields huge-but-finite, not a 500.
+        store.AddMatured(SRow(predictor: Fallback, predictedPrice: 50m, referencePrice: 50m,
+            actualPrice: 0m, percentageError: 5000000000m, signedError: 50m));
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Fallback);
+
+        m.BaselineScoredCount.Should().Be(1);
+        m.BaselineMape.Should().Be(5000000000.00m);
+        m.BaselineMedianApe.Should().Be(5000000000.00m);
+        m.SkillVsBaseline.Should().Be(1.00m);
+        m.PredictionEqualsReferenceCount.Should().Be(1);
+        m.PredictionEqualsReferenceShare.Should().Be(1.0000m);
+    }
+
+    // The baseline hangs off the SAME scored filter as the error metrics: a matured row without error
+    // columns reaches none of the new fields, even when it carries both prices. Nothing scored ⇒ nulls
+    // and zero counts, never 0.0.
+    [Fact]
+    public async Task Summary_NoScoredRows_BaselineFieldsAreNullsAndZeroCounts()
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(percentageError: null, signedError: null, withinInterval: null,
+            referencePrice: null, actualPrice: null));
+        // Unscored but price-complete, pred == ref: still invisible to every baseline field.
+        store.AddMatured(SRow(percentageError: null, signedError: null, withinInterval: null,
+            predictedPrice: 90m, referencePrice: 90m, actualPrice: 100m));
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.MaturedCount.Should().Be(2);
+        m.ScoredCount.Should().Be(0);
+        m.BaselineScoredCount.Should().Be(0);
+        m.BaselineMape.Should().BeNull();
+        m.BaselineMedianApe.Should().BeNull();
+        m.SkillVsBaseline.Should().BeNull();
+        m.PredictionEqualsReferenceCount.Should().Be(0);
+        m.PredictionEqualsReferenceShare.Should().BeNull();
+    }
+
     // ---------------------------------------------------------------- SUMMARY: directional accuracy
 
     // Direction is measured from the plant-day reference: predicted up + actual up = a hit.

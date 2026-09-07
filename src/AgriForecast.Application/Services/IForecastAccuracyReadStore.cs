@@ -48,10 +48,13 @@ public sealed record ForecastSnapshotCensus(
 
 // The scoring columns of one matured snapshot.
 //
-// The error columns are read AS STORED. They are the frozen record of how that prediction actually
-// scored, written once by the maturing pass; recomputing them here from prices would let a .NET rounding
-// rule quietly disagree with the ledger. The three PRICE columns are carried only for directional
-// accuracy, which is a comparison against ReferencePrice and has no stored column of its own.
+// The MODEL error columns are read AS STORED. They are the frozen record of how that prediction
+// actually scored, written once by the maturing pass; recomputing them here from prices would let a
+// .NET rounding rule quietly disagree with the ledger. The three PRICE columns feed the metrics that
+// have no stored column of their own: directional accuracy (a comparison against ReferencePrice) and
+// the do-nothing BASELINE, whose error is recomputed from ReferencePrice and ActualPrice by design —
+// the ledger stores no baseline error, so there is nothing stored to disagree with (the formula
+// mirrors the Python convention; see ForecastAccuracyMath).
 public sealed record ForecastSnapshotScoringRow(
     string ActivePredictor,
     string? ModelVersion,
