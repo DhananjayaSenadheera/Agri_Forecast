@@ -1,4 +1,5 @@
 using AgriForecast.Application.Services;
+using AgriForecast.Domain.Constants;
 
 namespace AgriForecast.Application.Requests.Admin.ForecastAccuracy.Common;
 
@@ -68,37 +69,122 @@ public static class ForecastAccuracyMath
         int DirectionalDegenerate,
         int DirectionalExcluded);
 
-    /// <summary>Metrics for one ActivePredictor across every model version.</summary>
-    public sealed record PredictorGroup(string ActivePredictor, AccuracyMetrics Metrics);
+    /// <summary>
+    /// The lifecycle census of one group, over the SAME window as its metrics. Total is summed
+    /// independently of the four buckets, mirroring ForecastSnapshotCensus: a state the DB check
+    /// constraint somehow let through shows up as an arithmetic gap, never a silent disappearance.
+    /// EarliestScoreableHarvestDate is the earliest harvest date among the group's still-PENDING rows,
+    /// null when nothing is pending. NOT a forward-looking promise: a FUTURE date means the first score
+    /// becomes possible then; a PAST date means pending rows are already OVERDUE — still waiting on a
+    /// published price inside the maturity grace window, or the nightly sweep has not run. It is
+    /// deliberately never clamped to today; the past date IS the operational signal.
+    /// </summary>
+    public sealed record GroupCensus(
+        int Total,
+        int Pending,
+        int Matured,
+        int ActualUnavailable,
+        int NotMaturable,
+        DateOnly? EarliestScoreableHarvestDate);
+
+    /// <summary>Census and metrics for one ActivePredictor across every model version.</summary>
+    public sealed record PredictorGroup(string ActivePredictor, GroupCensus Census, AccuracyMetrics Metrics);
 
     /// <summary>
-    /// Metrics for one (ModelVersion, ActivePredictor) pair. The predictor is part of the key, not a
-    /// detail: grouping by version ALONE would blend model-served and fallback-served rows of that
-    /// version back into exactly the number the split law forbids. ModelVersion is null for rows served
-    /// before a version was recorded.
+    /// Census and metrics for one (ModelVersion, ActivePredictor) pair. The predictor is part of the
+    /// key, not a detail: grouping by version ALONE would blend model-served and fallback-served rows of
+    /// that version back into exactly the number the split law forbids. ModelVersion is null for rows
+    /// served before a version was recorded.
     /// </summary>
-    public sealed record ModelVersionGroup(string? ModelVersion, string ActivePredictor, AccuracyMetrics Metrics);
-
-    /// <summary>Matured rows grouped by ActivePredictor, ordered by predictor name.</summary>
-    public static List<PredictorGroup> ByPredictor(IEnumerable<ForecastSnapshotScoringRow> maturedRows) =>
-        maturedRows
-            .GroupBy(r => r.ActivePredictor, StringComparer.Ordinal)
-            .OrderBy(g => g.Key, StringComparer.Ordinal)
-            .Select(g => new PredictorGroup(g.Key, Compute(g)))
-            .ToList();
+    public sealed record ModelVersionGroup(
+        string? ModelVersion, string ActivePredictor, GroupCensus Census, AccuracyMetrics Metrics);
 
     /// <summary>
-    /// Matured rows grouped by (ModelVersion, ActivePredictor). Ordering is LEXICAL on the version
-    /// string, not semantic ("v9" sorts after "v17"); the admin UI sorts for display.
+    /// Groups by ActivePredictor, ordered by predictor name. The group SET is a CENSUS over every
+    /// snapshot state, not a survey of the matured survivors: a predictor whose rows are all still
+    /// pending gets a group with a live census, MaturedCount 0 and null metrics — "not yet scored" —
+    /// where grouping the matured rows alone would erase it and an admin could not tell "no data yet"
+    /// from "no such predictor". Metrics still come from the matured rows ONLY, via the same Compute
+    /// an all-matured group uses; an empty matured list yields nulls and zero counts by construction,
+    /// never fabricated zeros.
+    ///
+    /// The keys are the UNION of the two reads' keys — a defence against key-set divergence between
+    /// two independent reads generally: a matured key the census has no cells for still gets its
+    /// group, with an all-zero census, rather than vanishing. A RACE cannot produce that direction —
+    /// the handler reads matured FIRST and the census second, nothing deletes snapshot rows, and
+    /// maturing never rewrites a row's ActivePredictor or ModelVersion, so a row maturing between the
+    /// reads only puts census.Matured one ABOVE MaturedCount (documented on the census DTO). The
+    /// realistic cause would be casing/whitespace divergence between this ordinal in-memory grouping
+    /// and the SQL GROUP BY under the database's case-insensitive collation — the known, accepted gap
+    /// noted in ForecastAccuracyReadStore.
     /// </summary>
-    public static List<ModelVersionGroup> ByModelVersion(IEnumerable<ForecastSnapshotScoringRow> maturedRows) =>
-        maturedRows
-            .GroupBy(r => (r.ModelVersion, r.ActivePredictor))
-            .OrderBy(g => g.Key.ModelVersion is null) // rows with no recorded version sort last
-            .ThenBy(g => g.Key.ModelVersion, StringComparer.Ordinal)
-            .ThenBy(g => g.Key.ActivePredictor, StringComparer.Ordinal)
-            .Select(g => new ModelVersionGroup(g.Key.ModelVersion, g.Key.ActivePredictor, Compute(g)))
+    public static List<PredictorGroup> ByPredictor(
+        IEnumerable<ForecastSnapshotScoringRow> maturedRows,
+        IEnumerable<ForecastSnapshotGroupCensusRow> censusRows)
+    {
+        var matured = maturedRows.ToLookup(r => r.ActivePredictor, StringComparer.Ordinal);
+        var census = censusRows.ToLookup(r => r.ActivePredictor, StringComparer.Ordinal);
+
+        return census.Select(g => g.Key)
+            .Union(matured.Select(g => g.Key), StringComparer.Ordinal)
+            .OrderBy(k => k, StringComparer.Ordinal)
+            .Select(k => new PredictorGroup(k, CensusOf(census[k]), Compute(matured[k])))
             .ToList();
+    }
+
+    /// <summary>
+    /// Groups by (ModelVersion, ActivePredictor), census-based exactly like ByPredictor. Ordering is
+    /// LEXICAL on the version string, not semantic ("v9" sorts after "v17"); the admin UI sorts for
+    /// display.
+    /// </summary>
+    public static List<ModelVersionGroup> ByModelVersion(
+        IEnumerable<ForecastSnapshotScoringRow> maturedRows,
+        IEnumerable<ForecastSnapshotGroupCensusRow> censusRows)
+    {
+        var matured = maturedRows.ToLookup(r => (r.ModelVersion, r.ActivePredictor));
+        var census = censusRows.ToLookup(r => (r.ModelVersion, r.ActivePredictor));
+
+        return census.Select(g => g.Key)
+            .Union(matured.Select(g => g.Key))
+            .OrderBy(k => k.ModelVersion is null) // rows with no recorded version sort last
+            .ThenBy(k => k.ModelVersion, StringComparer.Ordinal)
+            .ThenBy(k => k.ActivePredictor, StringComparer.Ordinal)
+            .Select(k => new ModelVersionGroup(
+                k.ModelVersion, k.ActivePredictor, CensusOf(census[k]), Compute(matured[k])))
+            .ToList();
+    }
+
+    /// <summary>
+    /// Folds one group's census cells (one per state) into its GroupCensus. Ordinal state matching,
+    /// mirroring ForecastAccuracyReadStore.GetCensusAsync: a mis-cased state lands in Total but in no
+    /// bucket, a defect to be seen rather than absorbed. Only the PENDING cell's min harvest date is
+    /// read — on terminal cells the column describes rows already resolved, which answer no "when can
+    /// this be scored?" question. An empty cell set (a matured-only key the census missed) folds to
+    /// all zeros and a null date.
+    /// </summary>
+    private static GroupCensus CensusOf(IEnumerable<ForecastSnapshotGroupCensusRow> cells)
+    {
+        var list = cells as IReadOnlyList<ForecastSnapshotGroupCensusRow> ?? cells.ToList();
+
+        int Count(string state) => list
+            .Where(c => string.Equals(c.MaturityState, state, StringComparison.Ordinal))
+            .Sum(c => c.Count);
+
+        // Returned AS-IS, never clamped to today: a harvest date already in the past means pending rows
+        // are OVERDUE (waiting on a published price, or the maturity sweep has not run) — a signal the
+        // page must show, not smooth over. Only a future date reads as "first score possible then".
+        var earliestPending = list
+            .Where(c => string.Equals(c.MaturityState, ForecastSnapshotMaturityStates.Pending, StringComparison.Ordinal))
+            .Min(c => c.EarliestHarvestDate); // Min over none, or over nulls, is null — not a throw
+
+        return new GroupCensus(
+            Total: list.Sum(c => c.Count),
+            Pending: Count(ForecastSnapshotMaturityStates.Pending),
+            Matured: Count(ForecastSnapshotMaturityStates.Matured),
+            ActualUnavailable: Count(ForecastSnapshotMaturityStates.ActualUnavailable),
+            NotMaturable: Count(ForecastSnapshotMaturityStates.NotMaturable),
+            EarliestScoreableHarvestDate: earliestPending);
+    }
 
     /// <summary>
     /// The metrics for one already-grouped set of matured rows.
