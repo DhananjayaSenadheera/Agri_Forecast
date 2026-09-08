@@ -111,6 +111,43 @@ public class ForecastAccuracyMetrics_GetDto
     public int DirectionalExcluded { get; set; }
 }
 
+// The lifecycle census of ONE group, over the same windowDays as the group's metrics. This is what
+// makes a group with nothing matured yet EXIST on the page: 525 pending rows and maturedCount 0 means
+// "serving, not yet scored" — without these counts that group would be absent and unreadable from
+// "this predictor doesn't exist". Expect groups whose census has rows but whose metrics are all null;
+// until a group's first rows mature, that is the correct shape, not an inconsistency.
+public class ForecastSnapshotGroupCensus_GetDto
+{
+    // All rows of this group in the window, summed independently of the four buckets below —
+    // mirroring the top-level counts, a state the DB somehow let through shows as an arithmetic gap.
+    public int Total { get; set; }
+
+    // OPEN: taken, not yet due. The rows the group's future scores will come from.
+    public int Pending { get; set; }
+
+    // Scored. Matches the group's metrics.maturedCount (both reads cover the same window). A row
+    // maturing between the two queries can only put this ONE ABOVE metrics.maturedCount — the matured
+    // rows are read first and maturing never removes or re-keys a row — and metrics.maturedCount
+    // remains the denominator the metrics were actually computed over.
+    public int Matured { get; set; }
+
+    // Due but never matched to an actual price. Rows this group will now never be scored on.
+    public int ActualUnavailable { get; set; }
+
+    // No resolvable growth period, so nothing to score against. Terminal from creation.
+    public int NotMaturable { get; set; }
+
+    // yyyy-MM-dd of the earliest harvest date among this group's still-PENDING rows; null when the
+    // group has no pending rows (nothing in flight). NOT a forward-looking promise, and never clamped
+    // to today. A FUTURE date means the first real score becomes possible then — "first ML scores
+    // possible from 2026-09-15" instead of an unexplained empty group. A PAST date means pending rows
+    // are already OVERDUE: a row is scored on harvest day only if a price published that exact day;
+    // otherwise it waits out the maturity grace window, and if the nightly sweep stops running the
+    // date freezes in the past. Read a past date as "overdue rows / check the sweep", never "score
+    // coming".
+    public string? EarliestScoreableHarvestDate { get; set; }
+}
+
 // Aggregates for one active predictor, across every model version.
 public class PredictorAccuracy_GetDto
 {
@@ -118,6 +155,10 @@ public class PredictorAccuracy_GetDto
     // friendlier label here — the raw value is what the ML side reports and what a comparison against
     // its logs has to match.
     public string ActivePredictor { get; set; } = string.Empty;
+
+    // Every state, so the group exists as soon as it has ANY rows; the metrics below stay
+    // matured-rows-only.
+    public ForecastSnapshotGroupCensus_GetDto Census { get; set; } = new();
 
     public ForecastAccuracyMetrics_GetDto Metrics { get; set; } = new();
 }
@@ -131,6 +172,10 @@ public class ModelVersionAccuracy_GetDto
 
     // Part of the key, not a label: see ForecastAccuracyMath's split law.
     public string ActivePredictor { get; set; } = string.Empty;
+
+    // Every state, so the group exists as soon as it has ANY rows; the metrics below stay
+    // matured-rows-only.
+    public ForecastSnapshotGroupCensus_GetDto Census { get; set; } = new();
 
     public ForecastAccuracyMetrics_GetDto Metrics { get; set; } = new();
 }

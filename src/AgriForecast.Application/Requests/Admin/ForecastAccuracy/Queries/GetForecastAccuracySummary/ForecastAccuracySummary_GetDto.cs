@@ -26,17 +26,25 @@ public class ForecastAccuracySummary_GetDto
     // DELIBERATE ASYMMETRY: counts are ALL-TIME, the metrics below are WINDOWED. The census answers "is
     // the nightly job running and is the ledger healthy?", which a window would hide — a pile of
     // actual_unavailable rows from eighteen months ago is still a fact about the pipeline. The metrics
-    // answer "how is the model doing lately?", which all-time history would blur. So counts.matured is
-    // expected to exceed the summed maturedCount of the groups, and that gap is not a bug.
+    // answer "how is the model doing lately?", which all-time history would blur. The group CENSUS
+    // below is windowed too, so the asymmetry covers every state, not just matured: counts.matured vs
+    // the groups' summed maturedCount, and likewise counts.pending / actualUnavailable / notMaturable
+    // / total vs the summed group census buckets (counts.pending against the summed census.pending is
+    // the pair an admin is most likely to eyeball). Each all-time count is expected to meet or exceed
+    // its windowed counterpart, and none of those gaps is a bug.
     public ForecastSnapshotCounts_GetDto Counts { get; set; } = new();
 
-    // Aggregates over MATURED rows inside windowDays only, one entry per active predictor (e.g.
-    // "residual" vs "crop_mean_fallback"). Empty when nothing has matured in the window.
+    // One entry per active predictor (e.g. "residual" vs "crop_mean_fallback") with ANY snapshot rows
+    // inside windowDays — a CENSUS, not a survey of the matured survivors. A predictor still waiting on
+    // its first maturity appears here with a live census, maturedCount 0 and null metrics ("not yet
+    // scored"); absence from this list means the predictor served nothing in the window at all. The
+    // METRICS inside each entry still cover the group's MATURED rows only. Empty only when nothing was
+    // served in the window.
     public List<PredictorAccuracy_GetDto> ByActivePredictor { get; set; } = new();
 
-    // The same aggregates keyed by (modelVersion, activePredictor). The predictor stays in the key: a
-    // version's rows are still split model-vs-fallback, because a version that mostly fell back is not
-    // a version that was mostly right.
+    // The same census-based groups keyed by (modelVersion, activePredictor). The predictor stays in the
+    // key: a version's rows are still split model-vs-fallback, because a version that mostly fell back
+    // is not a version that was mostly right.
     public List<ModelVersionAccuracy_GetDto> ByModelVersion { get; set; } = new();
 }
 

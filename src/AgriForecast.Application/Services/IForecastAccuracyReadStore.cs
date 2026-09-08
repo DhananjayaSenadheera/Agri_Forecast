@@ -24,6 +24,18 @@ public interface IForecastAccuracyReadStore
     Task<IReadOnlyList<ForecastSnapshotScoringRow>> GetMaturedScoringRowsAsync(
         DateOnly fromSnapshotDate, CancellationToken ct = default);
 
+    // Census cells over ALL maturity states, one per (ActivePredictor, ModelVersion, MaturityState)
+    // combination that has rows inside the window — this is what lets a predictor with 525 pending rows
+    // and 0 matured ones exist on the summary at all, instead of being indistinguishable from a
+    // predictor that never served. One grouped aggregate query; never a row-by-row read.
+    //
+    // fromSnapshotDate bounds the read exactly like GetMaturedScoringRowsAsync (SnapshotDate >= it), so
+    // the census and the matured metrics always describe the SAME window. Within that window a cell can
+    // exist with matured count 0 — a pending-only group is the expected shape until its first rows
+    // mature, not an inconsistency.
+    Task<IReadOnlyList<ForecastSnapshotGroupCensusRow>> GetGroupCensusAsync(
+        DateOnly fromSnapshotDate, CancellationToken ct = default);
+
     // Page of snapshot rows, newest SnapshotDate first (Id DESC tiebreak), plus the total matching count.
     // 1-based paging. Filters are AND-combined; a null filter is NO filter. maturedOnly narrows to the
     // matured state alone (not "everything that reached a terminal state").
@@ -45,6 +57,28 @@ public sealed record ForecastSnapshotCensus(
     int ActualUnavailable,
     int NotMaturable,
     DateOnly? LatestSnapshotDate);
+
+// One census cell: how many rows a (predictor, version) pair has in ONE maturity state, inside the
+// caller's window. The states come back as stored; the aggregation layer buckets them ordinally, so a
+// mis-cased state shows up as an arithmetic gap (in a group's Total but no bucket), never silently.
+//
+// EarliestHarvestDate is MIN(HarvestDate) over the cell's rows. It is only MEANINGFUL on the pending
+// cell, where it is the earliest date a still-open row could first be scored (which may already be
+// PAST — overdue rows keep their dates; see the aggregation layer's notes). A pending row carries a
+// HarvestDate because the PYTHON WRITER enforces it: serving/snapshots.py assigns 'pending' only when
+// a harvest date exists and mints 'not_maturable' otherwise. The entity factory's CreatePending guard
+// is NOT the enforcer — it never runs on the production write path (the Python job writes raw SQL;
+// see the DbContext's ForecastSnapshot remarks) — and no DB constraint ties state to HarvestDate,
+// which is why the column stays nullable here and the aggregation still null-guards. HarvestDate is
+// materialized on the row (SnapshotDate + GrowthPeriodDays as served), so nothing is re-derived here.
+// On terminal cells it is just the min of already-resolved harvest dates and the aggregation layer
+// ignores it.
+public sealed record ForecastSnapshotGroupCensusRow(
+    string ActivePredictor,
+    string? ModelVersion,
+    string MaturityState,
+    int Count,
+    DateOnly? EarliestHarvestDate);
 
 // The scoring columns of one matured snapshot.
 //

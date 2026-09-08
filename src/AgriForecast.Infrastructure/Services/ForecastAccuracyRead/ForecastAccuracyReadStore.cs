@@ -62,6 +62,29 @@ public class ForecastAccuracyReadStore : IForecastAccuracyReadStore
             .ToListAsync(ct);
     }
 
+    public async Task<IReadOnlyList<ForecastSnapshotGroupCensusRow>> GetGroupCensusAsync(
+        DateOnly fromSnapshotDate, CancellationToken ct = default)
+    {
+        // ALL states, same window as GetMaturedScoringRowsAsync — the census and the metrics must
+        // describe the same span, and a (predictor, version) pair whose only rows are still pending
+        // must come back as cells here even though the matured read returns nothing for it. One
+        // GROUP BY in SQL, a handful of cells out (predictors × versions × states), never the rows.
+        //
+        // MIN(HarvestDate) rides along on every cell for free; only the pending cell's value is read
+        // downstream (see ForecastSnapshotGroupCensusRow). EF translates the whole projection to a
+        // single grouped SELECT.
+        return await _db.ForecastSnapshots.AsNoTracking()
+            .Where(s => s.SnapshotDate >= fromSnapshotDate)
+            .GroupBy(s => new { s.ActivePredictor, s.ModelVersion, s.MaturityState })
+            .Select(g => new ForecastSnapshotGroupCensusRow(
+                g.Key.ActivePredictor,
+                g.Key.ModelVersion,
+                g.Key.MaturityState,
+                g.Count(),
+                g.Min(s => s.HarvestDate)))
+            .ToListAsync(ct);
+    }
+
     public async Task<ForecastSnapshotsPage> GetSnapshotsPageAsync(
         int page, int pageSize, Guid? cropId, string? modelVersion, bool maturedOnly,
         CancellationToken ct = default)

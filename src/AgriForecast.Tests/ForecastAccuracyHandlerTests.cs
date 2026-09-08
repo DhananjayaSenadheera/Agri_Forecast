@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection;
 using System.Text.Json;
 using AgriForecast.API.Controllers;
@@ -17,8 +18,9 @@ namespace AgriForecast.Tests;
 /// Unit tests for the admin forecast-accuracy read handlers, their validator and the aggregation maths.
 /// The DB is faked via a canned IForecastAccuracyReadStore, so the aggregation, the model-vs-fallback
 /// split, the per-version grouping, the paging/filtering contract and the UTC stamp all run in isolation.
-/// The store's EF LINQ is not covered here (same boundary as the Logs-hub tests); what IS covered is
-/// everything that decides what number an admin ends up reading.
+/// The store's EF LINQ is not covered here (same boundary as the Logs-hub tests) — the group-census
+/// query's translation is proven against a real database in ForecastAccuracyReadStoreTests; what IS
+/// covered here is everything that decides what number an admin ends up reading.
 /// </summary>
 public class ForecastAccuracyHandlerTests
 {
@@ -32,7 +34,14 @@ public class ForecastAccuracyHandlerTests
         public List<ForecastSnapshotListRow> Snapshots = new();
         public ForecastSnapshotCensus Census = new(0, 0, 0, 0, 0, null);
 
+        // One fact per snapshot row for the GROUP census read: every state, with the SnapshotDate the
+        // window filters on and the HarvestDate the pending-cells minimum comes from. AddMatured feeds
+        // this list too, so the census and the matured read see one table, like the real store.
+        public List<(string Predictor, string? ModelVersion, string State,
+            DateOnly SnapshotDate, DateOnly? HarvestDate)> CensusFacts = new();
+
         public DateOnly? CapturedFromSnapshotDate;
+        public DateOnly? CapturedCensusFromSnapshotDate;
         public Guid? CapturedCropId;
         public string? CapturedModelVersion;
         public bool? CapturedMaturedOnly;
@@ -41,10 +50,52 @@ public class ForecastAccuracyHandlerTests
 
         // Seeds a matured row inside the window (dated today), the common case for the metric tests.
         public void AddMatured(ForecastSnapshotScoringRow row, DateOnly? snapshotDate = null)
-            => Matured.Add((row, snapshotDate ?? DateOnly.FromDateTime(DateTime.UtcNow)));
+        {
+            var date = snapshotDate ?? DateOnly.FromDateTime(DateTime.UtcNow);
+            Matured.Add((row, date));
+            // The matured census fact deliberately CARRIES a harvest date: only PENDING cells may feed
+            // earliestScoreableHarvestDate, and a terminal cell with a date is what proves the
+            // aggregation ignores it rather than never seeing one.
+            AddCensusFact(row.ActivePredictor, row.ModelVersion,
+                ForecastSnapshotMaturityStates.Matured, date, harvestDate: date);
+        }
+
+        // Seeds a census-only fact — a row in a state the matured scoring read never returns.
+        public void AddCensusFact(string predictor, string? modelVersion, string state,
+            DateOnly? snapshotDate = null, DateOnly? harvestDate = null)
+            => CensusFacts.Add((predictor, modelVersion, state,
+                snapshotDate ?? DateOnly.FromDateTime(DateTime.UtcNow), harvestDate));
+
+        // Seeds a PENDING row. A real pending row always carries a harvest date (CreatePending
+        // requires one), so it is non-optional here.
+        public void AddPending(string predictor, string? modelVersion, DateOnly harvestDate,
+            DateOnly? snapshotDate = null)
+            => AddCensusFact(predictor, modelVersion, ForecastSnapshotMaturityStates.Pending,
+                snapshotDate, harvestDate);
 
         public Task<ForecastSnapshotCensus> GetCensusAsync(CancellationToken ct = default)
             => Task.FromResult(Census);
+
+        // Mirrors ForecastAccuracyReadStore.GetGroupCensusAsync's shape and window — the same cutoff
+        // filter as the matured read, one cell per (predictor, version, state), MIN(HarvestDate) riding
+        // along — EXCEPT collation: the real GROUP BY runs under the database's case-INSENSITIVE
+        // collation for ActivePredictor/ModelVersion, while this GroupBy is ordinal ("V17" and "v17"
+        // fuse there, stay apart here). MaturityState is safe on both sides: its BIN2 CHECK constraint
+        // admits only the four lowercase spellings. Known and accepted — see the collation note in
+        // ForecastAccuracyReadStore.GetSnapshotsPageAsync.
+        public Task<IReadOnlyList<ForecastSnapshotGroupCensusRow>> GetGroupCensusAsync(
+            DateOnly fromSnapshotDate, CancellationToken ct = default)
+        {
+            CapturedCensusFromSnapshotDate = fromSnapshotDate;
+            return Task.FromResult<IReadOnlyList<ForecastSnapshotGroupCensusRow>>(
+                CensusFacts
+                    .Where(f => f.SnapshotDate >= fromSnapshotDate)
+                    .GroupBy(f => (f.Predictor, f.ModelVersion, f.State))
+                    .Select(g => new ForecastSnapshotGroupCensusRow(
+                        g.Key.Predictor, g.Key.ModelVersion, g.Key.State, g.Count(),
+                        g.Min(f => f.HarvestDate)))
+                    .ToList());
+        }
 
         public Task<IReadOnlyList<ForecastSnapshotScoringRow>> GetMaturedScoringRowsAsync(
             DateOnly fromSnapshotDate, CancellationToken ct = default)
@@ -799,6 +850,255 @@ public class ForecastAccuracyHandlerTests
         new GetForecastAccuracySummaryValidator()
             .Validate(new GetForecastAccuracySummaryQuery { WindowDays = windowDays })
             .IsValid.Should().Be(expectedValid);
+    }
+
+    // ---------------------------------------------------------------- SUMMARY: census-based groups
+
+    // THE LIVE SHAPE the group census exists for (audit High-2): a fallback with a few matured rows and
+    // an ML model whose hundreds of rows are ALL still pending. The old matured-only GroupBy erased the
+    // model from the summary entirely, so an admin could not tell "no data yet" from "no such model".
+    // The model group must exist, say plainly that nothing is scored yet (maturedCount 0, null metrics
+    // — never fabricated zeros), and say when the first real score becomes POSSIBLE.
+    [Fact]
+    public async Task Summary_PendingOnlyGroup_Appears_WithNullMetricsAndTheDateAScoreBecomesPossible()
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(predictor: Fallback, modelVersion: null, percentageError: 5m));
+        store.AddPending(Model, "v16", harvestDate: new DateOnly(2026, 9, 20));
+        store.AddPending(Model, "v16", harvestDate: new DateOnly(2026, 9, 15)); // the earliest
+        store.AddPending(Model, "v16", harvestDate: new DateOnly(2026, 11, 2));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        dto.ByActivePredictor.Should().HaveCount(2); // the model is PRESENT despite zero matured rows
+
+        var model = dto.ByActivePredictor.Single(g => g.ActivePredictor == Model);
+        model.Census.Total.Should().Be(3);
+        model.Census.Pending.Should().Be(3);
+        model.Census.Matured.Should().Be(0);
+        model.Census.ActualUnavailable.Should().Be(0);
+        model.Census.NotMaturable.Should().Be(0);
+        model.Census.EarliestScoreableHarvestDate.Should().Be("2026-09-15"); // min PENDING harvest date
+        model.Metrics.MaturedCount.Should().Be(0);
+        model.Metrics.ScoredCount.Should().Be(0);
+        model.Metrics.Mape.Should().BeNull();       // not yet scored — null, never 0.0 dressed up
+        model.Metrics.MedianApe.Should().BeNull();
+        model.Metrics.SignedBias.Should().BeNull();
+        model.Metrics.SkillVsBaseline.Should().BeNull();
+        model.Metrics.IntervalCoverage.Should().BeNull();
+        model.Metrics.DirectionalAccuracy.Should().BeNull();
+
+        // The same group exists on the per-version list, still keyed by predictor.
+        var version = dto.ByModelVersion.Single(g => g.ModelVersion == "v16" && g.ActivePredictor == Model);
+        version.Census.Pending.Should().Be(3);
+        version.Census.EarliestScoreableHarvestDate.Should().Be("2026-09-15");
+        version.Metrics.MaturedCount.Should().Be(0);
+        version.Metrics.Mape.Should().BeNull();
+
+        // And the fallback's matured-row metrics are exactly what they were before the census existed.
+        var fallback = dto.ByActivePredictor.Single(g => g.ActivePredictor == Fallback);
+        fallback.Census.Matured.Should().Be(1);
+        fallback.Census.Pending.Should().Be(0);
+        fallback.Metrics.MaturedCount.Should().Be(1);
+        fallback.Metrics.Mape.Should().Be(5.00m);
+    }
+
+    // A group with nothing in flight has no forthcoming score, so the date is NULL — not a date scraped
+    // off its terminal rows. The fixture plants harvest dates on matured AND actual_unavailable cells
+    // precisely so a leak from a terminal cell would be caught, not silently plausible.
+    [Fact]
+    public async Task Summary_GroupWithNoPendingRows_HasNullEarliestScoreableHarvestDate()
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(percentageError: 5m)); // matured census fact carries a harvest date
+        store.AddCensusFact(Model, "v17", ForecastSnapshotMaturityStates.ActualUnavailable,
+            harvestDate: new DateOnly(2020, 1, 1)); // earlier than anything — must still not surface
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        var model = dto.ByActivePredictor.Single(g => g.ActivePredictor == Model);
+        model.Census.Pending.Should().Be(0);
+        model.Census.EarliestScoreableHarvestDate.Should().BeNull();
+    }
+
+    // The date is NOT forward-looking and must never be clamped to today. A pending row is scored on
+    // harvest day only if a price published that exact day; otherwise it sits pending through the
+    // maturity grace window — and if the nightly sweep stops running, it sits there indefinitely. So a
+    // PAST earliestScoreableHarvestDate is a routine, load-bearing signal ("pending rows are overdue —
+    // waiting on a published price, or the sweep is stuck"), and clamping it away would dress that
+    // warning up as a promise.
+    [Fact]
+    public async Task Summary_EarliestScoreableHarvestDate_PastDateMeansOverduePendingRows_NotClamped()
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var store = new FakeStore();
+        store.AddPending(Model, "v16", harvestDate: today.AddDays(-21)); // harvested weeks ago, still unpriced
+        store.AddPending(Model, "v16", harvestDate: today.AddDays(30));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        var model = dto.ByActivePredictor.Single(g => g.ActivePredictor == Model);
+        model.Census.Pending.Should().Be(2);
+        model.Census.EarliestScoreableHarvestDate.Should()
+            .Be(today.AddDays(-21).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                "the past date is the overdue signal — returned as-is, never clamped to today");
+    }
+
+    // Reachable only if the writer misbehaves — serving/snapshots.py assigns pending only when a
+    // harvest date exists — but no DB constraint ties state to HarvestDate, so the maths must answer
+    // null, not throw, when every pending cell's date is null. Seeded via AddCensusFact directly:
+    // AddPending (like the writer) refuses to model a dateless pending row.
+    [Fact]
+    public async Task Summary_AllPendingHarvestDatesNull_EarliestScoreableHarvestDateIsNull()
+    {
+        var store = new FakeStore();
+        store.AddCensusFact(Model, "v17", ForecastSnapshotMaturityStates.Pending, harvestDate: null);
+        store.AddCensusFact(Model, "v17", ForecastSnapshotMaturityStates.Pending, harvestDate: null);
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        var model = dto.ByActivePredictor.Single(g => g.ActivePredictor == Model);
+        model.Census.Pending.Should().Be(2);
+        model.Census.EarliestScoreableHarvestDate.Should().BeNull(
+            "Min over all-null dates is null — the rows still count as pending, but no date can be named");
+    }
+
+    // Every lifecycle state is counted, and Total is summed independently of the four buckets (same
+    // arithmetic-gap defence as the top-level counts).
+    [Fact]
+    public async Task Summary_GroupCensus_CountsEveryLifecycleState()
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(percentageError: 5m));
+        store.AddPending(Model, "v17", harvestDate: new DateOnly(2026, 10, 1));
+        store.AddPending(Model, "v17", harvestDate: new DateOnly(2026, 10, 8));
+        store.AddCensusFact(Model, "v17", ForecastSnapshotMaturityStates.ActualUnavailable,
+            harvestDate: new DateOnly(2026, 8, 1));
+        store.AddCensusFact(Model, "v17", ForecastSnapshotMaturityStates.ActualUnavailable,
+            harvestDate: new DateOnly(2026, 8, 2));
+        store.AddCensusFact(Model, "v17", ForecastSnapshotMaturityStates.NotMaturable); // no harvest date, ever
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        var census = dto.ByActivePredictor.Single(g => g.ActivePredictor == Model).Census;
+        census.Total.Should().Be(6);
+        census.Pending.Should().Be(2);
+        census.Matured.Should().Be(1);
+        census.ActualUnavailable.Should().Be(2);
+        census.NotMaturable.Should().Be(1);
+        census.EarliestScoreableHarvestDate.Should().Be("2026-10-01"); // from the PENDING rows only
+    }
+
+    // The arithmetic-gap defence, end to end: a mis-cased state (the DB's BIN2 CHECK should make one
+    // impossible, which is exactly when a silent absorb would go unnoticed) lands in the group's Total
+    // but in NO named bucket — total > sum of buckets, a visible defect. This is the test that stops
+    // someone "simplifying" Total into the sum of the four buckets. Ordinal matching also means the
+    // mis-cased cell is NOT the pending bucket, so its harvest date must not surface either.
+    [Fact]
+    public async Task Summary_MisCasedState_LandsInTotalButNoBucket_SoTheGapIsVisible()
+    {
+        var store = new FakeStore();
+        store.AddPending(Model, "v17", harvestDate: new DateOnly(2026, 10, 1));
+        store.AddCensusFact(Model, "v17", "Pending", harvestDate: new DateOnly(2026, 1, 1)); // mis-cased
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        var census = dto.ByActivePredictor.Single(g => g.ActivePredictor == Model).Census;
+        census.Total.Should().Be(2);
+        (census.Pending + census.Matured + census.ActualUnavailable + census.NotMaturable)
+            .Should().Be(1, "the mis-cased row is in Total and in no bucket — the gap IS the alarm");
+        census.Pending.Should().Be(1);
+        census.EarliestScoreableHarvestDate.Should().Be("2026-10-01",
+            "\"Pending\" is not pending: its earlier date must not masquerade as the scoreable date");
+    }
+
+    // CensusOf's only non-trivial arithmetic, exercised across more than one cell: ByPredictor folds
+    // EVERY version's cells of one predictor into a single census — counts SUM across versions per
+    // state, and the earliest scoreable date is the MIN across BOTH versions' pending cells — while
+    // ByModelVersion keeps the very same cells apart, each version with its own min.
+    [Fact]
+    public async Task Summary_ByPredictor_FoldsAllVersionsOfAPredictor_SummingStatesAndTakingTheMinPendingDate()
+    {
+        var store = new FakeStore();
+        // v16: two pending (the later dates) + one matured + one actual_unavailable.
+        store.AddPending(Model, "v16", harvestDate: new DateOnly(2026, 10, 1));
+        store.AddPending(Model, "v16", harvestDate: new DateOnly(2026, 12, 1));
+        store.AddMatured(SRow(modelVersion: "v16", percentageError: 8m));
+        store.AddCensusFact(Model, "v16", ForecastSnapshotMaturityStates.ActualUnavailable,
+            harvestDate: new DateOnly(2026, 7, 1)); // terminal cell's date — must not win the min
+        // v17: the earliest pending date of all + one matured.
+        store.AddPending(Model, "v17", harvestDate: new DateOnly(2026, 9, 15));
+        store.AddMatured(SRow(modelVersion: "v17", percentageError: 4m));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        var model = dto.ByActivePredictor.Single(g => g.ActivePredictor == Model);
+        model.Census.Total.Should().Be(6);
+        model.Census.Pending.Should().Be(3);           // 2 (v16) + 1 (v17)
+        model.Census.Matured.Should().Be(2);           // 1 + 1 across versions
+        model.Census.ActualUnavailable.Should().Be(1);
+        model.Census.NotMaturable.Should().Be(0);
+        model.Census.EarliestScoreableHarvestDate.Should().Be("2026-09-15",
+            "the min runs across BOTH versions' pending cells, not the first cell encountered");
+
+        // The same cells, per version: each keeps its own count and its own min.
+        var v16 = dto.ByModelVersion.Single(g => g.ModelVersion == "v16" && g.ActivePredictor == Model);
+        v16.Census.Pending.Should().Be(2);
+        v16.Census.EarliestScoreableHarvestDate.Should().Be("2026-10-01");
+        var v17 = dto.ByModelVersion.Single(g => g.ModelVersion == "v17" && g.ActivePredictor == Model);
+        v17.Census.Pending.Should().Be(1);
+        v17.Census.EarliestScoreableHarvestDate.Should().Be("2026-09-15");
+    }
+
+    // The census respects windowDays exactly as the metrics do — ONE cutoff date reaches both store
+    // reads — so a pending row that aged out neither keeps its group alive nor drags the
+    // earliest-scoreable date backwards. Within the window, a group with census rows but no matured
+    // rows is the expected shape, not an inconsistency.
+    [Fact]
+    public async Task Summary_GroupCensus_RespectsTheSameWindowAsTheMetrics()
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var store = new FakeStore();
+        // Model: an aged-out pending row with the EARLIER harvest date, one pending row inside.
+        store.AddPending(Model, "v16", harvestDate: today.AddDays(5), snapshotDate: today.AddDays(-400));
+        store.AddPending(Model, "v16", harvestDate: today.AddDays(60), snapshotDate: today.AddDays(-3));
+        // Fallback: ONLY aged-out rows — no group at all inside the window.
+        store.AddPending(Fallback, null, harvestDate: today.AddDays(10), snapshotDate: today.AddDays(-400));
+
+        var dto = (await SummaryHandler(store).Handle(
+            new GetForecastAccuracySummaryQuery { WindowDays = 30 }, default)).Data;
+
+        store.CapturedCensusFromSnapshotDate.Should().Be(today.AddDays(-30));
+        store.CapturedCensusFromSnapshotDate.Should().Be(store.CapturedFromSnapshotDate); // one window, both reads
+
+        var model = dto.ByActivePredictor.Should().ContainSingle().Subject;
+        model.ActivePredictor.Should().Be(Model);
+        model.Census.Pending.Should().Be(1); // the aged-out row left the census too
+        model.Census.EarliestScoreableHarvestDate.Should()
+            .Be(today.AddDays(60).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+    }
+
+    // The group keys are the UNION of the census and matured reads: a matured key the census read
+    // returned no cells for still gets its group — with an all-zero census — rather than vanishing
+    // from the page. No RACE can produce this shape (the matured rows are read FIRST, nothing deletes
+    // snapshot rows, and maturing never rewrites a row's predictor or version; a row maturing between
+    // the reads only puts census.matured one above maturedCount), so the fixture fakes the divergence
+    // directly. In reality it would take casing/whitespace divergence between the ordinal C# grouping
+    // and the SQL GROUP BY's case-insensitive collation — the axis named on the FakeStore comment
+    // above. A cheap defence against key-set divergence between two independent reads, kept.
+    [Fact]
+    public async Task Summary_MaturedRowMissingFromTheCensusRead_StillFormsItsGroup()
+    {
+        var store = new FakeStore();
+        // Straight into the matured list, deliberately bypassing AddMatured's census fact.
+        store.Matured.Add((SRow(percentageError: 5m), DateOnly.FromDateTime(DateTime.UtcNow)));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        var g = dto.ByActivePredictor.Should().ContainSingle().Subject;
+        g.Metrics.MaturedCount.Should().Be(1);
+        g.Metrics.Mape.Should().Be(5.00m);
+        g.Census.Total.Should().Be(0); // the census read had no cells for this key — visible divergence, not a lost group
     }
 
     // ---------------------------------------------------------------- SNAPSHOTS: paging and filters
