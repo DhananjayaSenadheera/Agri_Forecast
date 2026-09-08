@@ -413,6 +413,8 @@ public class ForecastAccuracyHandlerTests
         m.IntervalCoverage.Should().BeNull();
         m.IntervalCoverageGap.Should().BeNull();
         m.DirectionalAccuracy.Should().BeNull();
+        m.DirectionalDegenerate.Should().Be(0); // unassessable is EXCLUDED, not a copy-claim
+        m.DirectionalExcluded.Should().Be(1);
     }
 
     // ---------------------------------------------------------------- SUMMARY: the do-nothing baseline
@@ -596,6 +598,11 @@ public class ForecastAccuracyHandlerTests
         m.SkillVsBaseline.Should().BeNull();
         m.PredictionEqualsReferenceCount.Should().Be(0);
         m.PredictionEqualsReferenceShare.Should().BeNull();
+        // The two "copy" counts run over DIFFERENT populations, pinned here: the pred==ref row has no
+        // error columns, so it is invisible to predictionEqualsReferenceCount (anchored rows only) —
+        // yet it IS price-complete, so the directional partition counts it as degenerate.
+        m.DirectionalDegenerate.Should().Be(1);
+        m.DirectionalExcluded.Should().Be(1);
     }
 
     // ---------------------------------------------------------------- SUMMARY: directional accuracy
@@ -617,6 +624,7 @@ public class ForecastAccuracyHandlerTests
         var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
 
         m.DirectionalScored.Should().Be(4);
+        m.DirectionalDegenerate.Should().Be(0);
         m.DirectionalExcluded.Should().Be(0);
         m.DirectionalAccuracy.Should().Be(0.5000m);
     }
@@ -630,26 +638,99 @@ public class ForecastAccuracyHandlerTests
         store.AddMatured(SRow(predictedPrice: 105m, actualPrice: 100m, referencePrice: 90m)); // hit
         store.AddMatured(SRow(referencePrice: null));  // no anchor
         store.AddMatured(SRow(actualPrice: null));     // never scored against an actual
+        // Bucket precedence, pinned: pred == ref but no actual — assessability is tested FIRST, so
+        // this row is EXCLUDED; the degenerate test never sees it.
+        store.AddMatured(SRow(predictedPrice: 90m, referencePrice: 90m, actualPrice: null));
 
         var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
 
-        m.MaturedCount.Should().Be(3);
+        m.MaturedCount.Should().Be(4);
         m.DirectionalScored.Should().Be(1);
-        m.DirectionalExcluded.Should().Be(2);
+        m.DirectionalDegenerate.Should().Be(0); // no anchor to be equal TO — excluded, not degenerate
+        m.DirectionalExcluded.Should().Be(3);
         m.DirectionalAccuracy.Should().Be(1.0000m); // 1/1, NOT 1/3
     }
 
-    // An exactly flat prediction is a hit only against an exactly flat actual (deadband 0, mirroring
-    // the Python evaluate.directional_accuracy default).
-    [Fact]
-    public async Task Summary_DirectionalAccuracy_FlatPrediction_MatchesOnlyAFlatActual()
+    // THE PROPERTY the degenerate bucket exists to guarantee: a copy-prediction (pred value-equal to
+    // the reference, same convention as predictionEqualsReferenceCount) must NEVER move
+    // directionalAccuracy — whatever its actual price does. The flat-actual case is the one that used
+    // to score a free "hit" (sign 0 == sign 0), which is how 16 copy rows once read as 87.5%: the
+    // figure measured price stasis, not model skill.
+    [Theory]
+    [InlineData(90)]  // actual flat — the previously-inflating case
+    [InlineData(95)]  // actual up
+    [InlineData(85)]  // actual down
+    public async Task Summary_CopyPredictionRow_NeverMovesDirectionalAccuracy_WhateverTheActualDoes(
+        int actualPrice)
     {
         var store = new FakeStore();
-        store.AddMatured(SRow(predictedPrice: 90m, actualPrice: 90m, referencePrice: 90m));  // hit
-        store.AddMatured(SRow(predictedPrice: 90m, actualPrice: 95m, referencePrice: 90m));  // miss
+        store.AddMatured(SRow(predictedPrice: 105m, actualPrice: 100m, referencePrice: 90m)); // hit
+        store.AddMatured(SRow(predictedPrice: 80m, actualPrice: 95m, referencePrice: 90m));   // miss
+        // The copy row: no directional opinion, counted but never scored — neither hit nor miss.
+        store.AddMatured(SRow(predictedPrice: 90m, actualPrice: actualPrice, referencePrice: 90m));
 
-        MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model)
-            .DirectionalAccuracy.Should().Be(0.5000m);
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.DirectionalScored.Should().Be(2);
+        m.DirectionalDegenerate.Should().Be(1);
+        m.DirectionalExcluded.Should().Be(0);
+        m.DirectionalAccuracy.Should().Be(0.5000m); // 1/2 with or without the copy row
+    }
+
+    // TODAY'S LIVE SITUATION: every matured row is a fallback copy of its reference. The old scoring
+    // read this as 87.5% "accuracy"; the honest answer is null — nothing scorable — with the
+    // degenerate count carrying the whole population so the page can say WHY there is no figure.
+    [Fact]
+    public async Task Summary_AllPredictionsCopyTheReference_DirectionalAccuracyIsNull_AndTheDegenerateCountSaysSo()
+    {
+        var store = new FakeStore();
+        for (var i = 0; i < 16; i++)
+            store.AddMatured(SRow(predictor: Fallback, predictedPrice: 90m, actualPrice: 90m,
+                referencePrice: 90m, percentageError: 0m, signedError: 0m));
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Fallback);
+
+        m.MaturedCount.Should().Be(16);
+        m.DirectionalScored.Should().Be(0);
+        m.DirectionalDegenerate.Should().Be(16);
+        m.DirectionalExcluded.Should().Be(0);
+        m.DirectionalAccuracy.Should().BeNull(); // NOT 0 (nothing missed) and NOT 1 (nothing hit)
+    }
+
+    // Mixed population: the figure is computed over the real predictions only, and the three buckets
+    // partition the matured rows exactly — scored + degenerate + excluded = maturedCount.
+    [Fact]
+    public async Task Summary_CopiesAndRealPredictionsMixed_AccuracyCoversTheRealOnesOnly()
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(predictedPrice: 105m, actualPrice: 100m, referencePrice: 90m)); // hit
+        store.AddMatured(SRow(predictedPrice: 105m, actualPrice: 85m, referencePrice: 90m));  // miss
+        store.AddMatured(SRow(predictedPrice: 90m, actualPrice: 90m, referencePrice: 90m));   // copy
+        store.AddMatured(SRow(predictedPrice: 90m, actualPrice: 95m, referencePrice: 90m));   // copy
+        store.AddMatured(SRow(referencePrice: null));                                         // no anchor
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.MaturedCount.Should().Be(5);
+        m.DirectionalScored.Should().Be(2);
+        m.DirectionalDegenerate.Should().Be(2);
+        m.DirectionalExcluded.Should().Be(1);
+        m.DirectionalAccuracy.Should().Be(0.5000m); // 1/2, NOT 3/4 (copies not hits) and NOT 1/5
+    }
+
+    // Deliberate asymmetry: a REAL prediction against an exactly flat actual is a miss — the model
+    // claimed a move that didn't happen. Only the zero-claim (copy) rows are exempt from scoring.
+    [Fact]
+    public async Task Summary_FlatActual_WithANonzeroPrediction_StaysAMiss()
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(predictedPrice: 105m, actualPrice: 90m, referencePrice: 90m));
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.DirectionalScored.Should().Be(1);
+        m.DirectionalDegenerate.Should().Be(0);
+        m.DirectionalAccuracy.Should().Be(0.0000m); // a measured miss, which is a different fact from null
     }
 
     // ---------------------------------------------------------------- SUMMARY: the window

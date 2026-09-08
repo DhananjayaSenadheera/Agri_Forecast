@@ -86,6 +86,7 @@ public class GetForecastAccuracySummaryQueryHandler
         IntervalCoverageGap = m.IntervalCoverageGap,
         DirectionalAccuracy = m.DirectionalAccuracy,
         DirectionalScored = m.DirectionalScored,
+        DirectionalDegenerate = m.DirectionalDegenerate,
         DirectionalExcluded = m.DirectionalExcluded
     };
 

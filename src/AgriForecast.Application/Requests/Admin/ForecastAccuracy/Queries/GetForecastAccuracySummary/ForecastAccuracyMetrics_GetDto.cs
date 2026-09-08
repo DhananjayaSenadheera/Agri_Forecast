@@ -85,13 +85,29 @@ public class ForecastAccuracyMetrics_GetDto
     public decimal? IntervalCoverageGap { get; set; }
 
     // Share of rows where the forecast called the direction of the move correctly against the
-    // plant-day reference price, 0..1.
+    // plant-day reference price, 0..1. Computed over directionalScored rows ONLY — degenerate and
+    // excluded rows contribute neither hits nor misses. Null when nothing is scorable: an empty
+    // population reports null, never a fabricated 0 or 1 (measured values of 0 and 1 are real).
     public decimal? DirectionalAccuracy { get; set; }
 
-    // Rows the directional figure was computed over, and rows excluded from it because no reference or
-    // actual price was available. Excluded rows are NOT counted as misses — there was no direction to
-    // get right — so this pair must be shown wherever directionalAccuracy is.
+    // Rows the directional figure was computed over. Every matured row lands in exactly one of
+    // scored / degenerate / excluded, so the three counts must be shown wherever directionalAccuracy is.
     public int DirectionalScored { get; set; }
+
+    // Assessable rows whose predictedPrice is value-equal to referencePrice: the predicted move is
+    // exactly zero, so there is no direction to score. Counted here, never scored. Equality cannot
+    // distinguish a fallback COPY of the carry-forward anchor from a model genuinely forecasting
+    // "no change" — for fallback-served groups these are copies; for model groups read it only as
+    // "no directional opinion". NOT the same population as predictionEqualsReferenceCount: that
+    // count runs over anchored rows (both prices AND stored error columns), this one over all
+    // price-complete rows, so the two can legitimately differ. A directional accuracy shown
+    // alongside a high degenerate count was previously inflated by these rows: each one scored a
+    // "hit" whenever the actual price sat exactly flat, so the figure measured price stasis, not
+    // model skill.
+    public int DirectionalDegenerate { get; set; }
+
+    // Rows excluded because no reference or actual price was available. NOT counted as misses — there
+    // was no direction to get right or wrong about.
     public int DirectionalExcluded { get; set; }
 }
 
