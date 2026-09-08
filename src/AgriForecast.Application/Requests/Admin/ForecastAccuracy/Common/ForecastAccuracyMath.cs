@@ -65,6 +65,7 @@ public static class ForecastAccuracyMath
         decimal? IntervalCoverageGap,
         decimal? DirectionalAccuracy,
         int DirectionalScored,
+        int DirectionalDegenerate,
         int DirectionalExcluded);
 
     /// <summary>Metrics for one ActivePredictor across every model version.</summary>
@@ -200,6 +201,7 @@ public static class ForecastAccuracyMath
             IntervalCoverageGap: coverage is null ? null : Round(coverage.Value - NominalIntervalCoverage, RateDecimals),
             DirectionalAccuracy: direction.Accuracy,
             DirectionalScored: direction.Scored,
+            DirectionalDegenerate: direction.Degenerate,
             DirectionalExcluded: direction.Excluded);
     }
 
@@ -209,29 +211,63 @@ public static class ForecastAccuracyMath
     /// sign(ActualPrice − ReferencePrice), and a row counts as a hit when the two signs agree.
     /// </summary>
     /// <remarks>
-    /// Rows with a NULL ReferencePrice (no carry-forward anchor existed at snapshot time) or a NULL
-    /// ActualPrice are EXCLUDED, not scored as misses — there is no direction to be right or wrong
-    /// about. The excluded count is returned so the figure is never read as covering more rows than it
-    /// does. Mirrors the Python evaluate.directional_accuracy contract
-    /// {directional_acc, n_scored, n_excluded} with its default deadband of 0, so an exactly flat
-    /// prediction (sign 0) is a hit only against an exactly flat actual.
+    /// Every matured row lands in exactly ONE of three buckets:
+    ///
+    ///   EXCLUDED — NULL ReferencePrice (no carry-forward anchor existed at snapshot time) or NULL
+    ///   ActualPrice. Not scored as misses: there is no direction to be right or wrong about.
+    ///
+    ///   DEGENERATE — assessable rows whose PredictedPrice is value-equal to ReferencePrice (the same
+    ///   decimal-equality convention as PredictionEqualsReferenceCount). The predicted move is exactly
+    ///   zero, so there is no nonzero direction to score. Counted, never scored — neither hit nor
+    ///   miss. Equality alone cannot tell a fallback COPY of the anchor from a model that genuinely
+    ///   forecasts "no change"; both land here. Under the old scoring, sign(0) == sign(0) made every
+    ///   such row a "hit" whenever the actual price sat exactly flat, so a fallback that copies the
+    ///   reference scored high by measuring price stasis, not model skill.
+    ///
+    ///   SCORED — the rest, scored sign-vs-sign as before. A scored row where the actual move is flat
+    ///   but the predicted move is nonzero stays a MISS: the model claimed a move that didn't happen.
+    ///
+    /// Every bucket's count is returned so the figure is never read as covering more rows than it
+    /// does. The Python evaluate.directional_accuracy contract {directional_acc, n_scored, n_excluded}
+    /// deliberately differs from this in TWO ways: it has no degenerate bucket (deadband-0 scores
+    /// sign 0 against sign 0 as a hit), and it scores a flat prediction against a moving actual as a
+    /// MISS — its stated policy is "hedging is not rewarded". Here a flat prediction is not scored at
+    /// all, so hedging is neither rewarded nor punished: the .NET summary is the admin-facing figure
+    /// and must not count stasis as skill, at the accepted cost of not penalising flat forecasts.
+    /// Accuracy is null (not 0, not 1) when nothing is scorable.
     /// </remarks>
-    private static (decimal? Accuracy, int Scored, int Excluded) Directional(
+    private static (decimal? Accuracy, int Scored, int Degenerate, int Excluded) Directional(
         IReadOnlyList<ForecastSnapshotScoringRow> rows)
     {
-        var scorable = rows
+        var assessable = rows
             .Where(r => r.ReferencePrice.HasValue && r.ActualPrice.HasValue)
             .ToList();
 
-        var excluded = rows.Count - scorable.Count;
-        if (scorable.Count == 0)
-            return (null, 0, excluded);
+        var excluded = rows.Count - assessable.Count;
 
+        // Same value-equality convention as PredictionEqualsReferenceCount above: both prices are
+        // stored decimal(10,2), so equality is meaningful. Known UNDER-detection: the two prices are
+        // rounded by different code before storage (Python round-half-even for the prediction, SQL
+        // decimal rounding for the raw reference), so a true carry-forward copy can arrive one cent
+        // apart and slip into SCORED with a one-cent "move". Whether the copy test should tolerate
+        // ±0.01 — here and in PredictionEqualsReferenceCount together — is an open follow-up
+        // decision, not an accident.
+        var scorable = assessable
+            .Where(r => r.PredictedPrice != r.ReferencePrice!.Value)
+            .ToList();
+        var degenerate = assessable.Count - scorable.Count;
+
+        if (scorable.Count == 0)
+            return (null, 0, degenerate, excluded);
+
+        // Deliberate: a nonzero predicted move against an exactly flat actual is a MISS — the model
+        // claimed a move that didn't happen. (A zero predicted move cannot reach here; that is the
+        // degenerate bucket.)
         var hits = scorable.Count(r =>
             Math.Sign(r.PredictedPrice - r.ReferencePrice!.Value) ==
             Math.Sign(r.ActualPrice!.Value - r.ReferencePrice!.Value));
 
-        return (Round((decimal)hits / scorable.Count, RateDecimals), scorable.Count, excluded);
+        return (Round((decimal)hits / scorable.Count, RateDecimals), scorable.Count, degenerate, excluded);
     }
 
     // Standard median: the middle value, or the mean of the two middle values on an even count.
