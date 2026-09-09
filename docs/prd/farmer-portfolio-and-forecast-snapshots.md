@@ -120,6 +120,15 @@ Aggregates (windowed/filtered): MAPE, **medianAPE** (robust headline), **interva
 - Application area `Requests/Admin/ForecastAccuracy/` (correct `Queries/` spelling), read-store seam `IForecastAccuracyReadStore` (AsNoTracking), house DTO naming.
 - **FE:** 5th tab **"Forecast accuracy"** in the admin Logs hub, following the existing tab patterns; i18n namespace `admin.forecastAccuracy.*`.
 
+### 4.5 Delivered `/summary` breakdowns (A4, 2026-09)
+
+Recorded here because the delivered shape settles four points the specs left open (one per bullet below); code of record: `ForecastAccuracyMath` + `GetForecastAccuracySummaryQueryHandler`.
+
+- **Horizon buckets** `byHorizonBucket`: matured rows bucketed by served growth period — short < 60 days, medium 60–120 inclusive, long > 120, plus `unknown` only when occupied — **keyed by (activePredictor, bucket)**. The survivorship disclosure: a short window can only contain fast-maturing crops, and pooling horizons hid that inside the average.
+- **Macro (per-crop-weighted) averages** `macroMape`/`macroMedianApe` ride on **every predictor-keyed metrics object**, NOT as a top-level figure. Deliberate deviation from the task wording "at the summary level": a top-level macro would pool model- and fallback-served rows and violate law §3-4. Same split-law reasoning as everything else on this surface.
+- **Worst-crops triage list** `worstCrops`: up to 10 entries **per predictor** (each predictor contributes up to 10 of its own worst crops; the concatenation is re-sorted worst-first for display — a single global cap let one predictor's bad crops starve the other's off the list), **keyed by (activePredictor, cropId)** (law §3-4 — an entry pooling a crop's predictors is a blended accuracy number), ranked worst-first by the pair's medianApe over **non-copy scored rows only** (copies — prediction value-equal to the carry-forward anchor — have APE ≈ 0 and would demote exactly the crops the list exists to surface). Qualification: ≥ `worstCropMinScoredCount` (5) non-copy rows; each entry disclosed with `scoredCount`/`copyCount` and a `meetsMinimumSample` badge against the 30-row metrics gate (small-sample entries are flagged, never hidden). A crop whose rows are all copies has no measured forecasts and cannot be ranked — with today's all-fallback-copy data the list is **empty by design**, with the threshold on the wire so the page can say why.
+- **Minimum-sample gate**: threshold 30, applied **per denominator** — mape/medianApe/signedBias against `scoredCount`, the baseline trio against `baselineScoredCount`, `directionalAccuracy` against `directionalScored`, `intervalCoverage(+gap)` against `intervalScoredCount`. The macro pair alone has **two bars, rows and crops**: `scoredCount` ≥ 30 AND `distinctCropCount` ≥ 3 (`MinDistinctCropsForMacro` — a mean over fewer than 3 crops is not a "typical crop"; at 1 it duplicates micro, at 2 a single crop carries half the crop-weight). `meetsMinimumSample` reports the headline (`scoredCount`) decision only; every count always ships, so a masked figure renders as "n, below the 30-row minimum", never as a silent gap.
+
 ---
 
 ## 5. Phases 1–3 — Farmer portfolio

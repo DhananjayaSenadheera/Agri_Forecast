@@ -8,15 +8,29 @@ namespace AgriForecast.Application.Requests.Admin.ForecastAccuracy.Queries.GetFo
 
 // Three reads (the all-time state census, then the matured scoring rows and the per-group census, both
 // inside the window) and the aggregation from ForecastAccuracyMath. The handler stays a mapper: all the
-// maths is in that one tested class, and the DB is behind IForecastAccuracyReadStore.
+// maths is in that one tested class, and the DB is behind IForecastAccuracyReadStore. The horizon
+// buckets, worst-crops list and crop-level macro figures all fold the SAME matured read in memory —
+// still three queries total, never one per crop or bucket.
 //
 // An empty table is a normal answer, not an error: zero counts, null latest date, and empty group lists.
 public class GetForecastAccuracySummaryQueryHandler
     : IRequestHandler<GetForecastAccuracySummaryQuery, Result<ForecastAccuracySummary_GetDto>>
 {
     private readonly IForecastAccuracyReadStore _store;
+    private readonly int _minScoredCountForMetrics;
 
-    public GetForecastAccuracySummaryQueryHandler(IForecastAccuracyReadStore store) => _store = store;
+    // The gate threshold is a constructor seam, NOT a query parameter: production always runs at the
+    // constant (the DI container cannot resolve the int, so it takes the default — the documented
+    // MS.DI behaviour for defaulted parameters), while the metric-value tests pass 0 to pin the
+    // unmasked arithmetic on small seeded populations. A query parameter would let a caller switch
+    // the honesty off over the wire.
+    public GetForecastAccuracySummaryQueryHandler(
+        IForecastAccuracyReadStore store,
+        int minScoredCountForMetrics = ForecastAccuracyMath.MinScoredCountForMetrics)
+    {
+        _store = store;
+        _minScoredCountForMetrics = minScoredCountForMetrics;
+    }
 
     public async Task<Result<ForecastAccuracySummary_GetDto>> Handle(
         GetForecastAccuracySummaryQuery request, CancellationToken cancellationToken)
@@ -68,7 +82,33 @@ public class GetForecastAccuracySummaryQueryHandler
                     Census = ToDto(g.Census),
                     Metrics = ToDto(g.Metrics)
                 })
-                .ToList()
+                .ToList(),
+            ByHorizonBucket = ForecastAccuracyMath.ByHorizonBucket(matured)
+                .Select(g => new HorizonBucketAccuracy_GetDto
+                {
+                    ActivePredictor = g.ActivePredictor,
+                    HorizonBucket = g.HorizonBucket,
+                    Metrics = ToDto(g.Metrics)
+                })
+                .ToList(),
+            // The metrics-gate threshold reaches the per-entry MeetsMinimumSample badge through the
+            // same constructor seam the groups' gate uses, so the two honesty bars cannot diverge.
+            WorstCrops = ForecastAccuracyMath
+                .WorstCropsByMedianApe(matured, ForecastAccuracyMath.WorstCropMinScoredCount,
+                    _minScoredCountForMetrics)
+                .Select(c => new WorstCropAccuracy_GetDto
+                {
+                    ActivePredictor = c.ActivePredictor,
+                    CropId = c.CropId,
+                    CropName = c.CropName,
+                    ScoredCount = c.ScoredCount,
+                    CopyCount = c.CopyCount,
+                    MedianApe = c.MedianApe,
+                    Mape = c.Mape,
+                    MeetsMinimumSample = c.MeetsMinimumSample
+                })
+                .ToList(),
+            WorstCropMinScoredCount = ForecastAccuracyMath.WorstCropMinScoredCount
         };
 
         return Result<ForecastAccuracySummary_GetDto>.Success(dto);
@@ -86,29 +126,46 @@ public class GetForecastAccuracySummaryQueryHandler
             : null
     };
 
-    private static ForecastAccuracyMetrics_GetDto ToDto(ForecastAccuracyMath.AccuracyMetrics m) => new()
+    private ForecastAccuracyMetrics_GetDto ToDto(ForecastAccuracyMath.AccuracyMetrics unmasked)
     {
-        MaturedCount = m.MaturedCount,
-        ScoredCount = m.ScoredCount,
-        Mape = m.Mape,
-        MedianApe = m.MedianApe,
-        SignedBias = m.SignedBias,
-        BaselineScoredCount = m.BaselineScoredCount,
-        BaselineMape = m.BaselineMape,
-        BaselineMedianApe = m.BaselineMedianApe,
-        SkillVsBaseline = m.SkillVsBaseline,
-        PredictionEqualsReferenceCount = m.PredictionEqualsReferenceCount,
-        PredictionEqualsReferenceShare = m.PredictionEqualsReferenceShare,
-        IntervalScoredCount = m.IntervalScoredCount,
-        WithinIntervalCount = m.WithinIntervalCount,
-        IntervalCoverage = m.IntervalCoverage,
-        NominalIntervalCoverage = ForecastAccuracyMath.NominalIntervalCoverage,
-        IntervalCoverageGap = m.IntervalCoverageGap,
-        DirectionalAccuracy = m.DirectionalAccuracy,
-        DirectionalScored = m.DirectionalScored,
-        DirectionalDegenerate = m.DirectionalDegenerate,
-        DirectionalExcluded = m.DirectionalExcluded
-    };
+        // The gate is the LAST step before the wire, applied to fully-computed metrics: the arithmetic
+        // never knows the threshold exists (which is what keeps it testable at any population size),
+        // and everything below maps from the MASKED record so a gated group cannot leak a figure. The
+        // gate also owns the MeetsMinimumSample decision — mapped, never re-derived here, so there is
+        // exactly one implementation of the invariant.
+        var (m, meetsMinimumSample) = ForecastAccuracyMath.WithMinimumSampleGate(unmasked, _minScoredCountForMetrics);
+
+        return new ForecastAccuracyMetrics_GetDto
+        {
+            MaturedCount = m.MaturedCount,
+            ScoredCount = m.ScoredCount,
+            Mape = m.Mape,
+            MedianApe = m.MedianApe,
+            SignedBias = m.SignedBias,
+            BaselineScoredCount = m.BaselineScoredCount,
+            BaselineMape = m.BaselineMape,
+            BaselineMedianApe = m.BaselineMedianApe,
+            SkillVsBaseline = m.SkillVsBaseline,
+            PredictionEqualsReferenceCount = m.PredictionEqualsReferenceCount,
+            PredictionEqualsReferenceShare = m.PredictionEqualsReferenceShare,
+            IntervalScoredCount = m.IntervalScoredCount,
+            WithinIntervalCount = m.WithinIntervalCount,
+            IntervalCoverage = m.IntervalCoverage,
+            NominalIntervalCoverage = ForecastAccuracyMath.NominalIntervalCoverage,
+            IntervalCoverageGap = m.IntervalCoverageGap,
+            DirectionalAccuracy = m.DirectionalAccuracy,
+            DirectionalScored = m.DirectionalScored,
+            DirectionalDegenerate = m.DirectionalDegenerate,
+            DirectionalExcluded = m.DirectionalExcluded,
+            DistinctCropCount = m.DistinctCropCount,
+            MacroMape = m.MacroMape,
+            MacroMedianApe = m.MacroMedianApe,
+            MinGrowthPeriodDays = m.MinGrowthPeriodDays,
+            MaxGrowthPeriodDays = m.MaxGrowthPeriodDays,
+            MeetsMinimumSample = meetsMinimumSample,
+            MinScoredCountForMetrics = _minScoredCountForMetrics
+        };
+    }
 
     private static string Fmt(DateOnly d) => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 

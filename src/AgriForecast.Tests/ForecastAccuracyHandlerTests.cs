@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Reflection;
 using System.Text.Json;
 using AgriForecast.API.Controllers;
+using AgriForecast.Application.Dependency_Injection;
 using AgriForecast.Application.Requests.Admin.ForecastAccuracy.Common;
 using AgriForecast.Application.Requests.Admin.ForecastAccuracy.Queries.GetForecastAccuracySummary;
 using AgriForecast.Application.Requests.Admin.ForecastAccuracy.Queries.GetForecastSnapshots;
@@ -10,6 +11,7 @@ using AgriForecast.Domain.Constants;
 using FluentAssertions;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.DependencyInjection;
 using Moq;
 
 namespace AgriForecast.Tests;
@@ -128,14 +130,25 @@ public class ForecastAccuracyHandlerTests
         }
     }
 
-    private static GetForecastAccuracySummaryQueryHandler SummaryHandler(FakeStore s) => new(s);
+    // Threshold 0 by default: the metric-VALUE tests below pin the unmasked arithmetic on deliberately
+    // tiny populations, which the production minimum-sample gate would null wholesale. The gate has its
+    // own tests at the production constant (the "minimum-sample gate" section), and production DI takes
+    // the constant via the handler's parameter default.
+    private static GetForecastAccuracySummaryQueryHandler SummaryHandler(
+        FakeStore s, int minScoredCountForMetrics = 0) => new(s, minScoredCountForMetrics);
     private static GetForecastSnapshotsQueryHandler SnapshotsHandler(FakeStore s) => new(s);
 
     private const string Model = "residual";
     private const string Fallback = "crop_mean_fallback";
 
+    // One crop unless a test says otherwise, so distinctCropCount is 1 and macro == micro by
+    // construction in every test that is not about the crop axis.
+    private static readonly Guid DefaultCropId = Guid.NewGuid();
+
     // One matured scoring row. The error columns are given explicitly, exactly as the maturing pass
-    // freezes them, because that is what the handler must read rather than re-derive.
+    // freezes them, because that is what the handler must read rather than re-derive. The growth
+    // period defaults to 90 — a MEDIUM-bucket value — so horizon-boundary tests must say what they
+    // mean explicitly.
     private static ForecastSnapshotScoringRow SRow(
         string predictor = Model,
         string? modelVersion = "v17",
@@ -144,9 +157,13 @@ public class ForecastAccuracyHandlerTests
         bool? withinInterval = true,
         decimal predictedPrice = 105m,
         decimal? actualPrice = 100m,
-        decimal? referencePrice = 90m)
+        decimal? referencePrice = 90m,
+        Guid? cropId = null,
+        string cropName = "Carrot",
+        int? growthPeriodDays = 90)
         => new(predictor, modelVersion, predictedPrice, actualPrice, referencePrice,
-            signedError, percentageError, withinInterval);
+            signedError, percentageError, withinInterval,
+            cropId ?? DefaultCropId, cropName, growthPeriodDays);
 
     private static ForecastSnapshotListRow LRow(
         DateOnly snapshotDate,
@@ -200,6 +217,11 @@ public class ForecastAccuracyHandlerTests
         dto.LatestSnapshotDate.Should().BeNull();
         dto.ByActivePredictor.Should().BeEmpty();
         dto.ByModelVersion.Should().BeEmpty();
+        dto.ByHorizonBucket.Should().BeEmpty();
+        // An empty worst-crops list still ships its threshold, so the page can say "no crop has 5
+        // scored rows yet" instead of the misreading "no crop is bad".
+        dto.WorstCrops.Should().BeEmpty();
+        dto.WorstCropMinScoredCount.Should().Be(5);
     }
 
     [Fact]
@@ -234,37 +256,53 @@ public class ForecastAccuracyHandlerTests
 
     // ---------------------------------------------------------------- SUMMARY: the split law
 
-    // THE HARD LAW (PRD §3.4). A model serving a handful of crops well and a fallback serving most of
-    // them badly must never average into one number: seed a 4% model and a 40% fallback and prove both
-    // survive separately and that the 22% blend appears nowhere in the response.
+    // THE HARD LAW (PRD §3.4). A model serving a crop well and a fallback serving it badly must never
+    // average into one number: seed a 4% model and a 40% fallback ON THE SAME CROP and prove both
+    // survive separately and that the 22% blend appears nowhere in the response. 5 rows each so the
+    // crop qualifies for worstCrops under BOTH predictors — the exact fixture that once proved a
+    // crop-keyed worstCrops entry publishing mape 22.00, the number this test forbids.
     [Fact]
     public async Task Summary_ModelAndFallback_AreSplit_AndNoBlendedNumberExists()
     {
         var store = new FakeStore();
-        for (var i = 0; i < 4; i++)
-            store.AddMatured(SRow(predictor: Model, percentageError: 4m));
-        for (var i = 0; i < 4; i++)
-            store.AddMatured(SRow(predictor: Fallback, percentageError: 40m));
+        // Deterministic crop id: the serialized-response assertion below scans for "22", which a
+        // random GUID could contain by coincidence.
+        var crop = DeterministicGuid(1);
+        for (var i = 0; i < 5; i++)
+            store.AddMatured(SRow(predictor: Model, cropId: crop, percentageError: 4m));
+        for (var i = 0; i < 5; i++)
+            store.AddMatured(SRow(predictor: Fallback, cropId: crop, percentageError: 40m));
 
         var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
 
         dto.ByActivePredictor.Should().HaveCount(2);
         MetricsFor(dto, Model).Mape.Should().Be(4.00m);
-        MetricsFor(dto, Model).MaturedCount.Should().Be(4);
+        MetricsFor(dto, Model).MaturedCount.Should().Be(5);
         MetricsFor(dto, Fallback).Mape.Should().Be(40.00m);
-        MetricsFor(dto, Fallback).MaturedCount.Should().Be(4);
+        MetricsFor(dto, Fallback).MaturedCount.Should().Be(5);
 
-        // The blend — MAPE 22.00 over all 8 rows — must not be reachable anywhere on the wire. Only the
-        // aggregate groups are serialized here; generatedAtUtc is a timestamp and would match digits by
-        // coincidence.
+        // worstCrops obeys the same law: the one crop appears once PER PREDICTOR, each entry carrying
+        // that predictor's own figure — never one crop entry pooling the two into 22.00.
+        dto.WorstCrops.Should().HaveCount(2);
+        dto.WorstCrops.Single(c => c.ActivePredictor == Model).Mape.Should().Be(4.00m);
+        dto.WorstCrops.Single(c => c.ActivePredictor == Fallback).Mape.Should().Be(40.00m);
+
+        // The blend — MAPE 22.00 over all 10 rows — must not be reachable anywhere on the wire. The
+        // FULL aggregate surface is serialized here (predictor groups, version groups, horizon buckets
+        // AND worstCrops); generatedAtUtc is a timestamp and would match digits by coincidence, so it
+        // stays out. The horizon buckets and worstCrops are in scope precisely because both are
+        // predictor-keyed so nothing can pool the two predictors' rows back together.
         var everyMetric = dto.ByActivePredictor.Select(g => g.Metrics)
             .Concat(dto.ByModelVersion.Select(g => g.Metrics))
+            .Concat(dto.ByHorizonBucket.Select(g => g.Metrics))
             .ToList();
         everyMetric.Should().NotContain(m => m.Mape == 22.00m);
         everyMetric.Should().NotContain(m => m.MedianApe == 22.00m);
-        everyMetric.Should().NotContain(m => m.MaturedCount == 8); // no group covers all 8 rows
+        everyMetric.Should().NotContain(m => m.MaturedCount == 10); // no group covers all 10 rows
+        dto.WorstCrops.Should().NotContain(c => c.Mape == 22.00m || c.MedianApe == 22.00m);
 
-        JsonSerializer.Serialize(new { dto.ByActivePredictor, dto.ByModelVersion })
+        JsonSerializer.Serialize(new
+            { dto.ByActivePredictor, dto.ByModelVersion, dto.ByHorizonBucket, dto.WorstCrops })
             .Should().NotContain("22");
     }
 
@@ -1101,6 +1139,686 @@ public class ForecastAccuracyHandlerTests
         g.Census.Total.Should().Be(0); // the census read had no cells for this key — visible divergence, not a lost group
     }
 
+    // ---------------------------------------------------------------- SUMMARY: horizon buckets
+
+    private static ForecastAccuracyMetrics_GetDto BucketMetrics(
+        ForecastAccuracySummary_GetDto dto, string predictor, string bucket) =>
+        dto.ByHorizonBucket.Single(g => g.ActivePredictor == predictor && g.HorizonBucket == bucket)
+            .Metrics;
+
+    // THE BOUNDARY CONVENTION, pinned on the exact edge values: short = gp < 60, medium = 60..120
+    // inclusive on BOTH ends, long = gp > 120. Each row carries a distinct APE so a row landing in the
+    // wrong bucket shows up as a wrong mean, not just a wrong count.
+    [Fact]
+    public async Task Summary_HorizonBuckets_BoundaryRows_LandExactlyPerTheConvention()
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(growthPeriodDays: 59, percentageError: 10m));   // short, by one day
+        store.AddMatured(SRow(growthPeriodDays: 60, percentageError: 20m));   // medium — the boundary is medium
+        store.AddMatured(SRow(growthPeriodDays: 120, percentageError: 30m));  // medium — upper edge included
+        store.AddMatured(SRow(growthPeriodDays: 121, percentageError: 40m));  // long, by one day
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        BucketMetrics(dto, Model, "short").ScoredCount.Should().Be(1);
+        BucketMetrics(dto, Model, "short").Mape.Should().Be(10.00m);
+        BucketMetrics(dto, Model, "medium").ScoredCount.Should().Be(2);
+        BucketMetrics(dto, Model, "medium").Mape.Should().Be(25.00m); // 60 and 120, nothing else
+        BucketMetrics(dto, Model, "long").ScoredCount.Should().Be(1);
+        BucketMetrics(dto, Model, "long").Mape.Should().Be(40.00m);
+
+        // The bucket disclosures carry the observed spans, which is how an admin audits the bucketing.
+        BucketMetrics(dto, Model, "medium").MinGrowthPeriodDays.Should().Be(60);
+        BucketMetrics(dto, Model, "medium").MaxGrowthPeriodDays.Should().Be(120);
+    }
+
+    // The full key sequence: every predictor with matured rows gets ALL THREE named buckets in
+    // short/medium/long order — empty ones included, because an EMPTY long bucket in a short window is
+    // the survivorship signal itself — predictors ordered ordinally, and no unknown bucket when no row
+    // needs one.
+    [Fact]
+    public async Task Summary_HorizonBuckets_EveryPredictorCarriesAllThreeNamedBuckets_EmptyOnesIncluded()
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(predictor: Model, growthPeriodDays: 30, percentageError: 5m));
+        store.AddMatured(SRow(predictor: Fallback, growthPeriodDays: 130, percentageError: 40m));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        dto.ByHorizonBucket.Select(g => (g.ActivePredictor, g.HorizonBucket)).Should().ContainInOrder(
+            (Fallback, "short"), (Fallback, "medium"), (Fallback, "long"),
+            (Model, "short"), (Model, "medium"), (Model, "long"));
+        dto.ByHorizonBucket.Should().HaveCount(6, "no unknown bucket exists when no row lacks a growth period");
+
+        // The empty buckets are the empty-Compute shape: zero counts, null metrics — never 0.0.
+        var emptyLong = BucketMetrics(dto, Model, "long");
+        emptyLong.MaturedCount.Should().Be(0);
+        emptyLong.Mape.Should().BeNull();
+        emptyLong.MinGrowthPeriodDays.Should().BeNull();
+        emptyLong.DistinctCropCount.Should().Be(0);
+
+        // And the occupied buckets never pooled across predictors: each one's row stayed its own.
+        BucketMetrics(dto, Model, "short").Mape.Should().Be(5.00m);
+        BucketMetrics(dto, Fallback, "long").Mape.Should().Be(40.00m);
+        BucketMetrics(dto, Fallback, "short").MaturedCount.Should().Be(0);
+    }
+
+    // A matured row with no growth period should be impossible (the writer mints 'pending', the only
+    // maturable state, only when a positive growth period resolved a harvest date) — but no DB
+    // constraint enforces that, so such a row gets an explicit "unknown" bucket and is NEVER silently
+    // dropped: the buckets must partition the group's matured rows exactly.
+    [Fact]
+    public async Task Summary_HorizonBuckets_NullGrowthPeriodRow_GetsTheUnknownBucket_NeverDropped()
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(growthPeriodDays: 90, percentageError: 10m));
+        store.AddMatured(SRow(growthPeriodDays: null, percentageError: 30m));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        var unknown = BucketMetrics(dto, Model, "unknown");
+        unknown.MaturedCount.Should().Be(1);
+        unknown.Mape.Should().Be(30.00m);
+        unknown.MinGrowthPeriodDays.Should().BeNull("there is no growth period to span");
+
+        // The buckets partition the group: their matured counts sum to the predictor group's.
+        dto.ByHorizonBucket.Where(g => g.ActivePredictor == Model).Sum(g => g.Metrics.MaturedCount)
+            .Should().Be(MetricsFor(dto, Model).MaturedCount);
+    }
+
+    // ---------------------------------------------------------------- SUMMARY: macro vs micro
+
+    // THE SIMPSON'S-PARADOX ALARM (audit Critical-3): one heavy crop with bad rows drags the MICRO
+    // figure (every row equal) far above the MACRO figure (every crop equal). Micro answers "how wrong
+    // is a typical prediction", macro "how wrong is a typical crop" — here the typical prediction is
+    // bad (42.50) while the typical crop is much better (20.00), because 10 of 12 rows belong to the
+    // one bad crop. The documented direction: heavy bad crop ⇒ micro ABOVE macro.
+    [Fact]
+    public async Task Summary_MacroAverages_DivergeFromMicro_WhenOneHeavyCropDominates()
+    {
+        var store = new FakeStore();
+        var heavy = Guid.NewGuid();
+        for (var i = 0; i < 10; i++)
+            store.AddMatured(SRow(cropId: heavy, cropName: "Beans", percentageError: 50m));
+        store.AddMatured(SRow(cropId: Guid.NewGuid(), cropName: "Carrot", percentageError: 5m));
+        store.AddMatured(SRow(cropId: Guid.NewGuid(), cropName: "Leeks", percentageError: 5m));
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.DistinctCropCount.Should().Be(3);
+        m.Mape.Should().Be(42.50m);          // (10·50 + 2·5) / 12 — the heavy crop dominates
+        m.MacroMape.Should().Be(20.00m);     // (50 + 5 + 5) / 3 — each crop weighs the same
+        m.MedianApe.Should().Be(50.00m);     // the typical ROW is a heavy-crop row
+        m.MacroMedianApe.Should().Be(20.00m);
+        m.Mape.Should().BeGreaterThan(m.MacroMape!.Value,
+            "a few heavy crops dominating the pooled figure is exactly what the divergence reports");
+    }
+
+    // Over a single crop the two averages are THE SAME number by construction (both round once at
+    // publication) — divergence is a crop-mix fact, never a rounding artifact. That duplication is
+    // exactly why the WIRE never publishes a 1-crop macro: the identity is pinned on the pre-gate
+    // Compute, and the handler path is pinned masking it even at threshold 0 — the crop bar is a
+    // CONSTANT (MinDistinctCropsForMacro), not the row-threshold seam the value tests dial down.
+    [Fact]
+    public async Task Summary_MacroEqualsMicro_ForASingleCropGroup_AndTheWireMasksTheDuplicate()
+    {
+        var store = new FakeStore();
+        foreach (var ape in new[] { 3m, 7m, 11m })
+            store.AddMatured(SRow(percentageError: ape));
+
+        var unmasked = ForecastAccuracyMath.Compute(store.Matured.Select(x => x.Row));
+        unmasked.DistinctCropCount.Should().Be(1);
+        unmasked.MacroMape.Should().Be(unmasked.Mape);
+        unmasked.MacroMedianApe.Should().Be(unmasked.MedianApe);
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+        m.Mape.Should().Be(7.00m); // the micro pair publishes at the tests' threshold 0
+        m.MacroMape.Should().BeNull("1 crop is below MinDistinctCropsForMacro whatever the row threshold");
+        m.MacroMedianApe.Should().BeNull();
+    }
+
+    // ---------------------------------------------------------------- SUMMARY: worst crops
+
+    // Ranked by the (predictor, crop) pair's own medianApe, worst first; a pair below the per-crop
+    // minimum is EXCLUDED however bad it looks — 4 rows at APE 99 is an anecdote, not the worst crop.
+    [Fact]
+    public async Task Summary_WorstCrops_RanksByMedianApeDescending_AndExcludesCropsBelowTheMinimum()
+    {
+        var store = new FakeStore();
+        var beet = Guid.NewGuid();
+        var carrot = Guid.NewGuid();
+        for (var i = 0; i < 5; i++)
+            store.AddMatured(SRow(cropId: beet, cropName: "Beetroot", percentageError: 40m));
+        for (var i = 0; i < 5; i++)
+            store.AddMatured(SRow(cropId: carrot, cropName: "Carrot", percentageError: 10m));
+        for (var i = 0; i < 4; i++) // one short of qualifying
+            store.AddMatured(SRow(cropId: Guid.NewGuid(), cropName: "Leeks", percentageError: 99m));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        dto.WorstCropMinScoredCount.Should().Be(5);
+        dto.WorstCrops.Should().HaveCount(2, "the 4-row crop does not qualify, whatever its APE");
+        dto.WorstCrops.Select(c => c.CropName).Should().ContainInOrder("Beetroot", "Carrot");
+
+        var worst = dto.WorstCrops[0];
+        worst.ActivePredictor.Should().Be(Model); // every entry names the predictor it describes
+        worst.CropId.Should().Be(beet);
+        worst.ScoredCount.Should().Be(5);
+        worst.CopyCount.Should().Be(0); // the default fixture rows are real predictions, not copies
+        worst.MedianApe.Should().Be(40.00m);
+        worst.Mape.Should().Be(40.00m);
+    }
+
+    // SPLIT LAW on the crop axis (PRD §3.4): a crop served by two predictors gets one entry PER
+    // predictor, each carrying that predictor's own figures — never one entry pooling the rows into
+    // the blended number the law forbids. And the qualification minimum counts each predictor's rows
+    // alone: 3 model rows + 2 fallback rows on one crop qualify NOTHING (they used to pool to 5).
+    [Fact]
+    public async Task Summary_WorstCrops_AreKeyedByPredictorAndCrop_NeverPooled()
+    {
+        var store = new FakeStore();
+        var crop = Guid.NewGuid();
+        for (var i = 0; i < 5; i++)
+            store.AddMatured(SRow(predictor: Model, cropId: crop, cropName: "Beans", percentageError: 20m));
+        for (var i = 0; i < 5; i++)
+            store.AddMatured(SRow(predictor: Fallback, cropId: crop, cropName: "Beans", percentageError: 30m));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        dto.WorstCrops.Should().HaveCount(2, "one crop, two predictors — two entries, never a pooled one");
+        var fallbackEntry = dto.WorstCrops.Single(c => c.ActivePredictor == Fallback);
+        fallbackEntry.ScoredCount.Should().Be(5);
+        fallbackEntry.MedianApe.Should().Be(30.00m);
+        var modelEntry = dto.WorstCrops.Single(c => c.ActivePredictor == Model);
+        modelEntry.ScoredCount.Should().Be(5);
+        modelEntry.MedianApe.Should().Be(20.00m);
+        // The worse-served entry ranks first, and neither entry is the 25.00 blend. (Assert.Same, not
+        // .Should(): FluentAssertions 8 binds the enum overload on nullable-annotated references.)
+        Assert.Same(fallbackEntry, dto.WorstCrops[0]);
+        dto.WorstCrops.Should().NotContain(c => c.MedianApe == 25.00m || c.Mape == 25.00m);
+
+        // Below-the-minimum rows of two predictors never combine to qualify a crop.
+        var split = new FakeStore();
+        var other = Guid.NewGuid();
+        for (var i = 0; i < 3; i++)
+            split.AddMatured(SRow(predictor: Model, cropId: other, cropName: "Leeks", percentageError: 20m));
+        for (var i = 0; i < 2; i++)
+            split.AddMatured(SRow(predictor: Fallback, cropId: other, cropName: "Leeks", percentageError: 30m));
+
+        (await SummaryHandler(split).Handle(new GetForecastAccuracySummaryQuery(), default))
+            .Data.WorstCrops.Should().BeEmpty("3 model + 2 fallback rows are two under-minimum groups, not 5");
+    }
+
+    // THE DEGENERATE-KEY FIX (review Blocker 2): copies (pred value-equal to the carry-forward anchor,
+    // the same convention as predictionEqualsReferenceCount) have APE ≈ 0 by construction, so counting
+    // them dragged a misled crop's median to zero and ranked it BELOW a steady crop. The ranking
+    // figures must cover NON-COPY rows only, with the discount disclosed via scoredCount/copyCount.
+    [Fact]
+    public async Task Summary_WorstCrops_CopiesNeverDragTheRanking_AndTheDiscountIsDisclosed()
+    {
+        var store = new FakeStore();
+        var misled = Guid.NewGuid();
+        var steady = Guid.NewGuid();
+        // The misled crop: 10 fallback-style copies at APE 0 burying 5 real misses at APE 90.
+        for (var i = 0; i < 10; i++)
+            store.AddMatured(SRow(cropId: misled, cropName: "Beans", predictedPrice: 100m,
+                referencePrice: 100m, actualPrice: 100m, percentageError: 0m, signedError: 0m));
+        for (var i = 0; i < 5; i++)
+            store.AddMatured(SRow(cropId: misled, cropName: "Beans", percentageError: 90m));
+        // The steady crop: 5 real predictions at APE 6.
+        for (var i = 0; i < 5; i++)
+            store.AddMatured(SRow(cropId: steady, cropName: "Carrot", percentageError: 6m));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        dto.WorstCrops.Should().HaveCount(2);
+        var worst = dto.WorstCrops[0];
+        worst.CropName.Should().Be("Beans", "the crop farmers are misled about ranks FIRST — " +
+            "under the old copy-counting median [0×10, 90×5] it ranked below the steady crop");
+        worst.MedianApe.Should().Be(90.00m); // over the 5 measured forecasts only
+        worst.Mape.Should().Be(90.00m);
+        worst.ScoredCount.Should().Be(15);   // the population disclosure
+        worst.CopyCount.Should().Be(10);     // ...and how much of it was discounted
+        dto.WorstCrops[1].CropName.Should().Be("Carrot");
+        dto.WorstCrops[1].CopyCount.Should().Be(0);
+    }
+
+    // The qualification minimum counts NON-COPY rows: 10 copies cannot promote 4 measured misses into
+    // a ranked entry — 4 measured forecasts is an anecdote whatever the copy traffic around it.
+    [Fact]
+    public async Task Summary_WorstCrops_QualificationCountsNonCopyRowsOnly()
+    {
+        var store = new FakeStore();
+        var crop = Guid.NewGuid();
+        for (var i = 0; i < 10; i++)
+            store.AddMatured(SRow(cropId: crop, cropName: "Beans", predictedPrice: 100m,
+                referencePrice: 100m, actualPrice: 100m, percentageError: 0m, signedError: 0m));
+        for (var i = 0; i < 4; i++) // one measured row short
+            store.AddMatured(SRow(cropId: crop, cropName: "Beans", percentageError: 90m));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        dto.WorstCrops.Should().BeEmpty("scoredCount is 14 but only 4 rows are measured forecasts");
+        dto.WorstCropMinScoredCount.Should().Be(5);
+    }
+
+    // TODAY'S LIVE SHAPE: every matured row is a fallback copy. A crop with no measured forecasts
+    // cannot be ranked — there is no median of zero real predictions to rank it by — so the honest
+    // list is EMPTY with the threshold exposed, not a list of medianApe-0.00 entries whose ranking
+    // fell entirely to the tie-break.
+    [Fact]
+    public async Task Summary_WorstCrops_AllCopyCrop_CannotBeRanked_TheEmptyListIsTheHonestAnswer()
+    {
+        var store = new FakeStore();
+        for (var i = 0; i < 16; i++)
+            store.AddMatured(SRow(predictor: Fallback, cropName: "Beans", predictedPrice: 90m,
+                referencePrice: 90m, actualPrice: 90m, percentageError: 0m, signedError: 0m));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        dto.WorstCrops.Should().BeEmpty("16 scored rows, 0 measured forecasts");
+        dto.WorstCropMinScoredCount.Should().Be(5);
+    }
+
+    // Two honesty bars, both disclosed (review should-fix B): entries qualify at 5 non-copy rows (the
+    // triage threshold) but are BADGED against the same 30-row bar the group metrics publish under —
+    // flagged, not hidden, because hiding a small-n entry would un-rank the very crops the list exists
+    // to surface. The badge covers the non-copy population, not scoredCount.
+    [Fact]
+    public async Task Summary_WorstCrops_PerEntryMeetsMinimumSample_UsesTheMetricsGateOverNonCopyRows()
+    {
+        var store = new FakeStore();
+        var small = Guid.NewGuid();
+        var large = Guid.NewGuid();
+        for (var i = 0; i < 5; i++)
+            store.AddMatured(SRow(cropId: small, cropName: "Beans", percentageError: 80m));
+        for (var i = 0; i < 30; i++)
+            store.AddMatured(SRow(cropId: large, cropName: "Carrot", percentageError: 50m));
+        // 10 copies on the large crop: scoredCount 40, but the badge must key on the 30 measured rows.
+        for (var i = 0; i < 10; i++)
+            store.AddMatured(SRow(cropId: large, cropName: "Carrot", predictedPrice: 100m,
+                referencePrice: 100m, actualPrice: 100m, percentageError: 0m, signedError: 0m));
+
+        // The PRODUCTION handler: the badge threshold rides the same ctor seam as the group gate.
+        var dto = (await ProductionGateHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        dto.WorstCrops.Should().HaveCount(2);
+        var smallEntry = dto.WorstCrops[0]; // worst-ranked AND small-sample — ranked, badged, not hidden
+        smallEntry.CropName.Should().Be("Beans");
+        smallEntry.MedianApe.Should().Be(80.00m);
+        smallEntry.MeetsMinimumSample.Should().BeFalse();
+        var largeEntry = dto.WorstCrops[1];
+        largeEntry.ScoredCount.Should().Be(40);
+        largeEntry.CopyCount.Should().Be(10);
+        largeEntry.MeetsMinimumSample.Should().BeTrue("30 measured rows meet the metrics gate");
+    }
+
+    // A triage list, not a report: capped at 10, keeping the 10 WORST.
+    [Fact]
+    public async Task Summary_WorstCrops_CapAtTen_KeepsTheWorstTen()
+    {
+        var store = new FakeStore();
+        for (var crop = 1; crop <= 11; crop++)
+            for (var i = 0; i < 5; i++)
+                store.AddMatured(SRow(cropId: DeterministicGuid(crop),
+                    cropName: $"Crop{crop:00}", percentageError: crop * 2m));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        dto.WorstCrops.Should().HaveCount(10);
+        dto.WorstCrops[0].CropName.Should().Be("Crop11"); // APE 22, the worst
+        dto.WorstCrops.Select(c => c.CropName).Should().NotContain("Crop01",
+            "the LEAST bad crop is the one the cap drops");
+        dto.WorstCrops.Select(c => c.MedianApe).Should().BeInDescendingOrder();
+    }
+
+    // THE CAP IS PER PREDICTOR (re-review S-2): a single global Take(10) let 11 bad fallback crops
+    // fill every slot and the model's worst crops never appeared — the (predictor, crop) re-keying
+    // had re-introduced starvation through the cap. Each predictor now contributes up to 10 of its
+    // OWN worst entries; the concatenation is re-sorted by the one display ordering, so the result
+    // is still a single deterministic worst-first list.
+    [Fact]
+    public async Task Summary_WorstCrops_CapAppliesPerPredictor_SoOnePredictorCannotStarveTheOther()
+    {
+        var store = new FakeStore();
+        for (var crop = 1; crop <= 11; crop++) // fallback: 11 qualifying crops at APE 5..55
+            for (var i = 0; i < 5; i++)
+                store.AddMatured(SRow(predictor: Fallback, modelVersion: null,
+                    cropId: DeterministicGuid(crop), cropName: $"Fallback{crop:00}",
+                    percentageError: crop * 5m));
+        for (var i = 0; i < 5; i++) // model: one crop worse than every fallback crop...
+            store.AddMatured(SRow(cropId: DeterministicGuid(100), cropName: "ModelWorst",
+                percentageError: 60m));
+        for (var i = 0; i < 5; i++) // ...and one milder than all of them
+            store.AddMatured(SRow(cropId: DeterministicGuid(101), cropName: "ModelMild",
+                percentageError: 3m));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        // 10 + 2, not a global 10: the fallback is truncated to ITS 10, the model keeps both entries.
+        dto.WorstCrops.Should().HaveCount(12);
+        dto.WorstCrops.Count(c => c.ActivePredictor == Fallback).Should().Be(10);
+        dto.WorstCrops.Count(c => c.ActivePredictor == Model).Should().Be(2);
+        dto.WorstCrops.Select(c => c.CropName).Should().NotContain("Fallback01",
+            "the crop the cap drops is the FALLBACK'S least bad, not the list's globally least bad");
+        dto.WorstCrops[0].CropName.Should().Be("ModelWorst"); // APE 60 tops the re-sorted display list
+        dto.WorstCrops[^1].CropName.Should().Be("ModelMild",
+            "APE 3 is milder than the dropped fallback crop's 5, but the cap is per predictor — " +
+            "it stays, re-sorted to the bottom for display");
+        dto.WorstCrops.Select(c => c.MedianApe).Should().BeInDescendingOrder(
+            "the concatenation is re-sorted by the display ordering, deterministically");
+    }
+
+    // Data present but nothing qualifying is still an EMPTY list — with the threshold on the wire, so
+    // the page can say why instead of implying every crop is fine.
+    [Fact]
+    public async Task Summary_WorstCrops_EmptyWhenNoCropQualifies_WithTheThresholdStillOnTheWire()
+    {
+        var store = new FakeStore();
+        for (var i = 0; i < 4; i++)
+            store.AddMatured(SRow(percentageError: 80m));
+
+        var dto = (await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        dto.WorstCrops.Should().BeEmpty();
+        dto.WorstCropMinScoredCount.Should().Be(5);
+    }
+
+    private static Guid DeterministicGuid(int n) =>
+        new(n, 0, 0, new byte[8]); // distinct, stable, ordinal-comparable — enough for ranking fixtures
+
+    // ---------------------------------------------------------------- SUMMARY: the minimum-sample gate
+
+    // Handler at the PRODUCTION threshold (the constructor default DI uses), which the value tests
+    // above deliberately bypass with threshold 0.
+    private static GetForecastAccuracySummaryQueryHandler ProductionGateHandler(FakeStore s) => new(s);
+
+    // One row short of the gate: every magnitude/rate metric is null, every count and disclosure
+    // survives, and the wire says which regime it is in and what the bar is. The page renders
+    // "n=29, below the 30-row minimum" — not a number computed over 29 rows dressed up as a verdict.
+    [Fact]
+    public async Task Summary_Gate_At29ScoredRows_MasksTheMetrics_ButKeepsEveryCountAndDisclosure()
+    {
+        var store = new FakeStore();
+        for (var i = 0; i < 29; i++)
+            store.AddMatured(SRow(percentageError: 5m, signedError: 5m,
+                predictedPrice: 105m, referencePrice: 90m, actualPrice: 100m));
+
+        var m = MetricsFor((await ProductionGateHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.MeetsMinimumSample.Should().BeFalse();
+        m.MinScoredCountForMetrics.Should().Be(30);
+        ForecastAccuracyMath.MinScoredCountForMetrics.Should().Be(30);
+
+        // Masked: everything a reader would take as an accuracy verdict.
+        m.Mape.Should().BeNull();
+        m.MedianApe.Should().BeNull();
+        m.SignedBias.Should().BeNull();
+        m.BaselineMape.Should().BeNull();
+        m.BaselineMedianApe.Should().BeNull();
+        m.SkillVsBaseline.Should().BeNull();
+        m.IntervalCoverage.Should().BeNull();
+        m.IntervalCoverageGap.Should().BeNull();
+        m.DirectionalAccuracy.Should().BeNull();
+        m.MacroMape.Should().BeNull();
+        m.MacroMedianApe.Should().BeNull();
+
+        // Kept: the whole population picture.
+        m.MaturedCount.Should().Be(29);
+        m.ScoredCount.Should().Be(29);
+        m.BaselineScoredCount.Should().Be(29);
+        m.IntervalScoredCount.Should().Be(29);
+        m.WithinIntervalCount.Should().Be(29);
+        m.DirectionalScored.Should().Be(29);
+        m.DistinctCropCount.Should().Be(1);
+        m.MinGrowthPeriodDays.Should().Be(90);
+        m.MaxGrowthPeriodDays.Should().Be(90);
+        m.NominalIntervalCoverage.Should().Be(0.80m); // the yardstick is a constant, not a measurement
+    }
+
+    // The 30th row opens the gate: same seed plus one, and every metric publishes — except the macro
+    // pair, whose SECOND bar (MinDistinctCropsForMacro crops) a single-crop group can never clear;
+    // the crop-bar tests below cover both sides of that bar.
+    [Fact]
+    public async Task Summary_Gate_At30ScoredRows_PublishesTheMetrics()
+    {
+        var store = new FakeStore();
+        for (var i = 0; i < 30; i++)
+            store.AddMatured(SRow(percentageError: 5m, signedError: 5m,
+                predictedPrice: 105m, referencePrice: 90m, actualPrice: 100m));
+
+        var m = MetricsFor((await ProductionGateHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.MeetsMinimumSample.Should().BeTrue();
+        m.Mape.Should().Be(5.00m);
+        m.MedianApe.Should().Be(5.00m);
+        m.SignedBias.Should().Be(5.00m);
+        m.SkillVsBaseline.Should().Be(0.50m); // 5.00 / 10.00
+        m.IntervalCoverage.Should().Be(1.0000m);
+        m.DirectionalAccuracy.Should().Be(1.0000m);
+        m.MacroMape.Should().BeNull("30 rows clear the row bar, but 1 crop is below the macro pair's " +
+            "crop bar — a 1-crop macro would merely duplicate the micro figure above");
+    }
+
+    // THE MACRO CROP BAR, at the re-review's exact failure case: 29 rows of one crop at APE 50 plus
+    // 1 row of another at APE 0. The row gate opens (scored 30) and the micro pair publishes — but a
+    // 2-crop macro would print 25.00 with a SINGLE ROW carrying half the crop-weight, so the macro
+    // pair stays null below MinDistinctCropsForMacro crops, with distinctCropCount on the wire to
+    // say why.
+    [Fact]
+    public async Task Summary_Gate_MacroPair_StaysNullBelowThreeCrops_WhileTheMicroPairPublishes()
+    {
+        var store = new FakeStore();
+        var heavy = Guid.NewGuid();
+        for (var i = 0; i < 29; i++)
+            store.AddMatured(SRow(cropId: heavy, cropName: "Beans", percentageError: 50m));
+        store.AddMatured(SRow(cropId: Guid.NewGuid(), cropName: "Carrot", percentageError: 0m));
+
+        var m = MetricsFor((await ProductionGateHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        ForecastAccuracyMath.MinDistinctCropsForMacro.Should().Be(3);
+        m.ScoredCount.Should().Be(30);
+        m.MeetsMinimumSample.Should().BeTrue(); // the headline decision keys on rows alone
+        m.Mape.Should().Be(48.33m);             // (29·50 + 0) / 30 — the micro pair publishes
+        m.MedianApe.Should().Be(50.00m);
+        m.DistinctCropCount.Should().Be(2);     // ...but 2 crops cannot say what a "typical crop" does
+        m.MacroMape.Should().BeNull();
+        m.MacroMedianApe.Should().BeNull();
+    }
+
+    // The third crop opens the crop bar: the same heavy-crop shape with one more crop, and the macro
+    // pair publishes with equal CROP weight.
+    [Fact]
+    public async Task Summary_Gate_MacroPair_PublishesAtThreeCrops()
+    {
+        var store = new FakeStore();
+        var heavy = Guid.NewGuid();
+        for (var i = 0; i < 28; i++)
+            store.AddMatured(SRow(cropId: heavy, cropName: "Beans", percentageError: 50m));
+        store.AddMatured(SRow(cropId: Guid.NewGuid(), cropName: "Carrot", percentageError: 0m));
+        store.AddMatured(SRow(cropId: Guid.NewGuid(), cropName: "Leeks", percentageError: 10m));
+
+        var m = MetricsFor((await ProductionGateHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.ScoredCount.Should().Be(30);
+        m.DistinctCropCount.Should().Be(3);
+        m.MacroMape.Should().Be(20.00m);      // (50 + 0 + 10) / 3 — each crop weighs the same
+        m.MacroMedianApe.Should().Be(20.00m); // per-crop medians 50 / 0 / 10, same equal weight
+    }
+
+    // TODAY'S LIVE HEADLINE, gated on purpose (audit Critical-3): 16 fallback copy rows used to print
+    // MAPE 4.92 as if it meant something. Under the gate the verdict metrics are null — but the A1
+    // copy counts, the A2 degenerate bucket and the A3 census all survive untouched, so the page still
+    // shows WHAT the 16 rows are (all copies, none directionally scorable, ledger alive), just not a
+    // 16-row number wearing a verdict's clothes.
+    [Fact]
+    public async Task Summary_Gate_LeavesTheCopyCounts_TheDegenerateBucket_AndTheCensusUntouched()
+    {
+        var store = new FakeStore();
+        for (var i = 0; i < 16; i++)
+            store.AddMatured(SRow(predictor: Fallback, modelVersion: null, predictedPrice: 90m,
+                actualPrice: 90m, referencePrice: 90m, percentageError: 0m, signedError: 0m));
+        store.AddPending(Fallback, null, harvestDate: DateOnly.FromDateTime(DateTime.UtcNow).AddDays(20));
+
+        var dto = (await ProductionGateHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+        var g = dto.ByActivePredictor.Single(x => x.ActivePredictor == Fallback);
+
+        g.Metrics.MeetsMinimumSample.Should().BeFalse();
+        g.Metrics.Mape.Should().BeNull();
+        g.Metrics.DirectionalAccuracy.Should().BeNull();
+
+        // A1: the copy disclosure survives — a fact about what the predictions ARE, not a skill claim.
+        g.Metrics.PredictionEqualsReferenceCount.Should().Be(16);
+        g.Metrics.PredictionEqualsReferenceShare.Should().Be(1.0000m);
+        // A2: the degenerate partition survives.
+        g.Metrics.DirectionalScored.Should().Be(0);
+        g.Metrics.DirectionalDegenerate.Should().Be(16);
+        g.Metrics.DirectionalExcluded.Should().Be(0);
+        // A3: the census survives whole.
+        g.Census.Matured.Should().Be(16);
+        g.Census.Pending.Should().Be(1);
+        g.Census.Total.Should().Be(17);
+    }
+
+    // The gate is per GROUP, not per response: a model bucket with 30 scored rows publishes while the
+    // fallback's 5-row groups mask, in the same summary — on the predictor list, the version list and
+    // the horizon buckets alike.
+    [Fact]
+    public async Task Summary_Gate_AppliesPerGroup_AcrossPredictorVersionAndBucketLists()
+    {
+        var store = new FakeStore();
+        for (var i = 0; i < 30; i++)
+            store.AddMatured(SRow(predictor: Model, modelVersion: "v17",
+                growthPeriodDays: 30, percentageError: 5m));
+        for (var i = 0; i < 5; i++)
+            store.AddMatured(SRow(predictor: Fallback, modelVersion: null, percentageError: 40m));
+
+        var dto = (await ProductionGateHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data;
+
+        MetricsFor(dto, Model).Mape.Should().Be(5.00m);
+        MetricsFor(dto, Fallback).Mape.Should().BeNull();
+        MetricsFor(dto, Fallback).ScoredCount.Should().Be(5);
+
+        dto.ByModelVersion.Single(g => g.ModelVersion == "v17").Metrics.Mape.Should().Be(5.00m);
+        dto.ByModelVersion.Single(g => g.ModelVersion == null).Metrics.Mape.Should().BeNull();
+
+        BucketMetrics(dto, Model, "short").Mape.Should().Be(5.00m);
+        BucketMetrics(dto, Model, "short").MeetsMinimumSample.Should().BeTrue();
+        BucketMetrics(dto, Fallback, "medium").Mape.Should().BeNull();
+        BucketMetrics(dto, Fallback, "medium").ScoredCount.Should().Be(5);
+    }
+
+    // PER-DENOMINATOR GATING (review should-fix A). The page prints each rate beside its OWN n, so
+    // the gate must key on that same n. Probe (i): 30 scored rows of which 28 are copies — the
+    // directional figure covers directionalScored=2 rows and would have published 100% under a
+    // scoredCount-keyed gate. It must be null while the headline mape (n=30) publishes.
+    [Fact]
+    public async Task Summary_Gate_DirectionalAccuracy_IsGatedOnDirectionalScored_NotScoredCount()
+    {
+        var store = new FakeStore();
+        for (var i = 0; i < 28; i++) // copies: scored, but directionally DEGENERATE
+            store.AddMatured(SRow(predictedPrice: 90m, referencePrice: 90m, actualPrice: 100m,
+                percentageError: -10m, signedError: -10m));
+        for (var i = 0; i < 2; i++)  // the only two real directional claims — both hits
+            store.AddMatured(SRow(predictedPrice: 105m, referencePrice: 90m, actualPrice: 100m,
+                percentageError: 5m, signedError: 5m));
+
+        var m = MetricsFor((await ProductionGateHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.ScoredCount.Should().Be(30);
+        m.MeetsMinimumSample.Should().BeTrue(); // the headline population meets the bar...
+        m.Mape.Should().NotBeNull();
+        m.DirectionalScored.Should().Be(2);
+        m.DirectionalDegenerate.Should().Be(28);
+        m.DirectionalAccuracy.Should().BeNull("2 directionally scored rows are below the 30-row bar, " +
+            "whatever scoredCount says — the 100% would have been printed beside n=2");
+    }
+
+    // Probe (ii): 30 scored rows of which only 3 carry the plant-day anchor — the baseline trio covers
+    // baselineScoredCount=3 rows and must be null while the headline (n=30) publishes.
+    [Fact]
+    public async Task Summary_Gate_BaselineAndSkill_AreGatedOnBaselineScoredCount_NotScoredCount()
+    {
+        var store = new FakeStore();
+        for (var i = 0; i < 27; i++) // anchorless: scored, but invisible to the baseline
+            store.AddMatured(SRow(referencePrice: null, percentageError: 5m, signedError: 5m));
+        for (var i = 0; i < 3; i++)
+            store.AddMatured(SRow(predictedPrice: 105m, referencePrice: 90m, actualPrice: 100m,
+                percentageError: 5m, signedError: 5m));
+
+        var m = MetricsFor((await ProductionGateHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.ScoredCount.Should().Be(30);
+        m.MeetsMinimumSample.Should().BeTrue();
+        m.Mape.Should().Be(5.00m);
+        m.BaselineScoredCount.Should().Be(3);
+        m.BaselineMape.Should().BeNull("3 anchored rows are below the 30-row bar");
+        m.BaselineMedianApe.Should().BeNull();
+        m.SkillVsBaseline.Should().BeNull();
+    }
+
+    // Probe (iii), the other direction: 210 interval verdicts on rows whose error columns are null —
+    // intervalCoverage covers intervalScoredCount=210 and must PUBLISH, even though scoredCount=10
+    // masks the error metrics. A scoredCount-keyed gate showed "n=210" beside a null labelled
+    // below-minimum.
+    [Fact]
+    public async Task Summary_Gate_IntervalCoverage_IsGatedOnIntervalScoredCount_AndPublishesWhileMapeMasks()
+    {
+        var store = new FakeStore();
+        for (var i = 0; i < 200; i++) // interval verdict present, error columns never written
+            store.AddMatured(SRow(percentageError: null, signedError: null, withinInterval: true));
+        for (var i = 0; i < 10; i++)
+            store.AddMatured(SRow(percentageError: 5m, signedError: 5m, withinInterval: false));
+
+        var m = MetricsFor((await ProductionGateHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.ScoredCount.Should().Be(10);
+        m.MeetsMinimumSample.Should().BeFalse(); // ...and the headline flag says so
+        m.Mape.Should().BeNull();
+        m.IntervalScoredCount.Should().Be(210);
+        m.IntervalCoverage.Should().Be(0.9524m, "210 interval verdicts are ABOVE the bar — masking " +
+            "them because the error metrics are thin would print n=210 beside an unexplained null");
+        m.IntervalCoverageGap.Should().Be(0.1524m);
+    }
+
+    // ---------------------------------------------------------------- SUMMARY: growth-period disclosures
+
+    // The span covers the SCORED rows — the population the metrics describe. A matured-but-unscored
+    // row's growth period must not stretch the range the page prints beside the metrics, and a group
+    // with nothing scored answers null, never a fabricated 0.
+    [Fact]
+    public async Task Summary_GrowthPeriodSpan_CoversScoredRowsOnly_AndIsNullWhenNothingIsScored()
+    {
+        var store = new FakeStore();
+        store.AddMatured(SRow(growthPeriodDays: 30, percentageError: 5m));
+        store.AddMatured(SRow(growthPeriodDays: 150, percentageError: 8m));
+        // Matured but never scored (null error columns): its 200 days is not part of the metrics'
+        // population.
+        store.AddMatured(SRow(growthPeriodDays: 200, percentageError: null, signedError: null));
+
+        var m = MetricsFor((await SummaryHandler(store).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+
+        m.ScoredCount.Should().Be(2);
+        m.MinGrowthPeriodDays.Should().Be(30);
+        m.MaxGrowthPeriodDays.Should().Be(150); // NOT 200 — the unscored row is not in the population
+        m.DistinctCropCount.Should().Be(1);
+
+        // The survivorship reading this disclosure exists for: a fallback group whose scored rows top
+        // out at 45 days is a group long-horizon crops CANNOT have matured into yet.
+        var shortOnly = new FakeStore();
+        shortOnly.AddMatured(SRow(predictor: Fallback, growthPeriodDays: 45, percentageError: 5m));
+        var f = MetricsFor((await SummaryHandler(shortOnly).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Fallback);
+        f.MaxGrowthPeriodDays.Should().Be(45);
+
+        // Nothing scored at all ⇒ null span, zero crops.
+        var unscored = new FakeStore();
+        unscored.AddMatured(SRow(percentageError: null, signedError: null));
+        var u = MetricsFor((await SummaryHandler(unscored).Handle(new GetForecastAccuracySummaryQuery(), default)).Data, Model);
+        u.MinGrowthPeriodDays.Should().BeNull();
+        u.MaxGrowthPeriodDays.Should().BeNull();
+        u.DistinctCropCount.Should().Be(0);
+    }
+
     // ---------------------------------------------------------------- SNAPSHOTS: paging and filters
 
     [Fact]
@@ -1408,6 +2126,56 @@ public class ForecastAccuracyHandlerTests
         // ?windowDays= binds and reaches the store as a cutoff date rather than being silently dropped.
         dto.WindowDays.Should().Be(30);
         store.CapturedFromSnapshotDate.Should().Be(DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-30));
+    }
+
+    // ---------------------------------------------------------------- DI SEAM
+
+    // THE PRODUCTION THRESHOLD, resolved through real DI (review should-fix D). The handler's gate
+    // threshold is a DEFAULTED ctor int — production takes the default because MS.DI cannot resolve an
+    // int. That seam is silently overridable: anyone registering an `int` service (or adding a second
+    // constructor) changes the production threshold with every handler unit test still green, because
+    // those construct the handler by hand. So build the container the way the API's composition root
+    // does — Program.cs calls AddApplicationLayer() for MediatR/validators; the store registration
+    // mirrors InfsDependencyInjection's AddScoped line (AddInfrastructure itself needs a configured
+    // DbContext, which this handler never touches) — resolve through IMediator, and pin the threshold
+    // the resolved handler actually ran with.
+    [Fact]
+    public async Task Summary_ResolvedThroughRealDi_RunsAtTheProductionThreshold()
+    {
+        var store = new FakeStore();
+        for (var i = 0; i < 5; i++) // enough to publish under the tests' threshold 0, not under 30
+            store.AddMatured(SRow(percentageError: 5m));
+
+        var services = new ServiceCollection();
+        // The real API host registers logging by default; without it MediatR 13's LicenseAccessor
+        // cannot be constructed from a bare ServiceCollection.
+        services.AddLogging();
+        services.AddApplicationLayer();
+        services.AddScoped<IForecastAccuracyReadStore>(_ => store);
+
+        // The named gap, closed as far as the composed collection goes: the threshold seam exists
+        // because MS.DI cannot resolve an int — so a rogue ServiceDescriptor with ServiceType
+        // typeof(int) is exactly what would satisfy the defaulted ctor parameter and silently move
+        // the production threshold. Assert the composition contains none. (AddInfrastructure is
+        // deliberately not composed here — see the header — so the guard covers the collection this
+        // test actually builds, not the full API host.)
+        services.Should().NotContain(d => d.ServiceType == typeof(int),
+            "an `int` registration would override the handler's defaulted gate-threshold seam");
+
+        await using var provider = services.BuildServiceProvider();
+        using var scope = provider.CreateScope();
+        var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
+
+        var result = await mediator.Send(new GetForecastAccuracySummaryQuery());
+
+        result.IsSuccess.Should().BeTrue();
+        var m = MetricsFor(result.Data, Model);
+        m.MinScoredCountForMetrics.Should().Be(30,
+            "the DI-resolved handler must run at ForecastAccuracyMath.MinScoredCountForMetrics — " +
+            "an `int` registration or a second constructor would silently change this");
+        m.ScoredCount.Should().Be(5);
+        m.MeetsMinimumSample.Should().BeFalse();
+        m.Mape.Should().BeNull("5 rows must be gated at the production threshold");
     }
 
     // The maturity-state strings on the wire are the shared .NET/Python contract, not free text: prove

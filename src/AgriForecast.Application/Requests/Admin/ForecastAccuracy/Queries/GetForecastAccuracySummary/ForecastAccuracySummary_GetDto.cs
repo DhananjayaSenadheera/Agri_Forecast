@@ -46,6 +46,33 @@ public class ForecastAccuracySummary_GetDto
     // key: a version's rows are still split model-vs-fallback, because a version that mostly fell back
     // is not a version that was mostly right.
     public List<ModelVersionAccuracy_GetDto> ByModelVersion { get; set; } = new();
+
+    // Matured rows bucketed by growth period, keyed by (activePredictor, horizonBucket) — the
+    // survivorship breakdown: /summary windows on snapshotDate but a row matures only at snapshotDate
+    // + growthPeriodDays, so a short window structurally contains fast-growing crops only, and pooling
+    // them was audit Critical-3's Simpson's-paradox trap. Every predictor with ANY matured rows in the
+    // window carries all three named buckets (short/medium/long), empty ones with zero counts and null
+    // metrics; "unknown" appears only if a matured row has no growth period. Empty when nothing has
+    // matured in the window at all.
+    public List<HorizonBucketAccuracy_GetDto> ByHorizonBucket { get; set; } = new();
+
+    // Up to 10 (activePredictor, crop) entries PER PREDICTOR — each predictor contributes up to
+    // worstCropsMaxEntries of its own worst crops and the concatenation is re-sorted worst-first for
+    // display (a single global cap let one predictor's bad crops starve the other's off the list
+    // entirely) — ranked by their own medianApe over the window's NON-COPY scored rows, among pairs
+    // with at least worstCropMinScoredCount of them. The predictor stays in the key (split law — a
+    // crop entry pooling its predictors would blend
+    // model-served and fallback-served rows), and copies (prediction == carry-forward anchor) never
+    // qualify a crop nor move its figures: a crop whose rows are all copies has no measured forecasts
+    // to rank. Empty therefore means "no (predictor, crop) pair has enough MEASURED forecasts yet" —
+    // today's live all-fallback-copies data yields exactly this, and the empty list plus the exposed
+    // threshold IS the honest answer, NOT "no crop is bad".
+    public List<WorstCropAccuracy_GetDto> WorstCrops { get; set; } = new();
+
+    // The qualification threshold in effect for worstCrops — minimum NON-COPY scored rows per
+    // (predictor, crop) pair (the production constant, echoed so an empty list is explainable without
+    // hard-coding 5 in the FE).
+    public int WorstCropMinScoredCount { get; set; }
 }
 
 // Row counts per maturity state. The four states are the values in ForecastSnapshotMaturityStates.

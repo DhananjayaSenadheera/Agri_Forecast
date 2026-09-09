@@ -22,9 +22,10 @@ public class AdminForecastAccuracyController(IMediator mediator) : ControllerBas
     };
 
     // GET /api/admin/forecast-accuracy/summary?windowDays=365 — all-time state counts plus the accuracy
-    // aggregates over the last windowDays, split by active predictor and by (model version, active
-    // predictor). Bad windowDays -> 400 (GetForecastAccuracySummaryValidator). An empty table is a 200
-    // with zero counts and empty groups.
+    // aggregates over the last windowDays, split by active predictor, by (model version, active
+    // predictor) and by (active predictor, horizon bucket), plus the worst-crops triage list (entries
+    // keyed by (active predictor, crop), ranked over non-copy scored rows). Bad windowDays -> 400
+    // (GetForecastAccuracySummaryValidator). An empty table is a 200 with zero counts and empty groups.
     [HttpGet("summary")]
     public async Task<IActionResult> GetSummary(
         [FromQuery] int windowDays = GetForecastAccuracySummaryQuery.DefaultWindowDays)
