@@ -47,18 +47,30 @@ public class ForecastAccuracyReadStore : IForecastAccuracyReadStore
         // MATURED ONLY, and only inside the caller's window. The other three states carry no actual
         // price to score against, and letting one through would move a metric without ever showing up
         // as a row in the ledger.
+        //
+        // Inner join to Crops for the display name, same shape as GetSnapshotsPageAsync: the FK is
+        // Restrict, so a snapshot's crop always exists and the join can never drop a matured row from
+        // the aggregates. One query — the crop-level aggregation downstream must never need a second
+        // read per crop.
         return await _db.ForecastSnapshots.AsNoTracking()
             .Where(s => s.MaturityState == ForecastSnapshotMaturityStates.Matured)
             .Where(s => s.SnapshotDate >= fromSnapshotDate)
-            .Select(s => new ForecastSnapshotScoringRow(
-                s.ActivePredictor,
-                s.ModelVersion,
-                s.PredictedPrice,
-                s.ActualPrice,
-                s.ReferencePrice,
-                s.SignedError,
-                s.PercentageError,
-                s.WithinInterval))
+            .Join(
+                _db.Crops,
+                s => s.CropId,
+                c => c.Id,
+                (s, c) => new ForecastSnapshotScoringRow(
+                    s.ActivePredictor,
+                    s.ModelVersion,
+                    s.PredictedPrice,
+                    s.ActualPrice,
+                    s.ReferencePrice,
+                    s.SignedError,
+                    s.PercentageError,
+                    s.WithinInterval,
+                    s.CropId,
+                    c.Name,
+                    s.GrowthPeriodDays))
             .ToListAsync(ct);
     }
 

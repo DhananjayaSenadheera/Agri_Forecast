@@ -19,8 +19,10 @@ public interface IForecastAccuracyReadStore
     //
     // Deliberately a lean row projection rather than a SQL GROUP BY: the headline metric is the MEDIAN
     // absolute percentage error, which EF cannot translate, and computing half the metrics in SQL and
-    // half in memory is how the two drift apart. Eight scalar columns per row over a bounded window is
-    // a small read for an admin-only page.
+    // half in memory is how the two drift apart. Eleven scalar columns per row over a bounded window is
+    // a small read for an admin-only page — and the crop join stays inside this ONE query (the crop
+    // display name rides along on every row), so the crop-level aggregates never trigger a per-crop
+    // lookup.
     Task<IReadOnlyList<ForecastSnapshotScoringRow>> GetMaturedScoringRowsAsync(
         DateOnly fromSnapshotDate, CancellationToken ct = default);
 
@@ -89,6 +91,16 @@ public sealed record ForecastSnapshotGroupCensusRow(
 // the do-nothing BASELINE, whose error is recomputed from ReferencePrice and ActualPrice by design —
 // the ledger stores no baseline error, so there is nothing stored to disagree with (the formula
 // mirrors the Python convention; see ForecastAccuracyMath).
+//
+// CropId/CropName (an inner join to Crops; the Restrict FK means the join can never drop a row) and
+// GrowthPeriodDays feed the crop-level and horizon-level aggregation — CropName is the CURRENT
+// Crops.Name at read time (the join), NOT a snapshot-time value, whereas GrowthPeriodDays is VINTAGE,
+// stored on the snapshot row exactly as served: the macro-averages, the
+// worst-crops ranking and the horizon buckets. GrowthPeriodDays is nullable HERE even though the
+// matured read should never return a null: the Python writer mints 'pending' only when a positive
+// growth period resolved a harvest date, and only pending rows can mature — but that is a WRITER
+// convention, not a DB constraint (same gap as HarvestDate on the census row above), so the
+// aggregation null-guards with an explicit "unknown" bucket rather than trusting it blindly.
 public sealed record ForecastSnapshotScoringRow(
     string ActivePredictor,
     string? ModelVersion,
@@ -97,7 +109,10 @@ public sealed record ForecastSnapshotScoringRow(
     decimal? ReferencePrice,
     decimal? SignedError,
     decimal? PercentageError,
-    bool? WithinInterval);
+    bool? WithinInterval,
+    Guid CropId,
+    string CropName,
+    int? GrowthPeriodDays);
 
 // One ForecastSnapshots row projected for the admin list, with the crop's display fields joined on.
 public sealed record ForecastSnapshotListRow(
